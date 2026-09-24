@@ -1,0 +1,35 @@
+# Unity-generated caches and local editor state
+/Library/
+/Temp/
+/Obj/
+/obj/
+/Logs/
+/UserSettings/
+/MemoryCaptures/
+/Recordings/
+/.vs/
+/.vscode/
+
+# Local/runtime and generated build output
+/Build/
+/Builds/
+/rat-habitat-save.json
+*.apk
+*.aab
+*.exe
+*.pdb
+*.unitypackage
+
+# Generated IDE/project files
+*.csproj
+*.sln
+*.suo
+*.userprefs
+
+# Codex/user-provided screenshots copied into the workspace
+/.codex-remote-attachments/
+
+# Generated art/debug previews and logs
+/Tools/preview/
+/Tools/*.log
+/Tools/*.blend1

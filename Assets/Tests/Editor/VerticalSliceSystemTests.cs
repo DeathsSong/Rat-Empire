@@ -1,0 +1,258 @@
+#if UNITY_EDITOR
+using System.Collections.Generic;
+using NUnit.Framework;
+using UnityEditor;
+using UnityEngine;
+
+namespace RatHabitat.Tests
+{
+    public class VerticalSliceSystemTests
+    {
+        [Test]
+        public void FoundersAreAdultAndHaveExactlyTwoAllelesPerLocus()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            Assert.AreEqual(2, save.rats.Count);
+            Assert.AreEqual(RatStage.Adult, save.rats[0].stage);
+            Assert.AreEqual(RatStage.Adult, save.rats[1].stage);
+            foreach (var rat in save.rats)
+            {
+                Assert.AreEqual(4, rat.genotype.loci.Count);
+                foreach (var locus in rat.genotype.loci)
+                {
+                    Assert.IsFalse(string.IsNullOrEmpty(locus.firstAllele));
+                    Assert.IsFalse(string.IsNullOrEmpty(locus.secondAllele));
+                }
+            }
+        }
+
+        [Test]
+        public void PreviewIsDeterministicAndDoesNotCreateRats()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            var first = save.rats[0];
+            var second = save.rats[1];
+            int before = save.rats.Count;
+            var one = GeneticsSystem.BuildPreview(first, second);
+            var two = GeneticsSystem.BuildPreview(first, second);
+            Assert.AreEqual(before, save.rats.Count);
+            Assert.AreEqual(one.loci.Count, two.loci.Count);
+            Assert.AreEqual(one.furOutcomes.Count, two.furOutcomes.Count);
+            for (int i = 0; i < one.loci.Count; i++)
+            {
+                Assert.AreEqual(one.loci[i].parentA, two.loci[i].parentA);
+                Assert.AreEqual(one.loci[i].parentB, two.loci[i].parentB);
+                Assert.AreEqual(one.loci[i].outcomes.Count, two.loci[i].outcomes.Count);
+            }
+        }
+
+        [Test]
+        public void BreedingCreatesPinkiesWithHiddenFurAndLineage()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            PregnancyData pregnancy;
+            string reason;
+            Assert.IsTrue(BreedingSystem.StartBreeding(save, save.rats[0], save.rats[1], 2000000L, out pregnancy, out reason), reason);
+            LitterData litter;
+            Assert.IsTrue(BreedingSystem.FinishPregnancy(save, pregnancy.id, 2001000L, out litter, out reason), reason);
+            Assert.GreaterOrEqual(litter.size, GameConfig.MinimumLitterSize);
+            Assert.LessOrEqual(litter.size, GameConfig.MaximumLitterSize);
+            foreach (var pupId in litter.pupIds)
+            {
+                RatData pup = BreedingSystem.FindRat(save, pupId);
+                Assert.IsNotNull(pup);
+                Assert.AreEqual(RatStage.Pinkie, pup.stage);
+                Assert.AreEqual(litter.id, pup.litterId);
+                Assert.AreEqual(litter.motherId, pup.motherId);
+                Assert.AreEqual(litter.fatherId, pup.fatherId);
+                Assert.IsFalse(pup.phenotype.furRevealed);
+                Assert.AreEqual("Unknown", pup.phenotype.coatColorLabel);
+                Assert.AreEqual(4, pup.genotype.loci.Count);
+            }
+        }
+
+        [Test]
+        public void EnclosuresFollowPregnancyBirthAndDependentPinkieGrowth()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            RatData mother = save.rats[0];
+            RatData father = save.rats[1];
+            Assert.AreEqual(RatEnclosure.FemaleColony, mother.enclosure);
+            Assert.AreEqual(RatEnclosure.MaleColony, father.enclosure);
+
+            PregnancyData pregnancy;
+            string reason;
+            Assert.IsTrue(BreedingSystem.StartBreeding(save, mother, father, 2000000L, out pregnancy, out reason), reason);
+            EnclosureSystem.RecalculateAssignments(save);
+            Assert.AreEqual(RatEnclosure.Nursery, mother.enclosure);
+            Assert.IsFalse(mother.nursing);
+            Assert.AreEqual(RatEnclosure.MaleColony, father.enclosure);
+
+            LitterData litter;
+            Assert.IsTrue(BreedingSystem.FinishPregnancy(save, pregnancy.id, 2001000L, out litter, out reason), reason);
+            EnclosureSystem.RecalculateAssignments(save);
+            Assert.AreEqual(RatEnclosure.Nursery, mother.enclosure);
+            Assert.IsTrue(mother.nursing);
+            foreach (var pupId in litter.pupIds)
+            {
+                Assert.AreEqual(RatEnclosure.Nursery, BreedingSystem.FindRat(save, pupId).enclosure);
+            }
+
+            foreach (var pupId in litter.pupIds)
+            {
+                RatData pup = BreedingSystem.FindRat(save, pupId);
+                Assert.IsTrue(GrowthSystem.AdvanceRatToNextStage(pup, 3000000L));
+            }
+            EnclosureSystem.RecalculateAssignments(save);
+            Assert.IsFalse(mother.nursing);
+            Assert.AreEqual(RatEnclosure.FemaleColony, mother.enclosure);
+            foreach (var pupId in litter.pupIds)
+            {
+                RatData pup = BreedingSystem.FindRat(save, pupId);
+                Assert.AreEqual(pup.sex == RatSex.Male ? RatEnclosure.MaleColony : RatEnclosure.FemaleColony, pup.enclosure);
+            }
+        }
+
+        [Test]
+        public void RemovingTheLastDependentPinkieReleasesItsMother()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            RatData mother = save.rats[0];
+            RatData father = save.rats[1];
+            PregnancyData pregnancy;
+            string reason;
+            Assert.IsTrue(BreedingSystem.StartBreeding(save, mother, father, 2000000L, out pregnancy, out reason), reason);
+            LitterData litter;
+            Assert.IsTrue(BreedingSystem.FinishPregnancy(save, pregnancy.id, 2001000L, out litter, out reason), reason);
+            EnclosureSystem.RecalculateAssignments(save);
+            Assert.IsTrue(mother.nursing);
+
+            foreach (var pupId in litter.pupIds)
+            {
+                save.rats.RemoveAll(rat => rat != null && rat.id == pupId);
+                EnclosureSystem.RecalculateAssignments(save);
+                if (EnclosureSystem.HasDependentPinkies(save, mother.id)) Assert.IsTrue(mother.nursing);
+            }
+            Assert.IsFalse(mother.nursing);
+            Assert.AreEqual(RatEnclosure.FemaleColony, mother.enclosure);
+        }
+
+        [Test]
+        public void PhysicalEnclosuresAreSeparateAndNurseryIsNestedInFemaleBounds()
+        {
+            EnclosureSystem.Definition male = EnclosureSystem.GetDefinition(RatEnclosure.MaleColony);
+            EnclosureSystem.Definition female = EnclosureSystem.GetDefinition(RatEnclosure.FemaleColony);
+            EnclosureSystem.Definition nursery = EnclosureSystem.GetDefinition(RatEnclosure.Nursery);
+
+            Assert.Less(male.maxX, female.minX, "Male and female cages must have a visible gap.");
+            Assert.GreaterOrEqual(nursery.minX, female.minX);
+            Assert.LessOrEqual(nursery.maxX, female.maxX);
+            Assert.GreaterOrEqual(nursery.minZ, female.minZ);
+            Assert.LessOrEqual(nursery.maxZ, female.maxZ);
+            Assert.IsTrue(EnclosureSystem.IsBehaviorPointAllowed(RatEnclosure.FemaleColony, new Vector3(1.5f, 0.45f, 4f)));
+            Assert.IsFalse(EnclosureSystem.IsBehaviorPointAllowed(RatEnclosure.FemaleColony, nursery.Center));
+            Assert.IsTrue(EnclosureSystem.IsBehaviorPointAllowed(RatEnclosure.Nursery, nursery.Center));
+        }
+
+        [Test]
+        public void DeveloperGrowthRevealsFurAndPersistsTheGrowthAnchor()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            var rat = ColonyFactory.CreateRat("pup", "Pup", RatSex.Female, 1000000L, 1, save.rats[0].genotype.Clone(), new TraitData(50f, 50f, 50f), RatStage.Pinkie);
+            save.rats.Add(rat);
+            save.clock.gameTimeMs = 3000000L;
+            Assert.IsTrue(GrowthSystem.AdvanceRatToNextStage(rat, save.clock.gameTimeMs));
+            Assert.AreEqual(RatStage.YoungRat, rat.stage);
+            Assert.IsTrue(rat.phenotype.furRevealed);
+            Assert.IsTrue(rat.developerGrowthOverride);
+            float age = rat.ageDays;
+            GrowthSystem.RefreshRatStages(save);
+            Assert.GreaterOrEqual(rat.ageDays, age);
+            Assert.AreEqual(RatStage.YoungRat, rat.stage);
+        }
+
+        [Test]
+        public void DeveloperPhenotypeCoatsUseDistinctImportedMaterialPaths()
+        {
+            var factoryHost = new GameObject("Developer Phenotype Material Test Factory");
+            var visualParent = new GameObject("Developer Phenotype Material Test Parent").transform;
+            var factory = factoryHost.AddComponent<RatVisualFactory>();
+            factory.handPaintedRatPrefab = AssetDatabase.LoadAssetAtPath<GameObject>("Assets/Prefabs/HandPaintedRat/HandPaintedRat.prefab");
+            Assert.IsNotNull(factory.handPaintedRatPrefab, "The imported Hand Painted Rat prefab is not available at the expected asset path.");
+
+            try
+            {
+                AssertDeveloperCoat(factory, visualParent, "Albino", "B", "B", "c", "c", "D", "D", "s", "s", "albino", "rat_bege_psd", true, false);
+                AssertDeveloperCoat(factory, visualParent, "Diluted Brown", "b", "b", "C", "C", "d", "d", "s", "s", "diluted-brown", "rat_khaki", false, false);
+                AssertDeveloperCoat(factory, visualParent, "Solid Brown", "b", "b", "C", "C", "D", "D", "s", "s", "brown", "rat_khaki", false, false);
+                AssertDeveloperCoat(factory, visualParent, "Solid Black", "B", "B", "C", "C", "D", "D", "s", "s", "black", "rat_grey", false, false);
+                AssertDeveloperCoat(factory, visualParent, "Diluted Black", "B", "B", "C", "C", "d", "d", "s", "s", "diluted-black", "rat_grey", false, false);
+                AssertDeveloperCoat(factory, visualParent, "Spotted Brown", "b", "b", "C", "C", "D", "D", "S", "S", "brown", "rat_khaki", false, true);
+            }
+            finally
+            {
+                Object.DestroyImmediate(visualParent.gameObject);
+                Object.DestroyImmediate(factoryHost);
+            }
+        }
+
+        private static void AssertDeveloperCoat(
+            RatVisualFactory factory,
+            Transform parent,
+            string label,
+            string b1,
+            string b2,
+            string c1,
+            string c2,
+            string d1,
+            string d2,
+            string s1,
+            string s2,
+            string expectedCoatId,
+            string expectedTexture,
+            bool expectedAlbinoMode,
+            bool expectedSpotted)
+        {
+            var genotype = GeneticsSystem.CreateFounder(b1, b2, c1, c2, d1, d2, s1, s2);
+            var rat = ColonyFactory.CreateRat("developer-test-" + label, label, RatSex.Female, 0L, 0, genotype, new TraitData(60f, 100f, 75f), RatStage.Adult);
+            Assert.AreEqual(expectedCoatId, rat.phenotype.coatColorId, label + " coat phenotype");
+            Assert.AreEqual(expectedSpotted, rat.phenotype.spotted, label + " spotting phenotype");
+            Assert.AreEqual(GeneticsSystem.FormatPair("B", b1, b2), GeneticsSystem.FormatPair(rat.genotype, "B"), label + " B locus");
+            Assert.AreEqual(GeneticsSystem.FormatPair("C", c1, c2), GeneticsSystem.FormatPair(rat.genotype, "C"), label + " C locus");
+            Assert.AreEqual(GeneticsSystem.FormatPair("D", d1, d2), GeneticsSystem.FormatPair(rat.genotype, "D"), label + " D locus");
+            Assert.AreEqual(GeneticsSystem.FormatPair("S", s1, s2), GeneticsSystem.FormatPair(rat.genotype, "S"), label + " S locus");
+
+            var visual = factory.CreateStageVisual(parent, rat);
+            try
+            {
+                var renderer = visual == null ? null : visual.GetComponentInChildren<SkinnedMeshRenderer>(true);
+                Assert.IsNotNull(renderer, label + " imported SkinnedMeshRenderer");
+                var material = renderer.sharedMaterials[0];
+                Assert.IsNotNull(material, label + " material");
+                Texture texture = material.HasProperty("_MainTex") ? material.GetTexture("_MainTex") : material.GetTexture("_BaseMap");
+                Assert.IsNotNull(texture, label + " coat texture");
+                Assert.AreEqual(expectedTexture, texture.name.ToLowerInvariant(), label + " coat texture");
+                if (expectedAlbinoMode || expectedSpotted)
+                {
+                    Assert.AreEqual("Rat Habitat/Hand Painted Rat Coat", material.shader.name, label + " shader");
+                }
+                if (expectedAlbinoMode) Assert.AreEqual(1f, material.GetFloat("_AlbinoMode"), 0.001f, label + " albino shader mode");
+                if (expectedSpotted) Assert.AreEqual(1f, material.GetFloat("_SpotStrength"), 0.001f, label + " spot shader mode");
+                Debug.Log("[Rat Habitat] Editor phenotype material test: rat=" + rat.name +
+                    " genotype=" + GeneticsSystem.FormatPair(rat.genotype, "B") + " " + GeneticsSystem.FormatPair(rat.genotype, "C") + " " + GeneticsSystem.FormatPair(rat.genotype, "D") + " " + GeneticsSystem.FormatPair(rat.genotype, "S") +
+                    " coatColorId=" + rat.phenotype.coatColorId +
+                    " coatColorHex=" + rat.phenotype.coatColorHex +
+                    " accentHex=" + rat.phenotype.accentHex +
+                    " spotted=" + rat.phenotype.spotted +
+                    " selectedTexture=" + texture.name +
+                    " selectedMaterial=" + material.name +
+                    " shader=" + material.shader.name);
+            }
+            finally
+            {
+                if (visual != null) Object.DestroyImmediate(visual);
+            }
+        }
+    }
+}
+#endif
