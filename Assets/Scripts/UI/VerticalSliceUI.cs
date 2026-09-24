@@ -2750,7 +2750,22 @@ namespace RatHabitat
                 ? game.IsRatSelectedForGroup(rat.id)
                 : game.SelectedRat != null && game.SelectedRat.id == rat.id;
             UiStyle.ApplyRounded(rowImage, expanded || selected ? new Color(0.16f, 0.3f, 0.24f) : new Color(0.1f, 0.16f, 0.14f), true);
-            rowImage.raycastTarget = false;
+            rowImage.raycastTarget = true;
+
+            // The entire card is the expand/toggle hit target. Keep this as a
+            // single data-only UI action so the same tap cannot fall through
+            // to the habitat selection raycast. Any intentional child action
+            // buttons remain their own hit targets and do not toggle the card.
+            var rowButton = rowRoot.AddComponent<Button>();
+            rowButton.targetGraphic = rowImage;
+            rowButton.navigation = new Navigation { mode = Navigation.Mode.None };
+            string ratId = rat.id;
+            var rowClickRelay = rowRoot.AddComponent<DirectUiClickRelay>();
+            rowClickRelay.Configure(rowButton, () =>
+            {
+                if (game.MultipleSelectionMode) game.ToggleRatGroupSelection(ratId);
+                else ToggleExpandedMyRat(ratId);
+            });
 
             var rowVertical = rowRoot.AddComponent<VerticalLayoutGroup>();
             rowVertical.spacing = 5f;
@@ -2763,17 +2778,9 @@ namespace RatHabitat
             var header = CreateRect("My Rats Row Header", rowRoot.transform);
             var headerImage = header.gameObject.AddComponent<Image>();
             UiStyle.ApplyRounded(headerImage, expanded || selected ? new Color(0.18f, 0.34f, 0.28f) : new Color(0.08f, 0.14f, 0.13f), true);
-            headerImage.raycastTarget = true;
-            var headerButton = header.gameObject.AddComponent<Button>();
-            headerButton.targetGraphic = headerImage;
-            headerButton.navigation = new Navigation { mode = Navigation.Mode.None };
-            string ratId = rat.id;
-            var headerClickRelay = header.gameObject.AddComponent<DirectUiClickRelay>();
-            headerClickRelay.Configure(headerButton, () =>
-            {
-                if (game.MultipleSelectionMode) game.ToggleRatGroupSelection(ratId);
-                else ToggleExpandedMyRat(ratId);
-            });
+            // The parent card owns input. This decorative header image must
+            // not create a nested button that competes with the card toggle.
+            headerImage.raycastTarget = false;
 
             var rowLayout = rowRoot.AddComponent<LayoutElement>();
             rowLayout.preferredHeight = expanded ? 336f : 116f;
@@ -2821,16 +2828,6 @@ namespace RatHabitat
             infoText.rectTransform.offsetMax = new Vector2(-2f, 0f);
             BindLiveText(infoText, () => BuildRatRosterLabel(rat, selected));
 
-            var expandButton = AddButtonTo(header, expanded ? "Collapse" : "Expand", true,
-                () => ToggleExpandedMyRat(ratId), new Color(0.14f, 0.30f, 0.30f), 42f);
-            var expandLayout = expandButton.GetComponent<LayoutElement>();
-            if (expandLayout != null)
-            {
-                expandLayout.minWidth = 76f;
-                expandLayout.preferredWidth = 76f;
-                expandLayout.flexibleWidth = 0f;
-            }
-
             if (expanded)
             {
                 var detailPanel = CreateRect("Expanded My Rat Details", rowRoot.transform);
@@ -2848,8 +2845,6 @@ namespace RatHabitat
                 detailElement.preferredHeight = 222f;
                 detailElement.minHeight = 222f;
                 AddDetailedRatInformation(detailPanel, rat, 12);
-                AddButtonTo(detailPanel, "Collapse", true, () => ToggleExpandedMyRat(ratId),
-                    new Color(0.14f, 0.30f, 0.30f), 34f);
             }
         }
 

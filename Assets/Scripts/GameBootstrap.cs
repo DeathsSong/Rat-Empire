@@ -887,7 +887,7 @@ namespace RatHabitat
 
             if (resolved && conceptionSucceeded)
             {
-                StatusMessage = female.name + " and " + male.name + " are breeding";
+                StatusMessage = female.name + " and " + male.name + " are breeding.";
             }
             else
             {
@@ -1184,7 +1184,25 @@ namespace RatHabitat
             {
                 EnclosureSystem.ClearBreedingPair();
                 RestoreDedicatedBreedingPair();
-                StatusMessage = BuildDedicatedSessionResultMessage(completedSessions);
+                // Persist the finished session and any pregnancy before
+                // announcing a result. A success message is only valid after
+                // the actual pregnancy state has been written successfully.
+                bool resolvedStateSaved = SaveSystem.Save(Save);
+                if (resolvedStateSaved)
+                {
+                    foreach (var completedSession in completedSessions)
+                    {
+                        if (completedSession == null) continue;
+                        StatusMessage = BuildDedicatedSessionResultMessage(completedSession);
+                    }
+                    // Persist the event-log entries as part of the same
+                    // completed-session state so a reload cannot replay them.
+                    SaveSystem.Save(Save);
+                }
+                else
+                {
+                    Debug.LogWarning("[Rat Habitat] Dedicated breeding resolved but the outcome could not be saved yet.");
+                }
                 reproductiveStateChanged = true;
             }
             List<LitterData> newLitters;
@@ -2118,7 +2136,7 @@ namespace RatHabitat
             parentAId = null;
             parentBId = null;
             breedingSelectionSlot = BreedingParentSlot.None;
-            StatusMessage = "Dedicated breeding session started for " + mother.name + " and " + father.name + ". Ends in 2 in-game hours.";
+            StatusMessage = mother.name + " and " + father.name + " are breeding.";
             SaveSystem.Save(Save);
             // Pregnancy begins nursery care immediately. Reuse the stable
             // presenter roots so the mother relocates without creating a
@@ -2126,14 +2144,18 @@ namespace RatHabitat
             RefreshWorldAndUi(true);
         }
 
-        private string BuildDedicatedSessionResultMessage(List<DedicatedBreedingSessionData> sessions)
+        private string BuildDedicatedSessionResultMessage(DedicatedBreedingSessionData session)
         {
-            if (sessions == null || sessions.Count == 0) return string.Empty;
-            var session = sessions[0];
+            if (session == null) return string.Empty;
             var mother = BreedingSystem.FindRat(Save, session.motherId);
-            return session.conceptionSucceeded
-                ? (mother == null ? "The female is pregnant" : mother.name + " is pregnant")
-                : "Dedicated breeding complete — no conception this session.";
+            var father = BreedingSystem.FindRat(Save, session.fatherId);
+            string motherName = mother == null ? "Female" : mother.name;
+            string fatherName = father == null ? "Male" : father.name;
+            bool pregnancyStarted = mother != null &&
+                BreedingSystem.FindPendingPregnancy(Save, mother.id) != null;
+            return pregnancyStarted
+                ? motherName + " and " + fatherName + " breeding succeeded — pregnancy started."
+                : motherName + " and " + fatherName + " breeding failed.";
         }
 
         public void FinishPregnancyTesting()
