@@ -64,6 +64,14 @@ For a Windows build, use **Rat Empire** → **Build Windows Test Player** in the
 
 For an Android APK, connect the Android module in Unity Hub, then use **File** → **Build Profiles** (or **Build Settings** in older Unity versions), select Android, switch platform, and use **Rat Empire** → **Build Android APK**. The menu asks where to save the APK.
 
+## Play the current WebGL build on GitHub Pages
+
+The checked-in `docs/` folder contains the current phone-friendly WebGL build. To publish it, open the repository's **Settings** → **Pages**, choose **Deploy from a branch**, select the `main` branch and the `/docs` folder, then save. GitHub will provide the playable URL, normally:
+
+`https://deathssong.github.io/Rat-Empire/`
+
+When a new WebGL build is created in Unity, replace the contents of `docs/` with the contents of `Builds/WebGL/`, commit, and push again.
+
 ## Isolated interaction smoke test
 
 Before diagnosing the rat scene, open `Assets/Scenes/InteractionSmokeTest.unity` and press Play. This scene intentionally contains no `GameBootstrap`, rats, habitat builder, breeding code, save code, or `InteractionManager`. It creates one large magenta cube with an enabled `BoxCollider`, one `MainCamera`, one `EventSystem`, and one `StandaloneInputModule` at runtime. Its direct mouse/touch test uses the unrestricted `Physics.Raycast` overload and does not use a layer mask.
