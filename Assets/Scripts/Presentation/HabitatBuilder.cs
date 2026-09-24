@@ -164,6 +164,7 @@ namespace RatHabitat
         private void CreatePairingNest()
         {
             if (pairingCageRoot == null) return;
+            EnclosureSystem.ClearPairingNestBounds();
             const string resourcePath = "PairingNest/rat_nest_box";
             GameObject nestAsset = Resources.Load<GameObject>(resourcePath);
             if (nestAsset == null)
@@ -201,24 +202,33 @@ namespace RatHabitat
                 floorTop - modelBounds.min.y + floorClearance,
                 target.z - modelBounds.center.z);
 
-            // Remove any source colliders, then create one non-rendering
-            // gameplay trigger for the complete imported footprint. Movement
-            // avoidance remains authoritative in EnclosureSystem, while this
-            // trigger keeps queries aligned with the actual model.
+            // Remove every imported/source collider before creating the one
+            // gameplay footprint below. Disable first so a Destroy() queued
+            // for the end of the frame cannot briefly create a second obstacle.
             Collider[] sourceColliders = nest.GetComponentsInChildren<Collider>(true);
             for (int index = 0; index < sourceColliders.Length; index++)
             {
-                if (sourceColliders[index] != null) Object.Destroy(sourceColliders[index]);
+                if (sourceColliders[index] == null) continue;
+                sourceColliders[index].enabled = false;
+                Object.Destroy(sourceColliders[index]);
             }
 
             Bounds placedBounds = new Bounds();
             if (!TryGetRendererBounds(renderers, out placedBounds)) return;
+            EnclosureSystem.RegisterPairingNestBounds(placedBounds);
             var collisionRoot = new GameObject("Pairing Nest Collision");
             collisionRoot.transform.SetParent(nest.transform, false);
             var nestCollider = collisionRoot.AddComponent<BoxCollider>();
-            nestCollider.isTrigger = true;
+            // Keep one real solid footprint for physics/debug inspection. The
+            // Ignore Raycast layer keeps it separate from rat-selection
+            // markers, while EnclosureSystem remains the authoritative
+            // movement/pathfinding boundary.
+            nestCollider.isTrigger = false;
             nestCollider.center = nest.transform.InverseTransformPoint(placedBounds.center);
-            nestCollider.size = placedBounds.size;
+            nestCollider.size = new Vector3(
+                Mathf.Max(0.1f, placedBounds.size.x),
+                Mathf.Max(0.1f, placedBounds.size.y),
+                Mathf.Max(0.1f, placedBounds.size.z));
             int ignoreRaycastLayer = LayerMask.NameToLayer("Ignore Raycast");
             if (ignoreRaycastLayer >= 0) collisionRoot.layer = ignoreRaycastLayer;
         }

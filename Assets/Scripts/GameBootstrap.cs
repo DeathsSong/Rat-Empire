@@ -99,6 +99,19 @@ namespace RatHabitat
             public float phaseTimeout;
             public float lastCombinedDistance;
             public float stalledSeconds;
+            public Vector3 lastMalePosition;
+            public Vector3 lastFemalePosition;
+            public float lastMaleDistance;
+            public float lastFemaleDistance;
+        }
+
+        private sealed class PairingApproachPlan
+        {
+            public Vector3 maleTarget;
+            public Vector3 femaleTarget;
+            public List<Vector3> maleWaypoints = new List<Vector3>();
+            public List<Vector3> femaleWaypoints = new List<Vector3>();
+            public float score = float.MinValue;
         }
 
         private const float CameraFocusSmoothTime = 0.24f;
@@ -131,6 +144,12 @@ namespace RatHabitat
         private const float PairingApproachTimeoutSeconds = 18f;
         private const float PairingInteractionSeconds = 2.25f;
         private const float PairingMeetSeparation = 0.92f;
+        private const int MaximumPairingRouteRetries = 3;
+        private const float PairingRoutePositionEpsilon = 0.006f;
+        private string pairingRouteRetryPairKey;
+        private int pairingRouteRetryCount;
+        private Vector3 pairingFailedMaleTarget;
+        private Vector3 pairingFailedFemaleTarget;
         // Live messages are transient, but their expiry is measured in the
         // simulation clock. The duration is sized to be roughly four real
         // seconds at the current speed, so 1x/2x/3x remain equally readable.
@@ -473,11 +492,15 @@ namespace RatHabitat
             {
                 startupWarning = true;
                 Debug.LogException(exception);
-                Save = ColonyFactory.CreateNew(GameConfig.NowMs());
+                // Keep the save that was successfully loaded. A post-load
+                // presentation/reconciliation issue must never replace a
+                // valid browser colony with default starter rats.
             }
-            StatusMessage = startupWarning
-                ? "Startup warning — see the Unity Console."
-                : "3D scene ready — " + Save.rats.Count + " rats loaded.";
+            StatusMessage = !string.IsNullOrEmpty(SaveSystem.LastLoadMessage)
+                ? SaveSystem.LastLoadMessage
+                : (startupWarning
+                    ? "Startup warning — see the Unity Console."
+                    : "3D scene ready — " + Save.rats.Count + " rats loaded.");
 
             try
             {
@@ -684,43 +707,44 @@ namespace RatHabitat
             if (!TryGetPairingParticipant(male.id, out maleRoot, out maleBehavior) ||
                 !TryGetPairingParticipant(female.id, out femaleRoot, out femaleBehavior)) return false;
 
-            Vector3 midpoint = ChoosePairingMeetPoint(maleRoot.position, femaleRoot.position, male.id, female.id);
-            Vector3 approachDirection = femaleRoot.position - maleRoot.position;
-            approachDirection.y = 0f;
-            if (approachDirection.sqrMagnitude <= 0.01f) approachDirection = Vector3.right;
-            approachDirection.Normalize();
+            // Older saves or a previously failed direct approach can leave an
+            // adult inside the nest footprint. Recover it to open floor before
+            // planning a new courtship route; never ask the route solver to
+            // walk from inside the obstacle.
+            if (EnclosureSystem.IsInsideAdultNestExclusion(RatEnclosure.Pairing, maleRoot.position, 0.12f))
+                maleBehavior.RecoverAtSafeOpenFloor();
+            if (EnclosureSystem.IsInsideAdultNestExclusion(RatEnclosure.Pairing, femaleRoot.position, 0.12f))
+                femaleBehavior.RecoverAtSafeOpenFloor();
+            if (EnclosureSystem.IsInsideAdultNestExclusion(RatEnclosure.Pairing, maleRoot.position, 0.12f) ||
+                EnclosureSystem.IsInsideAdultNestExclusion(RatEnclosure.Pairing, femaleRoot.position, 0.12f)) return false;
 
-            Vector3 maleTarget = EnclosureSystem.ClampToEnclosure(
-                RatEnclosure.Pairing,
-                midpoint - approachDirection * (PairingMeetSeparation * 0.5f),
-                0.78f);
-            Vector3 femaleTarget = EnclosureSystem.ClampToEnclosure(
-                RatEnclosure.Pairing,
-                midpoint + approachDirection * (PairingMeetSeparation * 0.5f),
-                0.78f);
-
-            // A boundary clamp should never collapse the two meeting points
-            // into one. Fall back to a horizontal pair in the central safe
-            // area if a future enclosure size changes make that necessary.
-            if (Vector3.Distance(maleTarget, femaleTarget) < 0.62f)
+            string pairKey = male.id + "|" + female.id;
+            Vector3 excludedMaleTarget = pairingRouteRetryPairKey == pairKey
+                ? pairingFailedMaleTarget : Vector3.zero;
+            Vector3 excludedFemaleTarget = pairingRouteRetryPairKey == pairKey
+                ? pairingFailedFemaleTarget : Vector3.zero;
+            PairingApproachPlan plan;
+            if (!TryBuildPairingApproachPlan(
+                maleRoot.position,
+                femaleRoot.position,
+                male.id,
+                female.id,
+                excludedMaleTarget,
+                excludedFemaleTarget,
+                out plan))
             {
-                Vector3 safeCenter = EnclosureSystem.ClampToEnclosure(
-                    RatEnclosure.Pairing,
-                    new Vector3(17.35f, midpoint.y, -2.85f),
-                    1.15f);
-                maleTarget = EnclosureSystem.ClampToEnclosure(
-                    RatEnclosure.Pairing,
-                    safeCenter + Vector3.left * (PairingMeetSeparation * 0.5f),
-                    0.78f);
-                femaleTarget = EnclosureSystem.ClampToEnclosure(
-                    RatEnclosure.Pairing,
-                    safeCenter + Vector3.right * (PairingMeetSeparation * 0.5f),
-                    0.78f);
+                CancelPairingApproach("no reachable floor route around the nest");
+                return false;
             }
 
+            Vector3 maleTarget = plan.maleTarget;
+            Vector3 femaleTarget = plan.femaleTarget;
+
             float visualSpeedMultiplier = Mathf.Clamp(SimulationSpeed, 0.75f, 2.25f);
-            if (!maleBehavior.BeginPairingApproach(maleTarget, femaleTarget, visualSpeedMultiplier)) return false;
-            if (!femaleBehavior.BeginPairingApproach(femaleTarget, maleTarget, visualSpeedMultiplier))
+            if (!maleBehavior.BeginPairingApproach(
+                maleTarget, femaleTarget, visualSpeedMultiplier, plan.maleWaypoints)) return false;
+            if (!femaleBehavior.BeginPairingApproach(
+                femaleTarget, maleTarget, visualSpeedMultiplier, plan.femaleWaypoints))
             {
                 maleBehavior.CancelPairingApproach();
                 return false;
@@ -737,7 +761,15 @@ namespace RatHabitat
                 lastCombinedDistance = Vector3.Distance(maleRoot.position, maleTarget) +
                     Vector3.Distance(femaleRoot.position, femaleTarget),
                 stalledSeconds = 0f,
+                lastMalePosition = maleRoot.position,
+                lastFemalePosition = femaleRoot.position,
+                lastMaleDistance = Vector3.Distance(maleRoot.position, maleTarget),
+                lastFemaleDistance = Vector3.Distance(femaleRoot.position, femaleTarget),
             };
+            pairingRouteRetryPairKey = null;
+            pairingRouteRetryCount = 0;
+            pairingFailedMaleTarget = Vector3.zero;
+            pairingFailedFemaleTarget = Vector3.zero;
             // Do not announce the attempt yet. A Pairing Habitat check can
             // still be blocked or fail its conception roll; only a successful
             // breeding result should produce a player-facing notification.
@@ -788,11 +820,26 @@ namespace RatHabitat
 
                 float combinedDistance = Vector3.Distance(maleRoot.position, pairingApproach.maleTarget) +
                     Vector3.Distance(femaleRoot.position, pairingApproach.femaleTarget);
-                if (combinedDistance >= pairingApproach.lastCombinedDistance - 0.003f)
+                float maleDistance = Vector3.Distance(maleRoot.position, pairingApproach.maleTarget);
+                float femaleDistance = Vector3.Distance(femaleRoot.position, pairingApproach.femaleTarget);
+                bool maleMoved = Vector3.Distance(maleRoot.position, pairingApproach.lastMalePosition) > PairingRoutePositionEpsilon;
+                bool femaleMoved = Vector3.Distance(femaleRoot.position, pairingApproach.lastFemalePosition) > PairingRoutePositionEpsilon;
+                bool distanceImproved = maleDistance < pairingApproach.lastMaleDistance - 0.003f ||
+                    femaleDistance < pairingApproach.lastFemaleDistance - 0.003f;
+                // A valid obstacle route can temporarily move farther from
+                // the final meeting point while it rounds a nest corner. Only
+                // treat it as stalled when neither root is moving, or when a
+                // root is moving without any route progress at all.
+                if ((!maleMoved && !femaleMoved) || (!distanceImproved && combinedDistance >= pairingApproach.lastCombinedDistance - 0.003f &&
+                    !maleMoved && !femaleMoved))
                     pairingApproach.stalledSeconds += deltaTime;
                 else
                     pairingApproach.stalledSeconds = 0f;
                 pairingApproach.lastCombinedDistance = combinedDistance;
+                pairingApproach.lastMalePosition = maleRoot.position;
+                pairingApproach.lastFemalePosition = femaleRoot.position;
+                pairingApproach.lastMaleDistance = maleDistance;
+                pairingApproach.lastFemaleDistance = femaleDistance;
                 if (pairingApproach.stalledSeconds >= 2.5f)
                 {
                     CancelPairingApproach("the approach was blocked");
@@ -858,6 +905,12 @@ namespace RatHabitat
         {
             if (pairingApproach == null) return;
 
+            PairingApproachRuntime failedApproach = pairingApproach;
+            string failureText = string.IsNullOrEmpty(reason) ? "route blocked" : reason;
+            string failureLower = failureText.ToLowerInvariant();
+            bool routeFailure = failureLower.Contains("blocked") ||
+                failureLower.Contains("timed out") || failureLower.Contains("route");
+
             RatHabitatBehavior maleBehavior;
             RatHabitatBehavior femaleBehavior;
             if (rats != null)
@@ -867,11 +920,42 @@ namespace RatHabitat
             }
 
             pairingApproach = null;
+            if (routeFailure)
+            {
+                string pairKey = failedApproach.maleId + "|" + failedApproach.femaleId;
+                if (pairingRouteRetryPairKey != pairKey)
+                {
+                    pairingRouteRetryPairKey = pairKey;
+                    pairingRouteRetryCount = 0;
+                }
+                pairingRouteRetryCount++;
+                pairingFailedMaleTarget = failedApproach.maleTarget;
+                pairingFailedFemaleTarget = failedApproach.femaleTarget;
+                RatData failedMale = BreedingSystem.FindRat(Save, failedApproach.maleId);
+                RatData failedFemale = BreedingSystem.FindRat(Save, failedApproach.femaleId);
+                string diagnosticRat = failedFemale != null ? failedFemale.name :
+                    (failedMale != null ? failedMale.name : failedApproach.femaleId);
+                Debug.Log("[Rat Habitat] " + diagnosticRat + " route recovery: " + failureText);
+                StatusMessage = diagnosticRat + " route recovery — nest blocked";
+                if (pairingRouteRetryCount > MaximumPairingRouteRetries)
+                {
+                    if (rats != null && rats.TryGetRatBehavior(failedApproach.maleId, out maleBehavior))
+                        maleBehavior.RecoverAtSafeOpenFloor();
+                    if (rats != null && rats.TryGetRatBehavior(failedApproach.femaleId, out femaleBehavior))
+                        femaleBehavior.RecoverAtSafeOpenFloor();
+                    pairingRouteRetryPairKey = null;
+                    pairingRouteRetryCount = 0;
+                    pairingFailedMaleTarget = Vector3.zero;
+                    pairingFailedFemaleTarget = Vector3.zero;
+                }
+            }
             Save.pairingNextCheckGameTime = GameTime + GameConfig.PairingCheckIntervalMs;
-            // A blocked or timed-out approach is not a player-facing event.
-            // Keep the status strip clear; only successful breeding reports
-            // the concise female/male message in ResolvePairingApproach.
-            StatusMessage = string.Empty;
+            if (!routeFailure)
+            {
+                // Eligibility changes such as pregnancy are expected state
+                // transitions, not route errors or player-facing events.
+                StatusMessage = string.Empty;
+            }
             RefreshWorldAndUi(false);
             SaveSystem.Save(Save);
         }
@@ -885,57 +969,202 @@ namespace RatHabitat
             return true;
         }
 
-        private Vector3 ChoosePairingMeetPoint(Vector3 malePosition, Vector3 femalePosition, string maleId, string femaleId)
+        private bool TryBuildPairingApproachPlan(
+            Vector3 malePosition,
+            Vector3 femalePosition,
+            string maleId,
+            string femaleId,
+            Vector3 excludedMaleTarget,
+            Vector3 excludedFemaleTarget,
+            out PairingApproachPlan bestPlan)
         {
+            bestPlan = null;
             Vector3 midpoint = (malePosition + femalePosition) * 0.5f;
-            Vector3[] candidates =
+            Bounds nestBounds;
+            EnclosureSystem.TryGetPairingNestAvoidanceBounds(0f, out nestBounds);
+            Vector3 nestCenter = nestBounds.center;
+            nestCenter.y = midpoint.y;
+            float nestHalfX = nestBounds.extents.x;
+            float nestHalfZ = nestBounds.extents.z;
+            float approachClearance = 1.15f;
+            var candidates = new List<Vector3>
             {
-                new Vector3(17.35f, midpoint.y, -2.85f),
-                new Vector3(15.25f, midpoint.y, -1.15f),
-                new Vector3(19.45f, midpoint.y, -1.15f),
-                new Vector3(15.25f, midpoint.y, 2.15f),
-                new Vector3(19.45f, midpoint.y, 2.15f),
-                new Vector3(14.65f, midpoint.y, -5.20f),
-                new Vector3(20.05f, midpoint.y, -5.20f),
+                new Vector3(midpoint.x, midpoint.y, midpoint.z),
+                new Vector3(nestCenter.x, midpoint.y, nestCenter.z + nestHalfZ + approachClearance),
+                new Vector3(nestCenter.x, midpoint.y, nestCenter.z - nestHalfZ - approachClearance),
+                new Vector3(nestCenter.x + nestHalfX + approachClearance, midpoint.y, nestCenter.z),
+                new Vector3(nestCenter.x - nestHalfX - approachClearance, midpoint.y, nestCenter.z),
+                new Vector3(nestCenter.x + nestHalfX + approachClearance, midpoint.y, nestCenter.z + nestHalfZ + approachClearance),
+                new Vector3(nestCenter.x - nestHalfX - approachClearance, midpoint.y, nestCenter.z + nestHalfZ + approachClearance),
+                new Vector3(nestCenter.x + nestHalfX + approachClearance, midpoint.y, nestCenter.z - nestHalfZ - approachClearance),
+                new Vector3(nestCenter.x - nestHalfX - approachClearance, midpoint.y, nestCenter.z - nestHalfZ - approachClearance),
             };
 
-            float bestScore = float.MinValue;
-            Vector3 best = EnclosureSystem.ClampToEnclosure(RatEnclosure.Pairing, candidates[0], 1.15f);
-            for (int index = 0; index < candidates.Length; index++)
+            for (int index = 0; index < candidates.Count; index++)
             {
-                Vector3 candidate = EnclosureSystem.ClampToEnclosure(
-                    RatEnclosure.Pairing, candidates[index], 1.15f);
-                float score = -Mathf.Pow(Vector2.Distance(
-                    new Vector2(candidate.x, candidate.z),
-                    new Vector2(midpoint.x, midpoint.z)), 2f) * 0.025f;
-                if (Vector2.Distance(
-                    new Vector2(candidate.x, candidate.z),
-                    new Vector2(EnclosureSystem.PairingNestPosition.x, EnclosureSystem.PairingNestPosition.z)) < 2.2f)
-                {
-                    score -= 3f;
-                }
+                Vector3 candidate = EnclosureSystem.ClampToEnclosureBounds(
+                    RatEnclosure.Pairing, candidates[index], 0.82f);
+                if (EnclosureSystem.IsInsideAdultNestExclusion(RatEnclosure.Pairing, candidate, 0.32f)) continue;
 
-                if (Save != null)
+                Vector3 separationAxis = PairingSeparationAxis(candidate, nestCenter, malePosition, femalePosition, nestHalfX, nestHalfZ);
+                Vector3 maleTarget = EnclosureSystem.ClampToEnclosureBounds(
+                    RatEnclosure.Pairing, candidate - separationAxis * (PairingMeetSeparation * 0.5f), 0.78f);
+                Vector3 femaleTarget = EnclosureSystem.ClampToEnclosureBounds(
+                    RatEnclosure.Pairing, candidate + separationAxis * (PairingMeetSeparation * 0.5f), 0.78f);
+                if (!IsValidPairingTarget(maleTarget) || !IsValidPairingTarget(femaleTarget) ||
+                    Vector3.Distance(maleTarget, femaleTarget) < 0.62f ||
+                    TargetsMatch(maleTarget, femaleTarget, excludedMaleTarget, excludedFemaleTarget)) continue;
+
+                List<Vector3> maleWaypoints;
+                List<Vector3> femaleWaypoints;
+                float maleRouteLength;
+                float femaleRouteLength;
+                if (!TryBuildNestSafeRoute(malePosition, maleTarget, out maleWaypoints, out maleRouteLength) ||
+                    !TryBuildNestSafeRoute(femalePosition, femaleTarget, out femaleWaypoints, out femaleRouteLength)) continue;
+                if (!ArePairingTargetsAvailable(maleTarget, femaleTarget, maleId, femaleId)) continue;
+
+                float distanceToMidpoint = Vector2.Distance(
+                    new Vector2(candidate.x, candidate.z), new Vector2(midpoint.x, midpoint.z));
+                float score = -(maleRouteLength + femaleRouteLength) - distanceToMidpoint * 0.35f;
+                if (bestPlan == null || score > bestPlan.score)
                 {
-                    foreach (RatData rat in Save.rats)
+                    bestPlan = new PairingApproachPlan
                     {
-                        if (rat == null || rat.id == maleId || rat.id == femaleId || rat.enclosure != RatEnclosure.Pairing) continue;
-                        Transform otherRoot;
-                        if (rats == null || !rats.TryGetRatRoot(rat.id, out otherRoot) || otherRoot == null) continue;
-                        float distance = Vector2.Distance(
-                            new Vector2(candidate.x, candidate.z),
-                            new Vector2(otherRoot.position.x, otherRoot.position.z));
-                        if (distance < 1.4f) score -= (1.4f - distance) * 4.5f;
-                    }
-                }
-
-                if (score > bestScore)
-                {
-                    bestScore = score;
-                    best = candidate;
+                        maleTarget = maleTarget,
+                        femaleTarget = femaleTarget,
+                        maleWaypoints = maleWaypoints,
+                        femaleWaypoints = femaleWaypoints,
+                        score = score,
+                    };
                 }
             }
-            return best;
+            return bestPlan != null;
+        }
+
+        private static Vector3 PairingSeparationAxis(Vector3 candidate, Vector3 nestCenter,
+            Vector3 malePosition, Vector3 femalePosition, float nestHalfX, float nestHalfZ)
+        {
+            Vector3 axis;
+            if (Mathf.Abs(candidate.x - nestCenter.x) > nestHalfX + 0.4f)
+            {
+                axis = Vector3.forward;
+            }
+            else if (Mathf.Abs(candidate.z - nestCenter.z) > nestHalfZ + 0.4f)
+            {
+                axis = Vector3.right;
+            }
+            else
+            {
+                axis = femalePosition - malePosition;
+                axis.y = 0f;
+                if (axis.sqrMagnitude <= 0.01f) axis = Vector3.right;
+                else axis.Normalize();
+            }
+            return axis;
+        }
+
+        private static bool IsValidPairingTarget(Vector3 point)
+        {
+            return EnclosureSystem.IsBehaviorPointAllowed(RatEnclosure.Pairing, point) &&
+                !EnclosureSystem.IsInsideAdultNestExclusion(RatEnclosure.Pairing, point, 0.12f);
+        }
+
+        private static bool TargetsMatch(Vector3 maleTarget, Vector3 femaleTarget,
+            Vector3 excludedMaleTarget, Vector3 excludedFemaleTarget)
+        {
+            if (excludedMaleTarget == Vector3.zero || excludedFemaleTarget == Vector3.zero) return false;
+            return Vector3.Distance(maleTarget, excludedMaleTarget) < 0.28f &&
+                Vector3.Distance(femaleTarget, excludedFemaleTarget) < 0.28f;
+        }
+
+        private bool ArePairingTargetsAvailable(Vector3 maleTarget, Vector3 femaleTarget,
+            string maleId, string femaleId)
+        {
+            if (Save == null || rats == null) return true;
+            foreach (RatData other in Save.rats)
+            {
+                if (other == null || other.id == maleId || other.id == femaleId ||
+                    other.enclosure != RatEnclosure.Pairing) continue;
+                Transform otherRoot;
+                if (!rats.TryGetRatRoot(other.id, out otherRoot) || otherRoot == null) continue;
+                Vector2 position = new Vector2(otherRoot.position.x, otherRoot.position.z);
+                if (Vector2.Distance(position, new Vector2(maleTarget.x, maleTarget.z)) < 1.18f ||
+                    Vector2.Distance(position, new Vector2(femaleTarget.x, femaleTarget.z)) < 1.18f) return false;
+            }
+            return true;
+        }
+
+        private static bool TryBuildNestSafeRoute(Vector3 start, Vector3 end,
+            out List<Vector3> waypoints, out float routeLength)
+        {
+            waypoints = new List<Vector3>();
+            routeLength = Vector3.Distance(start, end);
+            if (!EnclosureSystem.IsInside(RatEnclosure.Pairing, start, 0f) ||
+                !EnclosureSystem.IsInside(RatEnclosure.Pairing, end, 0f) ||
+                EnclosureSystem.IsInsideAdultNestExclusion(RatEnclosure.Pairing, start, 0.12f) ||
+                EnclosureSystem.IsInsideAdultNestExclusion(RatEnclosure.Pairing, end, 0.12f)) return false;
+            if (EnclosureSystem.IsNestSafeRoute(RatEnclosure.Pairing, start, end, 0.12f)) return true;
+
+            Bounds nestBounds;
+            EnclosureSystem.TryGetPairingNestAvoidanceBounds(0.34f, out nestBounds);
+            float y = start.y;
+            Vector3[] rawCorners =
+            {
+                new Vector3(nestBounds.min.x, y, nestBounds.min.z),
+                new Vector3(nestBounds.min.x, y, nestBounds.max.z),
+                new Vector3(nestBounds.max.x, y, nestBounds.min.z),
+                new Vector3(nestBounds.max.x, y, nestBounds.max.z),
+            };
+            Vector3[] corners = new Vector3[rawCorners.Length];
+            for (int index = 0; index < rawCorners.Length; index++)
+            {
+                // The enlarged nest may sit close to the lower cage wall.
+                // Project only the route corner to the wall-safe cage bounds;
+                // never project it through the nest itself.
+                corners[index] = EnclosureSystem.ClampToEnclosureBounds(
+                    RatEnclosure.Pairing, rawCorners[index], 0.78f);
+            }
+
+            var best = new List<Vector3>();
+            float bestLength = float.MaxValue;
+            for (int first = 0; first < corners.Length; first++)
+            {
+                if (!IsValidRoutePoint(corners[first])) continue;
+                if (!EnclosureSystem.IsNestSafeRoute(RatEnclosure.Pairing, start, corners[first], 0.02f) ||
+                    !EnclosureSystem.IsNestSafeRoute(RatEnclosure.Pairing, corners[first], end, 0.02f)) continue;
+                float length = Vector3.Distance(start, corners[first]) + Vector3.Distance(corners[first], end);
+                if (length < bestLength)
+                {
+                    bestLength = length;
+                    best = new List<Vector3> { corners[first] };
+                }
+
+                for (int second = 0; second < corners.Length; second++)
+                {
+                    if (second == first || !IsValidRoutePoint(corners[second])) continue;
+                    if (!EnclosureSystem.IsNestSafeRoute(RatEnclosure.Pairing, corners[first], corners[second], 0.02f) ||
+                        !EnclosureSystem.IsNestSafeRoute(RatEnclosure.Pairing, corners[second], end, 0.02f)) continue;
+                    length = Vector3.Distance(start, corners[first]) +
+                        Vector3.Distance(corners[first], corners[second]) +
+                        Vector3.Distance(corners[second], end);
+                    if (length < bestLength)
+                    {
+                        bestLength = length;
+                        best = new List<Vector3> { corners[first], corners[second] };
+                    }
+                }
+            }
+
+            if (best.Count == 0) return false;
+            waypoints = best;
+            routeLength = bestLength;
+            return true;
+        }
+
+        private static bool IsValidRoutePoint(Vector3 point)
+        {
+            return EnclosureSystem.IsInside(RatEnclosure.Pairing, point, 0.78f) &&
+                !EnclosureSystem.IsInsideAdultNestExclusion(RatEnclosure.Pairing, point, 0.02f);
         }
 
         private void Update()
@@ -943,7 +1172,7 @@ namespace RatHabitat
             UpdateWorldViewport();
             UpdateCameraPresentation();
             if (Save == null) return;
-            bool clockMoved = GrowthSystem.AdvanceClock(Save, GameConfig.NowMs());
+            GrowthSystem.AdvanceClock(Save, GameConfig.NowMs());
             bool stageChanged = GrowthSystem.RefreshRatStages(Save);
             bool reproductiveStateChanged = BreedingSystem.RefreshReproductiveStates(Save, GameTime);
             bool storeChanged = StoreSystem.AdvanceRestock(Save, GameTime);
@@ -976,7 +1205,11 @@ namespace RatHabitat
             }
 
             saveTimer += Time.unscaledDeltaTime;
-            if (clockMoved && saveTimer >= 2f)
+            // Autosave independently of whether the current frame advanced
+            // the simulation. This captures UI/data changes and gives the
+            // WebGL localStorage record a recent synchronous copy before a
+            // browser tab is closed.
+            if (saveTimer >= 2f)
             {
                 SaveSystem.Save(Save);
                 saveTimer = 0f;
@@ -2730,6 +2963,11 @@ namespace RatHabitat
         private void OnApplicationPause(bool paused)
         {
             if (paused) SaveSystem.Save(Save);
+        }
+
+        private void OnApplicationFocus(bool hasFocus)
+        {
+            if (!hasFocus) SaveSystem.Save(Save);
         }
 
         private void OnDestroy()

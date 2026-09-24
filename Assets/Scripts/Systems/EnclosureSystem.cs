@@ -23,6 +23,9 @@ namespace RatHabitat
         public const float NestAdultExclusionRadiusZ = 1.40f;
         public const float PairingNestAdultExclusionRadiusX = 3.32f;
         public const float PairingNestAdultExclusionRadiusZ = 2.46f;
+        private const float NestAvoidancePadding = 0.18f;
+        private static Bounds pairingNestRendererBounds;
+        private static bool pairingNestRendererBoundsRegistered;
 
         // Male and Female retain the original full-depth cage dimensions.
         // Nursery and Breeding occupy a separate lower row in the previously
@@ -119,6 +122,50 @@ namespace RatHabitat
             get { return new Vector3(17.35f, NurseryNestY, -10.55f); }
         }
 
+        /// <summary>
+        /// Registers the evaluated world-space footprint of the imported
+        /// Pairing nest. The renderer is the source of truth for the model's
+        /// horizontal size; the constants above remain a safe fallback before
+        /// the runtime habitat has been built.
+        /// </summary>
+        public static void RegisterPairingNestBounds(Bounds bounds)
+        {
+            if (bounds.size.x <= 0.01f || bounds.size.z <= 0.01f)
+            {
+                pairingNestRendererBoundsRegistered = false;
+                return;
+            }
+
+            pairingNestRendererBounds = bounds;
+            pairingNestRendererBoundsRegistered = true;
+        }
+
+        public static void ClearPairingNestBounds()
+        {
+            pairingNestRendererBounds = new Bounds();
+            pairingNestRendererBoundsRegistered = false;
+        }
+
+        public static bool TryGetPairingNestAvoidanceBounds(float extraClearance, out Bounds bounds)
+        {
+            if (pairingNestRendererBoundsRegistered)
+            {
+                bounds = pairingNestRendererBounds;
+                Vector3 size = bounds.size;
+                size.x += Mathf.Max(0f, extraClearance) * 2f;
+                size.z += Mathf.Max(0f, extraClearance) * 2f;
+                bounds.size = size;
+                return true;
+            }
+
+            bounds = new Bounds(
+                PairingNestPosition,
+                new Vector3(PairingNestAdultExclusionRadiusX * 2f,
+                    0.8f,
+                    PairingNestAdultExclusionRadiusZ * 2f));
+            return true;
+        }
+
         public static bool HasNest(RatEnclosure enclosure)
         {
             return enclosure == RatEnclosure.Nursery || enclosure == RatEnclosure.Pairing;
@@ -133,12 +180,85 @@ namespace RatHabitat
         {
             if (!HasNest(enclosure)) return false;
             Vector3 nest = GetNestPosition(enclosure);
-            float radiusX = enclosure == RatEnclosure.Pairing
-                ? PairingNestAdultExclusionRadiusX : NestAdultExclusionRadiusX;
-            float radiusZ = enclosure == RatEnclosure.Pairing
-                ? PairingNestAdultExclusionRadiusZ : NestAdultExclusionRadiusZ;
+            float radiusX;
+            float radiusZ;
+            GetNestExclusionRadii(enclosure, out nest, out radiusX, out radiusZ);
             return Mathf.Abs(position.x - nest.x) < radiusX &&
                 Mathf.Abs(position.z - nest.z) < radiusZ;
+        }
+
+        public static bool IsInsideAdultNestExclusion(RatEnclosure enclosure, Vector3 position, float extraClearance)
+        {
+            if (!HasNest(enclosure)) return false;
+            Vector3 nest;
+            float radiusX;
+            float radiusZ;
+            GetNestExclusionRadii(enclosure, out nest, out radiusX, out radiusZ);
+            float clearance = Mathf.Max(0f, extraClearance);
+            return Mathf.Abs(position.x - nest.x) < radiusX + clearance &&
+                Mathf.Abs(position.z - nest.z) < radiusZ + clearance;
+        }
+
+        public static bool IsNestSafeRoute(RatEnclosure enclosure, Vector3 start, Vector3 end, float extraClearance = 0f)
+        {
+            if (!IsInside(enclosure, start, 0f) || !IsInside(enclosure, end, 0f)) return false;
+            const int samples = 24;
+            for (int index = 0; index <= samples; index++)
+            {
+                float t = index / (float)samples;
+                if (IsInsideAdultNestExclusion(enclosure, Vector3.Lerp(start, end, t), extraClearance)) return false;
+            }
+            return true;
+        }
+
+        public static Vector3 GetNearestOpenFloorPosition(RatEnclosure enclosure, Vector3 position, float margin = MinimumMovementMargin)
+        {
+            Vector3 result = ClampToEnclosureBounds(enclosure, position, margin);
+            if (!IsInsideAdultNestExclusion(enclosure, result)) return result;
+
+            Vector3 nest;
+            float radiusX;
+            float radiusZ;
+            GetNestExclusionRadii(enclosure, out nest, out radiusX, out radiusZ);
+            float leftDistance = Mathf.Abs(result.x - (nest.x - radiusX));
+            float rightDistance = Mathf.Abs(result.x - (nest.x + radiusX));
+            float bottomDistance = Mathf.Abs(result.z - (nest.z - radiusZ));
+            float topDistance = Mathf.Abs(result.z - (nest.z + radiusZ));
+            float clearance = 0.08f;
+            float bestDistance = leftDistance;
+            result = new Vector3(nest.x - radiusX - clearance, result.y, result.z);
+            if (rightDistance < bestDistance)
+            {
+                bestDistance = rightDistance;
+                result = new Vector3(nest.x + radiusX + clearance, result.y, result.z);
+            }
+            if (bottomDistance < bestDistance)
+            {
+                bestDistance = bottomDistance;
+                result = new Vector3(result.x, result.y, nest.z - radiusZ - clearance);
+            }
+            if (topDistance < bestDistance)
+            {
+                result = new Vector3(result.x, result.y, nest.z + radiusZ + clearance);
+            }
+            return ClampToEnclosureBounds(enclosure, result, margin);
+        }
+
+        private static void GetNestExclusionRadii(RatEnclosure enclosure, out Vector3 center,
+            out float radiusX, out float radiusZ)
+        {
+            center = GetNestPosition(enclosure);
+            radiusX = enclosure == RatEnclosure.Pairing
+                ? PairingNestAdultExclusionRadiusX : NestAdultExclusionRadiusX;
+            radiusZ = enclosure == RatEnclosure.Pairing
+                ? PairingNestAdultExclusionRadiusZ : NestAdultExclusionRadiusZ;
+            if (enclosure == RatEnclosure.Pairing && pairingNestRendererBoundsRegistered)
+            {
+                center.x = pairingNestRendererBounds.center.x;
+                center.z = pairingNestRendererBounds.center.z;
+                radiusX = Mathf.Max(0.1f, pairingNestRendererBounds.extents.x + NestAvoidancePadding);
+                radiusZ = Mathf.Max(0.1f, pairingNestRendererBounds.extents.z + NestAvoidancePadding);
+            }
         }
 
         public static void SetBreedingPair(string motherId, string fatherId)
@@ -300,22 +420,21 @@ namespace RatHabitat
 
             if (!allowNest && IsInsideAdultNestExclusion(enclosure, position))
             {
-                Vector3 nest = GetNestPosition(enclosure);
+                Vector3 nest;
+                float exclusionRadiusX;
+                float exclusionRadiusZ;
+                GetNestExclusionRadii(enclosure, out nest, out exclusionRadiusX, out exclusionRadiusZ);
                 Vector2 offset = new Vector2(position.x - nest.x, position.z - nest.z);
                 if (offset.sqrMagnitude < 0.0001f) offset = Vector2.right;
-                float radiusX = enclosure == RatEnclosure.Pairing
-                    ? PairingNestAdultExclusionRadiusX : NestAdultExclusionRadiusX;
-                float radiusZ = enclosure == RatEnclosure.Pairing
-                    ? PairingNestAdultExclusionRadiusZ : NestAdultExclusionRadiusZ;
-                float distanceToXEdge = radiusX - Mathf.Abs(offset.x);
-                float distanceToZEdge = radiusZ - Mathf.Abs(offset.y);
+                float distanceToXEdge = exclusionRadiusX - Mathf.Abs(offset.x);
+                float distanceToZEdge = exclusionRadiusZ - Mathf.Abs(offset.y);
                 if (distanceToXEdge <= distanceToZEdge)
                 {
-                    position.x = nest.x + Mathf.Sign(offset.x) * radiusX;
+                    position.x = nest.x + Mathf.Sign(offset.x) * exclusionRadiusX;
                 }
                 else
                 {
-                    position.z = nest.z + Mathf.Sign(offset.y) * radiusZ;
+                    position.z = nest.z + Mathf.Sign(offset.y) * exclusionRadiusZ;
                 }
                 // Keep the projected point inside the cage if a future nest
                 // is moved close to a wall.
@@ -328,9 +447,10 @@ namespace RatHabitat
 
         public static Vector3 GetNestSidePosition(RatEnclosure enclosure)
         {
-            Vector3 nest = GetNestPosition(enclosure);
-            float radiusX = enclosure == RatEnclosure.Pairing
-                ? PairingNestAdultExclusionRadiusX : NestAdultExclusionRadiusX;
+            Vector3 nest;
+            float radiusX;
+            float radiusZ;
+            GetNestExclusionRadii(enclosure, out nest, out radiusX, out radiusZ);
             return ClampToEnclosure(enclosure,
                 nest + Vector3.right * (radiusX + 0.08f), 0.48f);
         }

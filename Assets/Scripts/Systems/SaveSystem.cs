@@ -1,31 +1,128 @@
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
 using UnityEngine;
 
 namespace RatHabitat
 {
+    /// <summary>
+    /// Persists the colony on every supported platform. WebGL uses an explicit
+    /// localStorage bridge because the browser must retain the save outside of
+    /// Unity's in-memory state and because IDBFS writes are not guaranteed to
+    /// be flushed before a page is closed.
+    /// </summary>
     public static class SaveSystem
     {
         private const string FileName = "rat-habitat-save.json";
+
+        // Keep these keys stable. They are intentionally independent of the
+        // Unity build hash so a new GitHub Pages build can read an existing
+        // colony from the same origin.
+        private const string BrowserSaveKey = "rat-habitat-save-v1";
+        private const string BrowserBackupKey = "rat-habitat-save-v1-backup";
+        private const string BrowserCorruptBackupKey = "rat-habitat-save-v1-corrupt";
+        private const string BrowserStorageVersionKey = "rat-habitat-save-v1-storage-version";
+        private const int BrowserStorageVersion = 1;
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+        [DllImport("__Internal")]
+        private static extern string RatHabitatBrowserRead(string key);
+
+        [DllImport("__Internal")]
+        private static extern int RatHabitatBrowserWrite(string key, string value);
+
+        [DllImport("__Internal")]
+        private static extern void RatHabitatBrowserRemove(string key);
+
+        [DllImport("__Internal")]
+        private static extern void RatHabitatBrowserRegisterLifecycle(string key);
+
+        [DllImport("__Internal")]
+        private static extern void RatHabitatBrowserFlush(string key);
+#endif
+
+        private static bool UsesBrowserStorage
+        {
+            get
+            {
+#if UNITY_WEBGL && !UNITY_EDITOR
+                return true;
+#else
+                return false;
+#endif
+            }
+        }
 
         public static string SavePath
         {
             get { return Path.Combine(Application.persistentDataPath, FileName); }
         }
 
+        /// <summary>
+        /// Non-blocking startup/recovery text consumed by GameBootstrap. This
+        /// is deliberately separate from the event log so a recovery warning
+        /// can be shown even when the player has not opened the log panel.
+        /// </summary>
+        public static string LastLoadMessage { get; private set; }
+
         public static ColonySaveData LoadOrCreate()
         {
+            LastLoadMessage = string.Empty;
             ColonySaveData save = null;
+            string serialized = null;
+            string source = string.Empty;
+
             try
             {
-                if (File.Exists(SavePath))
+                if (UsesBrowserStorage)
                 {
-                    string json = File.ReadAllText(SavePath);
-                    if (!string.IsNullOrWhiteSpace(json)) save = JsonUtility.FromJson<ColonySaveData>(json);
+                    RegisterBrowserLifecycle();
+                    serialized = ReadBrowser(BrowserSaveKey);
+                    if (!string.IsNullOrWhiteSpace(serialized)) source = "browser";
+                }
+
+                // Keep the existing desktop/mobile file as a compatible
+                // fallback. On WebGL the stable localStorage record is the
+                // authoritative source, while other platforms keep using the
+                // normal persistent-data file.
+                if (string.IsNullOrWhiteSpace(serialized) && File.Exists(SavePath))
+                {
+                    serialized = File.ReadAllText(SavePath);
+                    if (!string.IsNullOrWhiteSpace(serialized)) source = "file";
+                }
+
+                if (!string.IsNullOrWhiteSpace(serialized))
+                {
+                    save = TryParse(serialized);
+                    if (save == null)
+                    {
+                        BackupCorruptSave(serialized, source);
+                        save = TryParse(ReadRecoveryBackup(source));
+                        if (save != null)
+                        {
+                            LastLoadMessage = "Save recovered from backup. Your colony was restored safely.";
+                        }
+                        else if (source == "browser")
+                        {
+                            // A legacy/partially-written browser record may
+                            // still have a valid persistent-data fallback.
+                            string fileFallback = TryReadFileSave();
+                            save = TryParse(fileFallback);
+                            if (save != null)
+                                LastLoadMessage = "Browser save recovered from the local backup file.";
+                        }
+
+                        if (save == null)
+                        {
+                            LastLoadMessage = "Save recovery: the previous save was unreadable. A backup was kept and a new colony was started.";
+                            Debug.LogWarning("Rat Habitat save recovery started a new colony; the unreadable save was backed up.");
+                        }
+                    }
                 }
             }
             catch (Exception exception)
             {
+                LastLoadMessage = "Save recovery: the previous save could not be read. A new colony was started safely.";
                 Debug.LogWarning("Rat Habitat save could not be loaded: " + exception.Message);
             }
 
@@ -91,6 +188,29 @@ namespace RatHabitat
                 save.schemaVersion = GameConfig.SaveVersion;
                 save.updatedAt = GameConfig.NowMs();
                 string json = JsonUtility.ToJson(save, true);
+
+                if (UsesBrowserStorage)
+                {
+                    RegisterBrowserLifecycle();
+                    string previous = ReadBrowser(BrowserSaveKey);
+                    // Only replace the recovery backup with a valid previous
+                    // document. A corrupt current document must not destroy a
+                    // usable backup while recovery is being completed.
+                    if (TryParse(previous) != null)
+                        WriteBrowser(BrowserBackupKey, previous);
+                    if (!WriteBrowser(BrowserSaveKey, json)) return false;
+                    WriteBrowser(BrowserStorageVersionKey, BrowserStorageVersion.ToString());
+                    // localStorage writes are synchronous; this second call
+                    // makes the intended flush explicit for pagehide/unload.
+                    FlushBrowser(BrowserSaveKey);
+                    return true;
+                }
+
+                if (File.Exists(SavePath))
+                {
+                    string backupPath = SavePath + ".bak";
+                    File.Copy(SavePath, backupPath, true);
+                }
                 File.WriteAllText(SavePath, json);
                 return true;
             }
@@ -105,7 +225,17 @@ namespace RatHabitat
         {
             try
             {
+                if (UsesBrowserStorage)
+                {
+                    RemoveBrowser(BrowserSaveKey);
+                    RemoveBrowser(BrowserBackupKey);
+                    RemoveBrowser(BrowserCorruptBackupKey);
+                    RemoveBrowser(BrowserStorageVersionKey);
+                    FlushBrowser(BrowserSaveKey);
+                }
+
                 if (File.Exists(SavePath)) File.Delete(SavePath);
+                if (File.Exists(SavePath + ".bak")) File.Delete(SavePath + ".bak");
                 return true;
             }
             catch (Exception exception)
@@ -145,6 +275,112 @@ namespace RatHabitat
                 Debug.LogWarning("Rat Habitat JSON import failed: " + exception.Message);
                 return null;
             }
+        }
+
+        private static ColonySaveData TryParse(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return null;
+            try
+            {
+                return JsonUtility.FromJson<ColonySaveData>(json);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("Rat Habitat save JSON is unreadable: " + exception.Message);
+                return null;
+            }
+        }
+
+        private static string TryReadFileSave()
+        {
+            try
+            {
+                return File.Exists(SavePath) ? File.ReadAllText(SavePath) : string.Empty;
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("Rat Habitat fallback save could not be read: " + exception.Message);
+                return string.Empty;
+            }
+        }
+
+        private static string ReadRecoveryBackup(string source)
+        {
+            if (source == "browser" && UsesBrowserStorage)
+                return ReadBrowser(BrowserBackupKey);
+
+            try
+            {
+                string backupPath = SavePath + ".bak";
+                return File.Exists(backupPath) ? File.ReadAllText(backupPath) : string.Empty;
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("Rat Habitat recovery backup could not be read: " + exception.Message);
+                return string.Empty;
+            }
+        }
+
+        private static void BackupCorruptSave(string serialized, string source)
+        {
+            try
+            {
+                if (source == "browser" && UsesBrowserStorage)
+                {
+                    if (!string.IsNullOrWhiteSpace(serialized))
+                        WriteBrowser(BrowserCorruptBackupKey, serialized);
+                    return;
+                }
+
+                if (File.Exists(SavePath))
+                {
+                    string stamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+                    File.Copy(SavePath, SavePath + ".corrupt-" + stamp, true);
+                }
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("Rat Habitat could not preserve the corrupt save backup: " + exception.Message);
+            }
+        }
+
+        private static void RegisterBrowserLifecycle()
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            RatHabitatBrowserRegisterLifecycle(BrowserSaveKey);
+#endif
+        }
+
+        private static string ReadBrowser(string key)
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            return RatHabitatBrowserRead(key);
+#else
+            return string.Empty;
+#endif
+        }
+
+        private static bool WriteBrowser(string key, string value)
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            return RatHabitatBrowserWrite(key, value) != 0;
+#else
+            return false;
+#endif
+        }
+
+        private static void RemoveBrowser(string key)
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            RatHabitatBrowserRemove(key);
+#endif
+        }
+
+        private static void FlushBrowser(string key)
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            RatHabitatBrowserFlush(key);
+#endif
         }
     }
 }

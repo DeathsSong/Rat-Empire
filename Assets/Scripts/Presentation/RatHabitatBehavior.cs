@@ -95,6 +95,10 @@ namespace RatHabitat
         private bool pairingInteractionComplete;
         private Vector3 pairingApproachTarget;
         private Vector3 pairingFacingPoint;
+        private readonly List<Vector3> pairingRouteWaypoints = new List<Vector3>();
+        private int pairingRouteWaypointIndex;
+        private readonly List<Vector3> nestDetourWaypoints = new List<Vector3>();
+        private int nestDetourWaypointIndex;
         private float pairingInteractionRemaining;
         private float pairingSpeedMultiplier = 1f;
 
@@ -222,6 +226,12 @@ namespace RatHabitat
         /// </summary>
         public bool BeginPairingApproach(Vector3 target, Vector3 facePoint, float speedMultiplier)
         {
+            return BeginPairingApproach(target, facePoint, speedMultiplier, null);
+        }
+
+        public bool BeginPairingApproach(Vector3 target, Vector3 facePoint, float speedMultiplier,
+            IList<Vector3> routeWaypoints)
+        {
             if (!configured || rat == null || rat.stage != RatStage.Adult || rat.enclosure != RatEnclosure.Pairing) return false;
 
             pairingApproachActive = true;
@@ -230,6 +240,25 @@ namespace RatHabitat
             pairingInteractionComplete = false;
             pairingApproachTarget = ClampToNestSafePosition(new Vector3(target.x, transform.position.y, target.z));
             pairingFacingPoint = facePoint;
+            pairingRouteWaypoints.Clear();
+            if (routeWaypoints != null)
+            {
+                for (int index = 0; index < routeWaypoints.Count; index++)
+                {
+                    Vector3 waypoint = routeWaypoints[index];
+                    waypoint.y = transform.position.y;
+                    if (!EnclosureSystem.IsBehaviorPointAllowed(RatEnclosure.Pairing, waypoint)) continue;
+                    if (EnclosureSystem.IsInsideAdultNestExclusion(RatEnclosure.Pairing, waypoint, 0.04f)) continue;
+                    if (pairingRouteWaypoints.Count == 0 ||
+                        Vector3.Distance(pairingRouteWaypoints[pairingRouteWaypoints.Count - 1], waypoint) > 0.12f)
+                    {
+                        pairingRouteWaypoints.Add(waypoint);
+                    }
+                }
+            }
+            pairingRouteWaypointIndex = 0;
+            nestDetourWaypoints.Clear();
+            nestDetourWaypointIndex = 0;
             pairingSpeedMultiplier = Mathf.Clamp(speedMultiplier, 0.75f, 2.25f);
             currentTarget = null;
             stateTimer = 60f;
@@ -258,6 +287,10 @@ namespace RatHabitat
             pairingInteractionComplete = false;
             pairingInteractionRemaining = 0f;
             currentTarget = null;
+            pairingRouteWaypoints.Clear();
+            pairingRouteWaypointIndex = 0;
+            nestDetourWaypoints.Clear();
+            nestDetourWaypointIndex = 0;
             BeginTravel();
         }
 
@@ -270,6 +303,10 @@ namespace RatHabitat
             pairingInteractionComplete = false;
             pairingInteractionRemaining = 0f;
             currentTarget = null;
+            pairingRouteWaypoints.Clear();
+            pairingRouteWaypointIndex = 0;
+            nestDetourWaypoints.Clear();
+            nestDetourWaypointIndex = 0;
             BeginTravel();
         }
 
@@ -511,6 +548,8 @@ namespace RatHabitat
 
         private void BeginTravel()
         {
+            nestDetourWaypoints.Clear();
+            nestDetourWaypointIndex = 0;
             currentTarget = ChooseTarget();
             if (currentTarget == null)
             {
@@ -617,10 +656,18 @@ namespace RatHabitat
         private void UpdatePairingApproach(float deltaTime)
         {
             FacePairingPoint(deltaTime);
-            Vector3 toTarget = pairingApproachTarget - transform.position;
+            Vector3 currentDestination = pairingRouteWaypointIndex < pairingRouteWaypoints.Count
+                ? pairingRouteWaypoints[pairingRouteWaypointIndex]
+                : pairingApproachTarget;
+            Vector3 toTarget = currentDestination - transform.position;
             toTarget.y = 0f;
             if (toTarget.sqrMagnitude <= ArrivalDistance * ArrivalDistance)
             {
+                if (pairingRouteWaypointIndex < pairingRouteWaypoints.Count)
+                {
+                    pairingRouteWaypointIndex++;
+                    return;
+                }
                 transform.position = ClampToAssignedEnclosure(new Vector3(
                     pairingApproachTarget.x,
                     transform.position.y,
@@ -632,6 +679,27 @@ namespace RatHabitat
             Vector3 direction = toTarget.normalized;
             Vector3 nextPosition = transform.position + direction * movementSpeed * deltaTime;
             transform.position = MoveTowardAvoidingNest(transform.position, nextPosition, deltaTime);
+        }
+
+        /// <summary>
+        /// Used only by route recovery after a blocked pairing path. This is
+        /// deliberately a safe floor relocation, never a normal selection or
+        /// habitat-transfer action.
+        /// </summary>
+        public void RecoverAtSafeOpenFloor()
+        {
+            if (rat == null || rat.stage == RatStage.Pinkie) return;
+            pairingApproachActive = false;
+            pairingApproachArrived = false;
+            pairingInteractionActive = false;
+            pairingInteractionComplete = false;
+            pairingInteractionRemaining = 0f;
+            pairingRouteWaypoints.Clear();
+            pairingRouteWaypointIndex = 0;
+            currentTarget = null;
+            transform.position = EnclosureSystem.GetNearestOpenFloorPosition(
+                rat.enclosure, transform.position, 0.78f);
+            BeginTravel();
         }
 
         private void UpdatePairingInteraction(float deltaTime)
@@ -684,6 +752,8 @@ namespace RatHabitat
         {
             MarkInvestigationStarted();
             currentTarget = null;
+            nestDetourWaypoints.Clear();
+            nestDetourWaypointIndex = 0;
             targetPosition = RandomAssignedPosition();
             Vector3 toPoint = targetPosition - transform.position;
             toPoint.y = 0f;
@@ -1032,101 +1102,161 @@ namespace RatHabitat
             RatEnclosure enclosure = rat == null ? RatEnclosure.FemaleColony : rat.enclosure;
             if (!EnclosureSystem.HasNest(enclosure)) return ClampToAssignedEnclosure(desired);
 
-            Vector3 nest = EnclosureSystem.GetNestPosition(enclosure);
-            float radiusX = enclosure == RatEnclosure.Pairing
-                ? EnclosureSystem.PairingNestAdultExclusionRadiusX
-                : EnclosureSystem.NestAdultExclusionRadiusX;
-            float radiusZ = enclosure == RatEnclosure.Pairing
-                ? EnclosureSystem.PairingNestAdultExclusionRadiusZ
-                : EnclosureSystem.NestAdultExclusionRadiusZ;
-            const float clearance = 0.16f;
+            if (nestDetourWaypointIndex < nestDetourWaypoints.Count)
+            {
+                Vector3 waypoint = nestDetourWaypoints[nestDetourWaypointIndex];
+                Vector3 toWaypoint = waypoint - current;
+                toWaypoint.y = 0f;
+                if (toWaypoint.sqrMagnitude <= ArrivalDistance * ArrivalDistance)
+                {
+                    nestDetourWaypointIndex++;
+                    if (nestDetourWaypointIndex >= nestDetourWaypoints.Count)
+                    {
+                        nestDetourWaypoints.Clear();
+                        nestDetourWaypointIndex = 0;
+                        return ClampToAssignedEnclosure(desired);
+                    }
+                    waypoint = nestDetourWaypoints[nestDetourWaypointIndex];
+                    toWaypoint = waypoint - current;
+                    toWaypoint.y = 0f;
+                }
+                if (toWaypoint.sqrMagnitude <= 0.0001f) return ClampToAssignedEnclosure(current);
+                float detourStep = movementSpeed * Mathf.Max(0f, deltaTime);
+                return ClampToAssignedEnclosure(current + toWaypoint.normalized * Mathf.Min(detourStep, toWaypoint.magnitude));
+            }
 
-            bool currentInside = EnclosureSystem.IsInsideAdultNestExclusion(enclosure, current);
-            bool desiredInside = EnclosureSystem.IsInsideAdultNestExclusion(enclosure, desired);
-            bool pathCrossesNest = SegmentCrossesNest(enclosure, current, desired);
-            if (!currentInside && !desiredInside && !pathCrossesNest)
+            bool currentInside = EnclosureSystem.IsInsideAdultNestExclusion(enclosure, current, 0.04f);
+            Vector3 finalDestination = targetPosition;
+            finalDestination.y = current.y;
+            bool destinationInside = EnclosureSystem.IsInsideAdultNestExclusion(enclosure, finalDestination, 0.04f);
+            if (!currentInside && !destinationInside &&
+                EnclosureSystem.IsNestSafeRoute(enclosure, current, finalDestination, 0.04f))
+            {
                 return ClampToAssignedEnclosure(desired);
+            }
 
-            Vector3 waypoint = desired;
             if (currentInside)
             {
-                // Already touching the nest from an older save or a previous
-                // path. Walk out through the closest edge instead of snapping.
-                float dx = radiusX - Mathf.Abs(current.x - nest.x);
-                float dz = radiusZ - Mathf.Abs(current.z - nest.z);
-                if (dx <= dz)
-                {
-                    float sign = Mathf.Sign(current.x - nest.x);
-                    if (Mathf.Abs(sign) < 0.5f) sign = Mathf.Sign(desired.x - nest.x);
-                    if (Mathf.Abs(sign) < 0.5f) sign = 1f;
-                    waypoint = new Vector3(nest.x + sign * (radiusX + clearance), current.y, current.z);
-                }
-                else
-                {
-                    float sign = Mathf.Sign(current.z - nest.z);
-                    if (Mathf.Abs(sign) < 0.5f) sign = Mathf.Sign(desired.z - nest.z);
-                    if (Mathf.Abs(sign) < 0.5f) sign = 1f;
-                    waypoint = new Vector3(current.x, current.y, nest.z + sign * (radiusZ + clearance));
-                }
+                // A stale save or a previously rejected route may leave the
+                // root on the obstacle. Walk to the nearest open floor edge;
+                // do not snap it to a habitat spawn point.
+                nestDetourWaypoints.Add(EnclosureSystem.GetNearestOpenFloorPosition(
+                    enclosure, current, 0.48f));
+            }
+            else if (!TryBuildNestDetour(enclosure, current, finalDestination))
+            {
+                // A defensive fallback keeps the rat moving along a safe
+                // edge even if a future nest or enclosure is too constrained
+                // for a two-corner route.
+                nestDetourWaypoints.Add(EnclosureSystem.GetNearestOpenFloorPosition(
+                    enclosure, current, 0.48f));
+            }
+
+            nestDetourWaypointIndex = 0;
+            if (nestDetourWaypoints.Count == 0) return ClampToAssignedEnclosure(desired);
+            Vector3 firstWaypoint = nestDetourWaypoints[0];
+            Vector3 toFirstWaypoint = firstWaypoint - current;
+            toFirstWaypoint.y = 0f;
+            if (toFirstWaypoint.sqrMagnitude <= 0.0001f) return ClampToAssignedEnclosure(current);
+            float step = movementSpeed * Mathf.Max(0f, deltaTime);
+            return ClampToAssignedEnclosure(current + toFirstWaypoint.normalized * Mathf.Min(step, toFirstWaypoint.magnitude));
+        }
+
+        private bool TryBuildNestDetour(RatEnclosure enclosure, Vector3 start, Vector3 end)
+        {
+            Vector3 nest;
+            float radiusX;
+            float radiusZ;
+            GetNestExclusion(enclosure, out nest, out radiusX, out radiusZ);
+            Bounds bounds = new Bounds(nest, new Vector3(radiusX * 2f, 1f, radiusZ * 2f));
+            if (enclosure == RatEnclosure.Pairing)
+            {
+                Bounds actualBounds;
+                if (EnclosureSystem.TryGetPairingNestAvoidanceBounds(0.24f, out actualBounds)) bounds = actualBounds;
             }
             else
             {
-                float offsetX = current.x - nest.x;
-                float offsetZ = current.z - nest.z;
-                if (Mathf.Abs(offsetX) >= radiusX && Mathf.Abs(offsetZ) < radiusZ)
+                bounds.Expand(new Vector3(0.24f, 0f, 0.24f));
+            }
+
+            Vector3[] rawCorners =
+            {
+                new Vector3(bounds.min.x, start.y, bounds.min.z),
+                new Vector3(bounds.min.x, start.y, bounds.max.z),
+                new Vector3(bounds.max.x, start.y, bounds.min.z),
+                new Vector3(bounds.max.x, start.y, bounds.max.z),
+            };
+            Vector3[] corners = new Vector3[rawCorners.Length];
+            for (int index = 0; index < rawCorners.Length; index++)
+            {
+                corners[index] = EnclosureSystem.ClampToEnclosureBounds(enclosure, rawCorners[index], 0.48f);
+            }
+
+            var best = new List<Vector3>();
+            float bestLength = float.MaxValue;
+            for (int first = 0; first < corners.Length; first++)
+            {
+                if (!IsNestDetourPointAllowed(enclosure, corners[first])) continue;
+                if (EnclosureSystem.IsNestSafeRoute(enclosure, start, corners[first], 0.02f) &&
+                    EnclosureSystem.IsNestSafeRoute(enclosure, corners[first], end, 0.02f))
                 {
-                    float sign = Mathf.Sign(desired.z - nest.z);
-                    if (Mathf.Abs(sign) < 0.5f) sign = offsetZ >= 0f ? 1f : -1f;
-                    waypoint = new Vector3(current.x, current.y, nest.z + sign * (radiusZ + clearance));
+                    ConsiderNestDetour(new List<Vector3> { corners[first] }, start, end, ref best, ref bestLength);
                 }
-                else if (Mathf.Abs(offsetZ) >= radiusZ && Mathf.Abs(offsetX) < radiusX)
+                for (int second = 0; second < corners.Length; second++)
                 {
-                    float sign = Mathf.Sign(desired.x - nest.x);
-                    if (Mathf.Abs(sign) < 0.5f) sign = offsetX >= 0f ? 1f : -1f;
-                    waypoint = new Vector3(nest.x + sign * (radiusX + clearance), current.y, current.z);
-                }
-                else
-                {
-                    // A diagonal approach is routed around the side closest
-                    // to the rat's current position.
-                    if (Mathf.Abs(offsetX) >= Mathf.Abs(offsetZ))
-                    {
-                        float sign = Mathf.Sign(offsetX);
-                        if (Mathf.Abs(sign) < 0.5f) sign = 1f;
-                        waypoint = new Vector3(nest.x + sign * (radiusX + clearance), current.y,
-                            nest.z + Mathf.Sign(desired.z - nest.z) * (radiusZ + clearance));
-                    }
-                    else
-                    {
-                        float sign = Mathf.Sign(offsetZ);
-                        if (Mathf.Abs(sign) < 0.5f) sign = 1f;
-                        waypoint = new Vector3(nest.x + Mathf.Sign(desired.x - nest.x) * (radiusX + clearance), current.y,
-                            nest.z + sign * (radiusZ + clearance));
-                    }
+                    if (first == second || !IsNestDetourPointAllowed(enclosure, corners[second])) continue;
+                    if (!EnclosureSystem.IsNestSafeRoute(enclosure, start, corners[first], 0.02f) ||
+                        !EnclosureSystem.IsNestSafeRoute(enclosure, corners[first], corners[second], 0.02f) ||
+                        !EnclosureSystem.IsNestSafeRoute(enclosure, corners[second], end, 0.02f)) continue;
+                    ConsiderNestDetour(new List<Vector3> { corners[first], corners[second] },
+                        start, end, ref best, ref bestLength);
                 }
             }
 
-            waypoint = ClampToAssignedEnclosure(waypoint);
-            currentTarget = null;
-            targetPosition = waypoint;
-            Vector3 toWaypoint = waypoint - current;
-            toWaypoint.y = 0f;
-            if (toWaypoint.sqrMagnitude <= 0.0001f) return ClampToAssignedEnclosure(current);
-            float step = movementSpeed * Mathf.Max(0f, deltaTime);
-            return ClampToAssignedEnclosure(current + toWaypoint.normalized * Mathf.Min(step, toWaypoint.magnitude));
+            if (best.Count == 0) return false;
+            nestDetourWaypoints.AddRange(best);
+            return true;
         }
 
-        private static bool SegmentCrossesNest(RatEnclosure enclosure, Vector3 start, Vector3 end)
+        private static void ConsiderNestDetour(List<Vector3> candidate, Vector3 start, Vector3 end,
+            ref List<Vector3> best, ref float bestLength)
         {
-            // A small deterministic sample is sufficient for the short frame
-            // movement step and also catches an outside-to-outside route that
-            // would otherwise cut straight through the nest.
-            for (int sample = 1; sample <= 8; sample++)
+            float length = Vector3.Distance(start, candidate[0]);
+            for (int index = 1; index < candidate.Count; index++)
+                length += Vector3.Distance(candidate[index - 1], candidate[index]);
+            length += Vector3.Distance(candidate[candidate.Count - 1], end);
+            if (length < bestLength)
             {
-                float t = sample / 8f;
-                if (EnclosureSystem.IsInsideAdultNestExclusion(enclosure, Vector3.Lerp(start, end, t))) return true;
+                bestLength = length;
+                best = candidate;
             }
-            return false;
+        }
+
+        private static bool IsNestDetourPointAllowed(RatEnclosure enclosure, Vector3 point)
+        {
+            return EnclosureSystem.IsInside(enclosure, point, 0.48f) &&
+                !EnclosureSystem.IsInsideAdultNestExclusion(enclosure, point, 0.03f);
+        }
+
+        private static void GetNestExclusion(RatEnclosure enclosure, out Vector3 center,
+            out float radiusX, out float radiusZ)
+        {
+            center = EnclosureSystem.GetNestPosition(enclosure);
+            radiusX = enclosure == RatEnclosure.Pairing
+                ? EnclosureSystem.PairingNestAdultExclusionRadiusX
+                : EnclosureSystem.NestAdultExclusionRadiusX;
+            radiusZ = enclosure == RatEnclosure.Pairing
+                ? EnclosureSystem.PairingNestAdultExclusionRadiusZ
+                : EnclosureSystem.NestAdultExclusionRadiusZ;
+
+            Bounds bounds;
+            if (enclosure == RatEnclosure.Pairing &&
+                EnclosureSystem.TryGetPairingNestAvoidanceBounds(0f, out bounds))
+            {
+                center = bounds.center;
+                radiusX = bounds.extents.x + 0.02f;
+                radiusZ = bounds.extents.z + 0.02f;
+            }
         }
 
         private float NextFloat(float minimum, float maximum)
