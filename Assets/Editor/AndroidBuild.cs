@@ -17,9 +17,9 @@ namespace RatHabitat.Editor
     public static class AndroidBuild
     {
         private const string MainScenePath = "Assets/Scenes/Main.unity";
-        private const string OutputPath = "Builds/Android/RatHabitat-development.apk";
+        private const string OutputPath = "Builds/Android/RatEmpire-development.apk";
 
-        [MenuItem("Rat Habitat/Build Android Development APK")]
+        [MenuItem("Rat Empire/Build Android Development APK")]
         public static void BuildDevelopmentApk()
         {
             string projectRoot = Directory.GetParent(Application.dataPath).FullName;
@@ -51,7 +51,7 @@ namespace RatHabitat.Editor
             // before Android Build Support was installed or the editor switched targets.
             PlayerSettings.SetScriptingBackend(BuildTargetGroup.Android, ScriptingImplementation.IL2CPP);
             PlayerSettings.Android.targetArchitectures = AndroidArchitecture.ARM64;
-            Debug.Log("[Rat Habitat] Android build target=" + EditorUserBuildSettings.activeBuildTarget +
+            Debug.Log("[Rat Empire] Android build target=" + EditorUserBuildSettings.activeBuildTarget +
                 " architectures=" + PlayerSettings.Android.targetArchitectures);
 
             BuildPlayerOptions options = new BuildPlayerOptions
@@ -71,7 +71,7 @@ namespace RatHabitat.Editor
                     " after " + report.summary.totalErrors + " error(s).");
             }
 
-            Debug.Log("[Rat Habitat] Android development APK built: " + outputPath +
+            Debug.Log("[Rat Empire] Android development APK built: " + outputPath +
                 " (" + report.summary.totalSize + " bytes).");
         }
     }

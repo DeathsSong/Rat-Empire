@@ -12,7 +12,7 @@ namespace RatHabitat.Editor
         private const string MainScenePath = "Assets/Scenes/Main.unity";
         private const string OutputPath = "Builds/WebGL";
 
-        [MenuItem("Rat Habitat/Build/Build Phone WebGL")]
+        [MenuItem("Rat Empire/Build/Build Phone WebGL")]
         public static void BuildPhoneWebGL()
         {
             if (!File.Exists(MainScenePath))
@@ -45,7 +45,7 @@ namespace RatHabitat.Editor
                 if (report.summary.result != BuildResult.Succeeded)
                     throw new InvalidOperationException($"WebGL build failed with result {report.summary.result}.");
 
-                Debug.Log($"[Rat Habitat] Phone WebGL build completed: {outputPath} ({report.summary.totalSize} bytes).");
+                Debug.Log($"[Rat Empire] Phone WebGL build completed: {outputPath} ({report.summary.totalSize} bytes).");
             }
             finally
             {

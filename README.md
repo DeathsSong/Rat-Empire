@@ -1,6 +1,6 @@
-# Rat Habitat — Unity Vertical Slice
+# Rat Empire — Unity Vertical Slice
 
-This is a separate Unity/C# project for the Rat Habitat game. The working browser prototype is intentionally not copied over or modified; keep it as the behavior reference and backup.
+This is a separate Unity/C# project for the Rat Empire game. The working browser prototype is intentionally not copied over or modified; keep it as the behavior reference and backup.
 
 ## Scope
 
@@ -60,9 +60,9 @@ The project uses `Active Input Handling: Both` so the legacy mouse/touch polling
 
 If the diagnostic badge does not reach the ready message, open the Console immediately after pressing Play. The first startup log should be `[Rat Habitat] SceneVisibilityGuard.Awake started.` followed by `GameBootstrap.Awake started.` and `GameBootstrap.Awake completed.` The badge will show a visible fallback or error message instead of staying indefinitely in a boot state.
 
-For a Windows build, use **Rat Habitat** → **Build Windows Test Player** in the Unity Editor menu.
+For a Windows build, use **Rat Empire** → **Build Windows Test Player** in the Unity Editor menu.
 
-For an Android APK, connect the Android module in Unity Hub, then use **File** → **Build Profiles** (or **Build Settings** in older Unity versions), select Android, switch platform, and use **Rat Habitat** → **Build Android APK**. The menu asks where to save the APK.
+For an Android APK, connect the Android module in Unity Hub, then use **File** → **Build Profiles** (or **Build Settings** in older Unity versions), select Android, switch platform, and use **Rat Empire** → **Build Android APK**. The menu asks where to save the APK.
 
 ## Isolated interaction smoke test
 

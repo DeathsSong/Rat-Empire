@@ -10,10 +10,10 @@ namespace RatHabitat.Editor
     {
         private static readonly string[] Scenes = { "Assets/Scenes/Main.unity" };
 
-        [MenuItem("Rat Habitat/Build Android APK")]
+        [MenuItem("Rat Empire/Build Android APK")]
         public static void BuildAndroid()
         {
-            string path = EditorUtility.SaveFilePanel("Build Rat Habitat Android APK", "", "RatHabitat-VerticalSlice.apk", "apk");
+            string path = EditorUtility.SaveFilePanel("Build Rat Empire Android APK", "", "RatEmpire-VerticalSlice.apk", "apk");
             if (string.IsNullOrEmpty(path)) return;
             EditorUserBuildSettings.buildAppBundle = false;
             BuildPlayerOptions options = new BuildPlayerOptions
@@ -27,10 +27,10 @@ namespace RatHabitat.Editor
             ShowResult(report, path);
         }
 
-        [MenuItem("Rat Habitat/Build Windows Test Player")]
+        [MenuItem("Rat Empire/Build Windows Test Player")]
         public static void BuildWindows()
         {
-            string path = EditorUtility.SaveFilePanel("Build Rat Habitat Windows Player", "", "RatHabitat-VerticalSlice.exe", "exe");
+            string path = EditorUtility.SaveFilePanel("Build Rat Empire Windows Player", "", "RatEmpire-VerticalSlice.exe", "exe");
             if (string.IsNullOrEmpty(path)) return;
             BuildPlayerOptions options = new BuildPlayerOptions
             {
@@ -47,11 +47,11 @@ namespace RatHabitat.Editor
         {
             if (report.summary.result == BuildResult.Succeeded)
             {
-                EditorUtility.DisplayDialog("Rat Habitat build complete", "Build created at:\n" + path + "\n\nSize: " + (report.summary.totalSize / (1024f * 1024f)).ToString("0.0") + " MB", "OK");
+                EditorUtility.DisplayDialog("Rat Empire build complete", "Build created at:\n" + path + "\n\nSize: " + (report.summary.totalSize / (1024f * 1024f)).ToString("0.0") + " MB", "OK");
             }
             else
             {
-                EditorUtility.DisplayDialog("Rat Habitat build failed", report.summary.result + "\nCheck the Console for details.", "OK");
+                EditorUtility.DisplayDialog("Rat Empire build failed", report.summary.result + "\nCheck the Console for details.", "OK");
             }
         }
     }

@@ -379,7 +379,7 @@ namespace RatHabitat
             headerContent.anchoredPosition = Vector2.zero;
             headerContent.sizeDelta = new Vector2(MaximumUiColumnWidth, 0f);
 
-            var title = AddText(headerContent, "RAT HABITAT", 16, Color.white, TextAnchor.MiddleLeft);
+            var title = AddText(headerContent, "RAT EMPIRE", 16, Color.white, TextAnchor.MiddleLeft);
             title.rectTransform.anchorMin = new Vector2(0f, 0.68f);
             title.rectTransform.anchorMax = new Vector2(0.34f, 1f);
             title.rectTransform.offsetMin = new Vector2(12f, 1f);

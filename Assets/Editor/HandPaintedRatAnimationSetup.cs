@@ -151,7 +151,7 @@ namespace RatHabitat.Editor
             return false;
         }
 
-        [MenuItem("Rat Habitat/Visuals/Rebuild Hand Painted Rat Animation Controller")]
+        [MenuItem("Rat Empire/Visuals/Rebuild Hand Painted Rat Animation Controller")]
         public static void RebuildFromImportedModel()
         {
             ConfigureFullTimelineImporter();

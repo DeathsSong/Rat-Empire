@@ -43,7 +43,7 @@ namespace RatHabitat.Editor
             Build();
         }
 
-        [MenuItem("Rat Habitat/Visuals/Build Hand Painted Rat Pinkie")]
+        [MenuItem("Rat Empire/Visuals/Build Hand Painted Rat Pinkie")]
         public static void BuildFromMenu()
         {
             Build();

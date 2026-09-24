@@ -12,8 +12,8 @@ PlayerSettings:
   targetDevice: 2
   useOnDemandResources: 0
   accelerometerFrequency: 60
-  companyName: Rat Habitat Studio
-  productName: Rat Habitat
+  companyName: Rat Empire Studio
+  productName: Rat Empire
   defaultCursor: {fileID: 0}
   cursorHotspot: {x: 0, y: 0}
   m_SplashScreenBackgroundColor: {r: 0.0627451, g: 0.09019608, b: 0.07450981, a: 1}
@@ -774,12 +774,12 @@ PlayerSettings:
   apiCompatibilityLevelPerPlatform: {}
   m_RenderingPath: 1
   m_MobileRenderingPath: 1
-  metroPackageName: Rat Habitat
+  metroPackageName: Rat Empire
   metroPackageVersion: 1.0
   metroCertificatePath: 
   metroCertificatePassword: 
-  metroCertificateSubject: CN=Rat Habitat
-  metroCertificateIssuer: CN=Rat Habitat
+  metroCertificateSubject: CN=Rat Empire
+  metroCertificateIssuer: CN=Rat Empire
   metroCertificateNotAfter: 2030d0fd01d00300
   metroApplicationDescription: A mobile-first 3D rat habitat and breeding game.
   wsaImages: {}

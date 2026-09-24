@@ -9,7 +9,7 @@ namespace RatHabitat
     /// Runtime UI reads this asset instead of using editor-only AnimationUtility
     /// APIs or guessing whether a clip contains bone motion.
     /// </summary>
-    [CreateAssetMenu(fileName = "HandPaintedRatAnimationAudit", menuName = "Rat Habitat/Hand Painted Rat Animation Audit")]
+    [CreateAssetMenu(fileName = "HandPaintedRatAnimationAudit", menuName = "Rat Empire/Hand Painted Rat Animation Audit")]
     public sealed class RatAnimationClipAudit : ScriptableObject
     {
         [Serializable]
