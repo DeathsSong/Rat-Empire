@@ -40,6 +40,7 @@ namespace RatHabitat
             }
 
             save.EnsureLists();
+            ColonyFactory.MigrateLegacyStarterStats(save);
             StoreSystem.EnsureStoreState(save);
             LitterNameSystem.EnsureLitterNames(save);
             // Older local saves predate the selectable exercise wheel. Add
@@ -127,6 +128,7 @@ namespace RatHabitat
                 var save = JsonUtility.FromJson<ColonySaveData>(json);
                 if (save == null) return null;
                 save.EnsureLists();
+                ColonyFactory.MigrateLegacyStarterStats(save);
                 foreach (var rat in save.rats)
                     if (rat != null && rat.enclosure == RatEnclosure.Pairing) rat.pairingHabitatAssigned = true;
                 ColonyFactory.EnsureDefaultHabitatObjects(save);

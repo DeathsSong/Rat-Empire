@@ -434,7 +434,6 @@ namespace RatHabitat
             AddTopNavigationButton(navigation, MainPanel.MyRats, "My Rats");
             AddTopNavigationButton(navigation, MainPanel.Store, "Store");
             AddTopNavigationButton(navigation, MainPanel.Settings, "Settings");
-            AddTopNavigationButton(navigation, MainPanel.DeveloperTools, "Dev Tools");
 
             var speedRow = CreateRect("Simulation Speed Controls", headerContent);
             speedRow.anchorMin = new Vector2(0f, 0f);
@@ -1181,7 +1180,9 @@ namespace RatHabitat
 
         private void OpenSettings()
         {
-            if (game != null) game.DeactivateMultipleSelection();
+            if (game != null) game.PrepareForSettings();
+            expandedMyRatsId = null;
+            familyTreeFocusId = null;
             welcomeOpen = false;
             developerToolsOpen = false;
             ratAnimationShowcaseOpen = false;
@@ -2038,7 +2039,7 @@ namespace RatHabitat
                 bool canRemove = !(rat.stage == RatStage.Adult && rat.sex == RatSex.Female &&
                     (dependentLitter || pendingPregnancy));
                 AddButton(details, canRemove ? "Remove from Pairing Habitat" : "Remain in Pairing Habitat while caring for litter",
-                    canRemove, game.RemoveSelectedRatFromPairingHabitat);
+                    canRemove, () => game.RemoveRatFromPairingHabitat(rat.id));
             }
             else if (liveRat)
             {

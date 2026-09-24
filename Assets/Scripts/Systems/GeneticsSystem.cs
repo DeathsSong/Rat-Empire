@@ -288,10 +288,46 @@ namespace RatHabitat
             if (rat.genotype == null) rat.genotype = new GenotypeData();
             Normalize(rat.genotype);
             string stableId = string.IsNullOrEmpty(rat.id) ? rat.name : rat.id;
-            if (string.IsNullOrEmpty(rat.coatColorVariant))
+            // C/c c/c is an authoritative albino override. Repair old saves
+            // that accidentally stored a normal shade for an albino rat so
+            // every visual path receives the same white phenotype.
+            if (IsRecessive(rat.genotype, "C"))
+            {
+                rat.coatColorVariant = "albino";
+                rat.coatTone = 1f;
+                return;
+            }
+
+            if (string.IsNullOrEmpty(rat.coatColorVariant) ||
+                rat.coatColorVariant.Equals("albino", System.StringComparison.OrdinalIgnoreCase) ||
+                !IsKnownCoatColorVariant(rat.coatColorVariant))
                 rat.coatColorVariant = DefaultCoatColorVariant(stableId, rat.genotype);
             if (rat.coatTone <= 0f || float.IsNaN(rat.coatTone) || float.IsInfinity(rat.coatTone))
                 rat.coatTone = DefaultCoatTone(stableId, rat.genotype);
+        }
+
+        private static bool IsKnownCoatColorVariant(string variant)
+        {
+            if (string.IsNullOrEmpty(variant)) return false;
+            switch (variant.ToLowerInvariant())
+            {
+                case "black":
+                case "chocolate":
+                case "agouti":
+                case "blue-gray":
+                case "dove-gray":
+                case "beige":
+                case "champagne":
+                case "cinnamon":
+                case "lilac":
+                case "silver-fawn":
+                case "brown":
+                case "diluted-black":
+                case "diluted-brown":
+                    return true;
+                default:
+                    return false;
+            }
         }
 
         public static string DefaultCoatColorVariant(string stableId, GenotypeData genotype)

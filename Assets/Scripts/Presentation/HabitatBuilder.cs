@@ -14,7 +14,6 @@ namespace RatHabitat
         private Transform breedingCageRoot;
         private Transform pairingCageRoot;
         private bool built;
-        private static Texture2D pairingBeddingTexture;
 
         public Vector3 NestPosition { get; private set; }
 
@@ -30,20 +29,19 @@ namespace RatHabitat
             if (enclosureRoot == null) return false;
 
             string innerName = enclosure == RatEnclosure.Pairing
-                ? "Pairing Nest Inner"
+                ? "Nest_Bedding_Layer"
                 : "Nest Inner";
             Transform surface = FindGeneratedChild(enclosureRoot, innerName);
             if (surface == null)
             {
                 surface = FindGeneratedChild(enclosureRoot,
-                    enclosure == RatEnclosure.Pairing ? "Pairing Nest" : "Nest");
+                    enclosure == RatEnclosure.Pairing ? "Pairing Nest Imported" : "Nest");
             }
             if (surface == null) return false;
 
-            // The generated Pairing Nest Inner is itself the complete bedding
-            // surface. Prefer that single renderer instead of encapsulating
-            // arbitrary decorative descendants, which could make pinkies use
-            // a larger, layered surface after a hierarchy change.
+            // The imported Nest_Bedding_Layer is the one authoritative pinkie
+            // surface. Prefer its direct renderer instead of collecting the
+            // wooden walls/rims, which would put pinkies on the wrong height.
             Renderer directRenderer = surface.GetComponent<Renderer>();
             if (directRenderer != null && directRenderer.enabled)
             {
@@ -166,48 +164,85 @@ namespace RatHabitat
         private void CreatePairingNest()
         {
             if (pairingCageRoot == null) return;
-            Vector3 position = EnclosureSystem.PairingNestPosition;
-            Texture2D beddingTexture = GetPairingBeddingTexture();
-            Color nestEdge = new Color(0.67f, 0.54f, 0.37f);
-            Color nestRim = new Color(0.76f, 0.64f, 0.46f);
+            const string resourcePath = "PairingNest/rat_nest_box";
+            GameObject nestAsset = Resources.Load<GameObject>(resourcePath);
+            if (nestAsset == null)
+            {
+                Debug.LogError("[Rat Habitat] Pairing nest model is missing at Resources/" + resourcePath);
+                return;
+            }
 
-            // The old cylinder was approximately 2.3 x 1.65. A rounded 4 x 4
-            // square gives roughly four times the bedding area while still
-            // fitting comfortably inside the Pairing Habitat.
-            CreateRoundedBox(pairingCageRoot, "Pairing Nest", position + new Vector3(0f, 0.02f, 0f),
-                new Vector3(4.00f, 0.34f, 4.00f), nestEdge, 0.42f);
+            // Instantiate exactly one imported hierarchy. The source FBX is
+            // authored in world units; centering and floor alignment use its
+            // evaluated renderer bounds rather than a guessed model offset.
+            GameObject nest = Object.Instantiate(nestAsset, pairingCageRoot);
+            nest.name = "Pairing Nest Imported";
+            nest.transform.localScale = Vector3.one;
+            nest.transform.localRotation = Quaternion.identity;
+            nest.transform.localPosition = Vector3.zero;
 
-            // The inner surface is deliberately lower than the perimeter rim.
-            // RatPresenter resolves pinkie Y from this renderer's actual top
-            // bounds, so the bedding remains the authoritative rest surface.
-            CreateRoundedBox(pairingCageRoot, "Pairing Nest Inner", position + new Vector3(0f, 0.18f, 0f),
-                new Vector3(3.52f, 0.08f, 3.52f), Color.white, 0.30f, beddingTexture);
+            Renderer[] renderers = nest.GetComponentsInChildren<Renderer>(true);
+            Bounds modelBounds;
+            if (!TryGetRendererBounds(renderers, out modelBounds))
+            {
+                Object.Destroy(nest);
+                Debug.LogError("[Rat Habitat] Pairing nest model has no renderable mesh bounds.");
+                return;
+            }
 
-            const float rimY = 0.27f;
-            CreateVisualPrimitive(pairingCageRoot, PrimitiveType.Cube, "Pairing Nest Rim Front",
-                position + new Vector3(0f, rimY, -1.84f), new Vector3(3.68f, 0.16f, 0.28f),
-                Vector3.zero, nestRim, false);
-            CreateVisualPrimitive(pairingCageRoot, PrimitiveType.Cube, "Pairing Nest Rim Back",
-                position + new Vector3(0f, rimY, 1.84f), new Vector3(3.68f, 0.16f, 0.28f),
-                Vector3.zero, nestRim, false);
-            CreateVisualPrimitive(pairingCageRoot, PrimitiveType.Cube, "Pairing Nest Rim Left",
-                position + new Vector3(-1.84f, rimY, 0f), new Vector3(0.28f, 0.16f, 3.68f),
-                Vector3.zero, nestRim, false);
-            CreateVisualPrimitive(pairingCageRoot, PrimitiveType.Cube, "Pairing Nest Rim Right",
-                position + new Vector3(1.84f, rimY, 0f), new Vector3(0.28f, 0.16f, 3.68f),
-                Vector3.zero, nestRim, false);
+            Vector3 target = EnclosureSystem.PairingNestPosition;
+            // The generated cage floor is a 0.24-unit slab centered at 0.115,
+            // so its upper surface is 0.235. Keep the model's lowest wooden
+            // vertex just above that surface to avoid z-fighting.
+            const float floorTop = 0.235f;
+            const float floorClearance = 0.002f;
+            nest.transform.localPosition = new Vector3(
+                target.x - modelBounds.center.x,
+                floorTop - modelBounds.min.y + floorClearance,
+                target.z - modelBounds.center.z);
 
-            // One gameplay collider matches the enlarged rounded footprint.
-            // The movement system supplies the rounded safety exclusion; this
-            // trigger keeps physics/query geometry aligned without creating a
-            // selectable habitat object or a duplicate nest.
+            // Remove any source colliders, then create one non-rendering
+            // gameplay trigger for the complete imported footprint. Movement
+            // avoidance remains authoritative in EnclosureSystem, while this
+            // trigger keeps queries aligned with the actual model.
+            Collider[] sourceColliders = nest.GetComponentsInChildren<Collider>(true);
+            for (int index = 0; index < sourceColliders.Length; index++)
+            {
+                if (sourceColliders[index] != null) Object.Destroy(sourceColliders[index]);
+            }
+
+            Bounds placedBounds = new Bounds();
+            if (!TryGetRendererBounds(renderers, out placedBounds)) return;
             var collisionRoot = new GameObject("Pairing Nest Collision");
-            collisionRoot.transform.SetParent(pairingCageRoot, false);
-            collisionRoot.transform.localPosition = position + new Vector3(0f, 0.26f, 0f);
+            collisionRoot.transform.SetParent(nest.transform, false);
             var nestCollider = collisionRoot.AddComponent<BoxCollider>();
             nestCollider.isTrigger = true;
-            nestCollider.size = new Vector3(3.78f, 0.58f, 3.78f);
+            nestCollider.center = nest.transform.InverseTransformPoint(placedBounds.center);
+            nestCollider.size = placedBounds.size;
+            int ignoreRaycastLayer = LayerMask.NameToLayer("Ignore Raycast");
+            if (ignoreRaycastLayer >= 0) collisionRoot.layer = ignoreRaycastLayer;
+        }
 
+        private static bool TryGetRendererBounds(Renderer[] renderers, out Bounds bounds)
+        {
+            bounds = new Bounds();
+            bool found = false;
+            if (renderers == null) return false;
+            for (int index = 0; index < renderers.Length; index++)
+            {
+                Renderer renderer = renderers[index];
+                if (renderer == null || !renderer.enabled) continue;
+                if (!found)
+                {
+                    bounds = renderer.bounds;
+                    found = true;
+                }
+                else
+                {
+                    bounds.Encapsulate(renderer.bounds);
+                }
+            }
+            return found && bounds.size.sqrMagnitude > 0.0001f;
         }
 
         private Transform CreateIndependentCage(Transform enclosureRoot, RatEnclosure enclosure)
@@ -637,79 +672,6 @@ namespace RatHabitat
                 if (collider != null) Object.Destroy(collider);
             }
             return item;
-        }
-
-        private static Texture2D GetPairingBeddingTexture()
-        {
-            if (pairingBeddingTexture != null) return pairingBeddingTexture;
-
-            const int textureSize = 160;
-            var texture = new Texture2D(textureSize, textureSize, TextureFormat.RGBA32, false);
-            texture.name = "Procedural Pairing Nest Bedding";
-            texture.wrapMode = TextureWrapMode.Clamp;
-            texture.filterMode = FilterMode.Bilinear;
-            texture.anisoLevel = 2;
-
-            var pixels = new Color[textureSize * textureSize];
-            for (int y = 0; y < textureSize; y++)
-            {
-                for (int x = 0; x < textureSize; x++)
-                {
-                    float broadNoise = Mathf.PerlinNoise(x * 0.035f + 4.7f, y * 0.035f + 8.1f);
-                    float fineNoise = Mathf.PerlinNoise(x * 0.12f + 12.3f, y * 0.12f + 2.4f);
-                    Color baseColor = Color.Lerp(new Color(0.79f, 0.69f, 0.52f),
-                        new Color(0.98f, 0.89f, 0.72f), broadNoise * 0.78f + fineNoise * 0.22f);
-                    pixels[y * textureSize + x] = baseColor;
-                }
-            }
-
-            // Deterministic irregular fibers and shaving edges. The seed is
-            // fixed so the procedural material never changes on a UI refresh
-            // or save/load cycle, while the texture itself is authored locally.
-            var random = new System.Random(731947);
-            for (int fiber = 0; fiber < 360; fiber++)
-            {
-                float startX = (float)random.NextDouble() * (textureSize - 1);
-                float startY = (float)random.NextDouble() * (textureSize - 1);
-                float length = Mathf.Lerp(3f, 24f, (float)random.NextDouble());
-                float angle = Mathf.Lerp(-Mathf.PI, Mathf.PI, (float)random.NextDouble());
-                Color fiberColor = Color.Lerp(new Color(0.60f, 0.45f, 0.29f),
-                    new Color(1.0f, 0.95f, 0.82f), (float)random.NextDouble());
-                float opacity = Mathf.Lerp(0.24f, 0.72f, (float)random.NextDouble());
-                int width = random.NextDouble() > 0.82 ? 2 : 1;
-                DrawBeddingFiber(pixels, textureSize, startX, startY, length, angle,
-                    fiberColor, opacity, width);
-            }
-
-            texture.SetPixels(pixels);
-            texture.Apply(false, true);
-            pairingBeddingTexture = texture;
-            return pairingBeddingTexture;
-        }
-
-        private static void DrawBeddingFiber(Color[] pixels, int size, float startX, float startY,
-            float length, float angle, Color color, float opacity, int width)
-        {
-            int steps = Mathf.Max(2, Mathf.CeilToInt(length * 1.35f));
-            float endX = startX + Mathf.Cos(angle) * length;
-            float endY = startY + Mathf.Sin(angle) * length;
-            for (int step = 0; step <= steps; step++)
-            {
-                float t = step / (float)steps;
-                float wobble = Mathf.Sin(t * Mathf.PI * 2.7f + startX * 0.07f) * 0.9f;
-                float x = Mathf.Lerp(startX, endX, t) + Mathf.Cos(angle + Mathf.PI * 0.5f) * wobble;
-                float y = Mathf.Lerp(startY, endY, t) + Mathf.Sin(angle + Mathf.PI * 0.5f) * wobble;
-                int centerX = Mathf.RoundToInt(x);
-                int centerY = Mathf.RoundToInt(y);
-                for (int offset = -width; offset <= width; offset++)
-                {
-                    int pixelX = centerX + (Mathf.Abs(Mathf.Cos(angle)) > 0.5f ? 0 : offset);
-                    int pixelY = centerY + (Mathf.Abs(Mathf.Cos(angle)) > 0.5f ? offset : 0);
-                    if (pixelX < 0 || pixelX >= size || pixelY < 0 || pixelY >= size) continue;
-                    int index = pixelY * size + pixelX;
-                    pixels[index] = Color.Lerp(pixels[index], color, opacity);
-                }
-            }
         }
 
         private static GameObject CreateSeeThroughFrontBarrier(Transform parent, string objectName,

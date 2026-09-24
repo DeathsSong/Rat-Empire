@@ -29,11 +29,13 @@ namespace RatHabitat
             var mabel = CreateRat(
                 "rat_mabel", "Mabel", RatSex.Female, save.clock.gameTimeMs - 48L * GameConfig.GameDayMs, 0,
                 GeneticsSystem.CreateFounder("B", "b", "C", "C", "D", "D", "s", "s"),
-                new TraitData(48f, 82f, 76f), RatStage.Adult);
+                // Founders are intentionally beginner-level, with small
+                // deterministic differences rather than identical stats.
+                StarterTraits("rat_mabel"), RatStage.Adult);
             var otto = CreateRat(
                 "rat_otto", "Otto", RatSex.Male, save.clock.gameTimeMs - 53L * GameConfig.GameDayMs, 0,
                 GeneticsSystem.CreateFounder("b", "b", "C", "C", "D", "D", "S", "s"),
-                new TraitData(56f, 78f, 69f), RatStage.Adult);
+                StarterTraits("rat_otto"), RatStage.Adult);
             save.rats.Add(mabel);
             save.rats.Add(otto);
             save.ratIds.Add(mabel.id);
@@ -48,6 +50,47 @@ namespace RatHabitat
             StoreSystem.EnsureStoreState(save);
             LitterNameSystem.EnsureLitterNames(save);
             return save;
+        }
+
+        private static TraitData StarterTraits(string stableId)
+        {
+            // Deterministic pseudo-random beginner quality: every generated
+            // value is capped at 15% of the normal 0-100 stat range while the
+            // two founders still receive different, natural-looking values.
+            unchecked
+            {
+                uint hash = 2166136261u;
+                string key = stableId ?? string.Empty;
+                for (int index = 0; index < key.Length; index++)
+                    hash = (hash ^ key[index]) * 16777619u;
+                return new TraitData(
+                    8f + (hash % 8u),
+                    8f + ((hash >> 3) % 8u),
+                    8f + ((hash >> 6) % 8u));
+            }
+        }
+
+        public static bool MigrateLegacyStarterStats(ColonySaveData save)
+        {
+            if (save == null || save.schemaVersion >= 2) return false;
+            bool changed = false;
+            if (save.rats == null) return false;
+            foreach (var rat in save.rats)
+            {
+                if (rat == null || rat.generation != 0 || rat.removalDisposition != RatRemovalDisposition.None) continue;
+                if (rat.id != "rat_mabel" && rat.id != "rat_otto") continue;
+
+                TraitData starter = StarterTraits(rat.id);
+                if (rat.traits == null) rat.traits = new TraitData();
+                rat.traits.size = starter.size;
+                rat.traits.health = starter.health;
+                rat.traits.fertility = starter.fertility;
+                rat.baseHealth = starter.health;
+                rat.baseFertility = starter.fertility;
+                changed = true;
+            }
+            save.schemaVersion = 2;
+            return changed;
         }
 
         public static void EnsureDefaultHabitatObjects(ColonySaveData save)

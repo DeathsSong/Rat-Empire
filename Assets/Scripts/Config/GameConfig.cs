@@ -4,7 +4,7 @@ namespace RatHabitat
 {
     public static class GameConfig
     {
-        public const int SaveVersion = 1;
+        public const int SaveVersion = 2;
         public const long GameDayMs = 24L * 60L * 60L * 1000L;
         public const long StartGameTimeMs = 8L * 60L * 60L * 1000L;
         // Biological timing is expressed in simulated days. The legacy

@@ -110,7 +110,10 @@ namespace RatHabitat
             bool albino = rat.phenotype.coatColorId == "albino";
             bool spotted = rat.phenotype.spotted && !albino;
             bool importedVisual = IsImportedVisual(visual);
-            var coatTexture = importedVisual ? ResolveCoatTexture(rat.phenotype.coatColorId) : null;
+            // Albino must not inherit the beige/khaki/grey source texture.
+            // Use the white material path below for imported bodies and keep
+            // only the intended pink detail shading.
+            var coatTexture = importedVisual && !albino ? ResolveCoatTexture(rat.phenotype.coatColorId) : null;
             Shader spotShader = null;
             Texture2D spotMask = null;
             // Albino uses the same hand-painted source texture through a
@@ -160,11 +163,20 @@ namespace RatHabitat
                     Color target = (IsAccentMaterial(rendererName, materialName) || albinoDetail) ? accent : coat;
                     // Keep the hand-painted texture's detail while making the
                     // genetics result the dominant color signal.
-                    target = Color.Lerp(Color.white, target, 0.88f);
+                    target = Color.Lerp(Color.white, target, 0.94f);
                     renderer.SetPropertyBlock(null, materialIndex);
                     if (material.HasProperty("_BaseColor")) material.SetColor("_BaseColor", target);
                     if (material.HasProperty("_Color")) material.SetColor("_Color", target);
-                    if (importedVisual && !detailMaterial && coatTexture != null)
+                    if (importedVisual && !detailMaterial && albino)
+                    {
+                        // The imported hand-painted source is warm beige. A
+                        // white base map makes albino fur visibly white in
+                        // habitat, portraits, Store previews, and profiles;
+                        // the material's lighting still supplies form.
+                        if (material.HasProperty("_BaseMap")) material.SetTexture("_BaseMap", Texture2D.whiteTexture);
+                        if (material.HasProperty("_MainTex")) material.SetTexture("_MainTex", Texture2D.whiteTexture);
+                    }
+                    else if (importedVisual && !detailMaterial && coatTexture != null)
                     {
                         if (material.HasProperty("_BaseMap")) material.SetTexture("_BaseMap", coatTexture);
                         if (material.HasProperty("_MainTex")) material.SetTexture("_MainTex", coatTexture);

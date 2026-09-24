@@ -15,12 +15,14 @@ namespace RatHabitat
         private const float MinimumMovementMargin = 0.38f;
         private const float NurseryNestY = 0.28f;
         // Nursery keeps its existing visual footprint. The Pairing nest is a
-        // rounded square approximately 4 x 4 world units, so it gets its own
-        // larger body-sized clearance around the complete bedding footprint.
+        // The imported Pairing nest is approximately 6.38 x 4.58 world units
+        // including its rounded rims. Keep the movement exclusion just beyond
+        // that footprint so adult and young rats route around it without
+        // making pinkie placement or the mother-side birth position invalid.
         public const float NestAdultExclusionRadiusX = 1.82f;
         public const float NestAdultExclusionRadiusZ = 1.40f;
-        public const float PairingNestAdultExclusionRadiusX = 2.40f;
-        public const float PairingNestAdultExclusionRadiusZ = 2.40f;
+        public const float PairingNestAdultExclusionRadiusX = 3.32f;
+        public const float PairingNestAdultExclusionRadiusZ = 2.46f;
 
         // Male and Female retain the original full-depth cage dimensions.
         // Nursery and Breeding occupy a separate lower row in the previously

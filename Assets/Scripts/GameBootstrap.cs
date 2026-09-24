@@ -74,6 +74,12 @@ namespace RatHabitat
         private Coroutine pairingCheckRoutine;
         private PairingApproachRuntime pairingApproach;
         private const int MaximumEventLogEntries = 10;
+        // Generated profile buttons can be rebuilt while the same pointer-up
+        // event is still being processed. Keep the explicit move action from
+        // being followed by the newly-created Remove button on that same
+        // input sequence.
+        private string lastPairingMoveRatId;
+        private int lastPairingMoveFrame = -1;
         private const int MaximumEventMessageLength = 64;
         private string statusMessage;
 
@@ -1257,6 +1263,12 @@ namespace RatHabitat
             }
             if (rat.enclosure == RatEnclosure.Pairing)
             {
+                // Repair older saves that carried the enum but not the
+                // explicit manual-placement flag. The Pairing Habitat is
+                // intentionally independent of age, sex, fertility, and
+                // pregnancy eligibility.
+                rat.pairingHabitatAssigned = true;
+                SaveSystem.Save(Save);
                 StatusMessage = rat.name + " is already in the Pairing Habitat.";
                 if (ui != null) ui.Refresh(false);
                 return;
@@ -1294,15 +1306,40 @@ namespace RatHabitat
             rat.pairingHabitatAssigned = true;
             selectedRatId = rat.id;
             selectedObjectId = null;
+            lastPairingMoveRatId = rat.id;
+            lastPairingMoveFrame = Time.frameCount;
+            if (rats != null) rats.SetSelected(rat.id);
             cameraView = CameraViewForRat(rat);
-            StatusMessage = rat.name + " moved to the Pairing Habitat.";
+            StatusMessage = "[Rat Empire] " + rat.name + " moved to Pairing Habitat.";
+            Debug.Log(StatusMessage);
             SaveSystem.Save(Save);
             RefreshWorldAndUi(true);
         }
 
         public void RemoveSelectedRatFromPairingHabitat()
         {
-            RatData rat = SelectedRat;
+            RemoveRatFromPairingHabitat(selectedRatId);
+        }
+
+        /// <summary>
+        /// Removes only the explicitly requested rat. Profile actions must
+        /// pass their stable data ID so a stale selection cannot remove a
+        /// different rat after the profile has refreshed.
+        /// </summary>
+        public void RemoveRatFromPairingHabitat(string ratId)
+        {
+            if (!string.IsNullOrEmpty(lastPairingMoveRatId) &&
+                lastPairingMoveRatId == ratId &&
+                Time.frameCount <= lastPairingMoveFrame + 1)
+            {
+                // A rebuilt profile can expose the new Remove button beneath
+                // the pointer that just confirmed Move. Ignore that stale
+                // same-input activation; an intentional second tap is still
+                // accepted on the following frame.
+                return;
+            }
+
+            RatData rat = BreedingSystem.FindRat(Save, ratId);
             if (rat == null || rat.enclosure != RatEnclosure.Pairing)
             {
                 StatusMessage = "The selected rat is not in the Pairing Habitat.";
@@ -1322,10 +1359,38 @@ namespace RatHabitat
             rat.pairingHabitatAssigned = false;
             EnclosureSystem.RecalculateAssignments(Save);
             selectedRatId = rat.id;
+            if (rats != null) rats.SetSelected(rat.id);
             cameraView = CameraViewForRat(rat);
-            StatusMessage = rat.name + " removed from the Pairing Habitat.";
+            StatusMessage = "[Rat Empire] " + rat.name + " removed from Pairing Habitat.";
+            Debug.Log(StatusMessage);
             SaveSystem.Save(Save);
             RefreshWorldAndUi(true);
+        }
+
+        /// <summary>
+        /// Clears transient selection/chooser state before Settings becomes
+        /// the only active panel. It does not alter habitat assignments or
+        /// interrupt an active dedicated breeding session.
+        /// </summary>
+        public void PrepareForSettings()
+        {
+            DeactivateMultipleSelection();
+            // Do not leave a Store/profile confirmation or a group/pairing
+            // evacuation prompt armed behind the modal Settings panel.
+            deleteConfirmationRatId = null;
+            sellConfirmationRatId = null;
+            euthanizeConfirmationRatId = null;
+            groupMoveConfirmationPending = false;
+            pairingMoveAllConfirmationPending = false;
+            breedingOpen = false;
+            parentAId = null;
+            parentBId = null;
+            breedingSelectionSlot = BreedingParentSlot.None;
+            EnclosureSystem.ClearBreedingPair();
+            RestoreDedicatedBreedingPair();
+            selectedRatId = null;
+            selectedObjectId = null;
+            if (rats != null) rats.SetSelected(null);
         }
 
         public void RequestMoveAllOutOfPairingHabitat()

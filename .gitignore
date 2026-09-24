@@ -33,3 +33,6 @@
 /Tools/preview/
 /Tools/*.log
 /Tools/*.blend1
+
+# Generated 3D preview/export output
+/meshy_output/
