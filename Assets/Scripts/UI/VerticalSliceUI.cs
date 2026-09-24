@@ -53,6 +53,7 @@ namespace RatHabitat
         private ScrollRect familyTreeScroll;
         private RectTransform familyTreeViewport;
         private RectTransform familyTreeContent;
+        private RectTransform familyTreeInputBlocker;
         private float familyTreeZoom = 1f;
         private float familyTreeLastPinchDistance;
         private bool familyTreePinching;
@@ -239,12 +240,25 @@ namespace RatHabitat
             return true;
         }
 
+        /// <summary>
+        /// A world rat tap can rebuild the profile beneath the pointer during
+        /// the same frame. Suppress generated UI relays for that frame so the
+        /// newly-created Move/Sell/Breed controls cannot consume the original
+        /// selection tap as an action.
+        /// </summary>
+        public void SuppressGeneratedUiActionsThisFrame()
+        {
+            lastUiActionFrame = Time.frameCount;
+        }
+
         public bool IsModalOverlayOpen
         {
             get
             {
                 return welcomeOpen || settingsOpen || developerToolsOpen || ratAnimationShowcaseOpen || eventLogOpen ||
                     (activeMainPanel == MainPanel.MyRats && !welcomeOpen && !settingsOpen && !developerToolsOpen &&
+                     !ratAnimationShowcaseOpen && !eventLogOpen) ||
+                    (activeMainPanel == MainPanel.FamilyTree && !welcomeOpen && !settingsOpen && !developerToolsOpen &&
                      !ratAnimationShowcaseOpen && !eventLogOpen);
             }
         }
@@ -265,6 +279,13 @@ namespace RatHabitat
                 // My Rats is a modal page from the world's point of view, but
                 // its own generated controls still need the normal UI fallback
                 // path when EventSystem dispatch is unavailable on Android.
+                return (pageScroll != null && relay.transform.IsChildOf(pageScroll.transform)) ||
+                    (headerContent != null && relay.transform.IsChildOf(headerContent));
+            }
+            if (activeOverlay == null && activeMainPanel == MainPanel.FamilyTree &&
+                !welcomeOpen && !settingsOpen && !developerToolsOpen &&
+                !ratAnimationShowcaseOpen && !eventLogOpen)
+            {
                 return (pageScroll != null && relay.transform.IsChildOf(pageScroll.transform)) ||
                     (headerContent != null && relay.transform.IsChildOf(headerContent));
             }
@@ -479,6 +500,19 @@ namespace RatHabitat
             blockerImage.color = new Color(0f, 0f, 0f, 0.001f);
             blockerImage.raycastTarget = true;
             myRatsInputBlocker.SetSiblingIndex(scrollObject.transform.GetSiblingIndex());
+
+            // Family Tree is a page-level modal interaction surface. Keep a
+            // separate blocker so empty tree/card space cannot send the same
+            // pointer through to a live rat or camera gesture underneath it.
+            familyTreeInputBlocker = CreateRect("Family Tree Input Blocker", safeRoot);
+            familyTreeInputBlocker.anchorMin = Vector2.zero;
+            familyTreeInputBlocker.anchorMax = Vector2.one;
+            familyTreeInputBlocker.offsetMin = Vector2.zero;
+            familyTreeInputBlocker.offsetMax = new Vector2(0f, -PageTopInset);
+            var familyTreeBlockerImage = familyTreeInputBlocker.gameObject.AddComponent<Image>();
+            familyTreeBlockerImage.color = new Color(0f, 0f, 0f, 0.001f);
+            familyTreeBlockerImage.raycastTarget = true;
+            familyTreeInputBlocker.SetSiblingIndex(scrollObject.transform.GetSiblingIndex());
 
             var viewport = CreateRect("Page Viewport", scrollRect);
             viewport.anchorMin = Vector2.zero;
@@ -1164,6 +1198,13 @@ namespace RatHabitat
                     !welcomeOpen && !settingsOpen && !developerToolsOpen &&
                     !ratAnimationShowcaseOpen && !eventLogOpen;
                 myRatsInputBlocker.gameObject.SetActive(blockWorldForMyRats);
+            }
+            if (familyTreeInputBlocker != null)
+            {
+                bool blockWorldForFamilyTree = activeMainPanel == MainPanel.FamilyTree &&
+                    !welcomeOpen && !settingsOpen && !developerToolsOpen &&
+                    !ratAnimationShowcaseOpen && !eventLogOpen;
+                familyTreeInputBlocker.gameObject.SetActive(blockWorldForFamilyTree);
             }
         }
 
@@ -2061,8 +2102,10 @@ namespace RatHabitat
                 var breedButton = AddButton(details, canBreed ? "Breed" : "Breed unavailable — " + reason, canBreed, game.OpenBreeding);
                 breedButton.gameObject.name = "Breed Button";
             }
-            AddButton(details, liveRat ? "Return to Habitat" : "Back to Family Tree", true,
-                liveRat ? game.ReturnToHabitat : () => OpenFamilyTree(rat.id));
+            UnityEngine.Events.UnityAction returnAction = liveRat
+                ? new UnityEngine.Events.UnityAction(game.ReturnToHabitat)
+                : new UnityEngine.Events.UnityAction(() => OpenFamilyTree(rat.id));
+            AddButton(details, liveRat ? "Return to Habitat" : "Back to Family Tree", true, returnAction);
 
             if (rat.removalDisposition == RatRemovalDisposition.Sold)
             {
@@ -2111,8 +2154,9 @@ namespace RatHabitat
         private sealed class FamilyTreeEntry
         {
             public string path;
+            public string parentPath;
             public RatData rat;
-            public int generation;
+            public int level;
             public int index;
             public Vector2 center;
         }
@@ -2123,6 +2167,7 @@ namespace RatHabitat
             familyTreeFocusId = ratId;
             activeMainPanel = MainPanel.FamilyTree;
             Refresh(true);
+            SetOverlayVisibility();
             RefreshTopNavigationState();
         }
 
@@ -2130,6 +2175,7 @@ namespace RatHabitat
         {
             activeMainPanel = MainPanel.None;
             Refresh(true);
+            SetOverlayVisibility();
             RefreshTopNavigationState();
         }
 
@@ -2138,8 +2184,11 @@ namespace RatHabitat
             RatData rat = game == null ? null : BreedingSystem.FindHistoricalRat(game.Save, ratId);
             if (rat == null) return;
             familyTreeFocusId = ratId;
-            if (!IsHistoricalRat(rat)) game.FocusRatForFamilyTree(ratId);
-            else Refresh(true);
+            // Family-tree navigation is informational. Do not change the
+            // habitat selection or camera while the player is exploring
+            // ancestors and descendants; the selected tree card itself is the
+            // focus and the profile uses familyTreeFocusId when reopened.
+            Refresh(true);
         }
 
         private void AddFamilyTreePanel(RectTransform parent)
@@ -2192,44 +2241,86 @@ namespace RatHabitat
             viewport.gameObject.AddComponent<RectMask2D>();
             scroll.viewport = viewport;
 
-            const float treeWidth = 1100f;
-            const float treeHeight = 1580f;
-            const float nodeWidth = 178f;
-            const float nodeHeight = 92f;
-            const float columnSpacing = 215f;
+            const float nodeWidth = 210f;
+            const float nodeHeight = 112f;
+            const float levelSpacing = 142f;
+            const float treeMargin = 32f;
             var treeContent = CreateRect("Family Tree Content", viewport);
             familyTreeContent = treeContent;
             treeContent.anchorMin = new Vector2(0f, 1f);
             treeContent.anchorMax = new Vector2(0f, 1f);
             treeContent.pivot = new Vector2(0f, 1f);
             treeContent.anchoredPosition = Vector2.zero;
-            treeContent.sizeDelta = new Vector2(treeWidth, treeHeight);
             treeContent.localScale = Vector3.one * familyTreeZoom;
             scroll.content = treeContent;
 
             var entries = new List<FamilyTreeEntry>();
-            BuildFamilyTreeEntries(focus, 0, 0, "root", entries);
-            var byPath = new Dictionary<string, FamilyTreeEntry>();
+            BuildFamilyTreeAncestors(focus, 0, "root", null, entries);
+            BuildFamilyTreeDescendants(focus, 0, "root", entries, new HashSet<string> { focus.id });
+
+            var entriesByLevel = new Dictionary<int, List<FamilyTreeEntry>>();
+            int minimumLevel = 0;
+            int maximumLevel = 0;
+            int widestLevel = 1;
             foreach (var entry in entries)
             {
-                float usableHeight = treeHeight - 70f;
-                int count = 1 << entry.generation;
-                float y = 35f + (entry.index + 0.5f) * usableHeight / count;
-                float x = 20f + (4 - entry.generation) * columnSpacing + nodeWidth * 0.5f;
-                entry.center = new Vector2(x, y);
-                byPath[entry.path] = entry;
+                List<FamilyTreeEntry> levelEntries;
+                if (!entriesByLevel.TryGetValue(entry.level, out levelEntries))
+                {
+                    levelEntries = new List<FamilyTreeEntry>();
+                    entriesByLevel.Add(entry.level, levelEntries);
+                }
+                levelEntries.Add(entry);
+                minimumLevel = Mathf.Min(minimumLevel, entry.level);
+                maximumLevel = Mathf.Max(maximumLevel, entry.level);
+                widestLevel = Mathf.Max(widestLevel, levelEntries.Count);
             }
+
+            // Keep the focused rat in the visual middle even when only one
+            // side of the family exists. Empty rows provide breathing room
+            // instead of pushing a root to the top or bottom edge.
+            int displayMinimumLevel = Mathf.Min(minimumLevel, -maximumLevel);
+            int displayMaximumLevel = Mathf.Max(maximumLevel, -minimumLevel);
+            float treeWidth = Mathf.Max(1100f, widestLevel * (nodeWidth + 24f) + treeMargin * 2f);
+            float treeHeight = (displayMaximumLevel - displayMinimumLevel + 1) * levelSpacing + treeMargin * 2f;
+            treeContent.sizeDelta = new Vector2(treeWidth, treeHeight);
+
+            foreach (var level in entriesByLevel)
+            {
+                level.Value.Sort((first, second) => first.index.CompareTo(second.index));
+                float usableWidth = treeWidth - treeMargin * 2f;
+                for (int index = 0; index < level.Value.Count; index++)
+                {
+                    FamilyTreeEntry entry = level.Value[index];
+                    entry.index = index;
+                    float x = treeMargin + (index + 0.5f) * usableWidth / level.Value.Count;
+                    float y = treeMargin + (entry.level - displayMinimumLevel + 0.5f) * levelSpacing;
+                    entry.center = new Vector2(x, y);
+                }
+            }
+
+            var byPath = new Dictionary<string, FamilyTreeEntry>();
+            foreach (var entry in entries) byPath[entry.path] = entry;
 
             // Draw relationship lines first so every node remains readable.
             foreach (var entry in entries)
             {
                 if (entry.path == "root") continue;
-                string parentPath = entry.path.Substring(0, entry.path.Length - 1);
                 FamilyTreeEntry parentEntry;
-                if (!byPath.TryGetValue(parentPath, out parentEntry)) continue;
-                AddFamilyTreeLine(treeContent,
-                    entry.center + new Vector2(nodeWidth * 0.5f, 0f),
-                    parentEntry.center - new Vector2(nodeWidth * 0.5f, 0f));
+                if (!byPath.TryGetValue(entry.parentPath, out parentEntry)) continue;
+                Vector2 start = parentEntry.center;
+                Vector2 end = entry.center;
+                if (entry.level < parentEntry.level)
+                {
+                    start += new Vector2(0f, -nodeHeight * 0.5f);
+                    end += new Vector2(0f, nodeHeight * 0.5f);
+                }
+                else
+                {
+                    start += new Vector2(0f, nodeHeight * 0.5f);
+                    end += new Vector2(0f, -nodeHeight * 0.5f);
+                }
+                AddFamilyTreeLine(treeContent, start, end);
             }
 
             foreach (var entry in entries)
@@ -2240,22 +2331,74 @@ namespace RatHabitat
             scroll.verticalNormalizedPosition = 0.5f;
         }
 
-        private void BuildFamilyTreeEntries(RatData rat, int generation, int index, string path,
+        private void BuildFamilyTreeAncestors(RatData rat, int level, string path, string parentPath,
             List<FamilyTreeEntry> entries)
         {
             entries.Add(new FamilyTreeEntry
             {
                 path = path,
+                parentPath = parentPath,
                 rat = rat,
-                generation = generation,
-                index = index,
+                level = level,
+                index = level == 0 ? 0 : entries.Count,
             });
-            if (generation >= 4) return;
+            if (rat == null || level <= -4) return;
 
             RatData mother = rat == null ? null : BreedingSystem.FindHistoricalRat(game.Save, rat.motherId);
             RatData father = rat == null ? null : BreedingSystem.FindHistoricalRat(game.Save, rat.fatherId);
-            BuildFamilyTreeEntries(mother, generation + 1, index * 2, path + "M", entries);
-            BuildFamilyTreeEntries(father, generation + 1, index * 2 + 1, path + "F", entries);
+            BuildFamilyTreeAncestors(mother, level - 1, path + "M", path, entries);
+            BuildFamilyTreeAncestors(father, level - 1, path + "F", path, entries);
+        }
+
+        private void BuildFamilyTreeDescendants(RatData rat, int level, string path,
+            List<FamilyTreeEntry> entries, HashSet<string> visited)
+        {
+            if (rat == null || level >= 4) return;
+            List<RatData> children = FindHistoricalChildren(rat.id);
+            for (int index = 0; index < children.Count; index++)
+            {
+                RatData child = children[index];
+                if (child == null || string.IsNullOrEmpty(child.id) || !visited.Add(child.id)) continue;
+                string childPath = path + "/C" + index;
+                entries.Add(new FamilyTreeEntry
+                {
+                    path = childPath,
+                    parentPath = path,
+                    rat = child,
+                    level = level + 1,
+                    index = index,
+                });
+                BuildFamilyTreeDescendants(child, level + 1, childPath, entries, visited);
+            }
+        }
+
+        private List<RatData> FindHistoricalChildren(string parentId)
+        {
+            var result = new List<RatData>();
+            if (game == null || game.Save == null || string.IsNullOrEmpty(parentId)) return result;
+            var seen = new HashSet<string>();
+            AddHistoricalChildrenFromList(game.Save.rats, parentId, seen, result);
+            AddHistoricalChildrenFromList(game.Save.retiredRats, parentId, seen, result);
+            result.Sort((first, second) =>
+            {
+                int timestamp = first.birthTimestamp.CompareTo(second.birthTimestamp);
+                if (timestamp != 0) return timestamp;
+                int name = string.Compare(first.name, second.name, StringComparison.OrdinalIgnoreCase);
+                return name != 0 ? name : string.Compare(first.id, second.id, StringComparison.OrdinalIgnoreCase);
+            });
+            return result;
+        }
+
+        private static void AddHistoricalChildrenFromList(List<RatData> source, string parentId,
+            HashSet<string> seen, List<RatData> result)
+        {
+            if (source == null) return;
+            foreach (var candidate in source)
+            {
+                if (candidate == null || string.IsNullOrEmpty(candidate.id) ||
+                    (candidate.motherId != parentId && candidate.fatherId != parentId) || !seen.Add(candidate.id)) continue;
+                result.Add(candidate);
+            }
         }
 
         private void AddFamilyTreeLine(RectTransform parent, Vector2 start, Vector2 end)
@@ -2286,9 +2429,12 @@ namespace RatHabitat
             node.sizeDelta = new Vector2(width, height);
             var image = node.gameObject.AddComponent<Image>();
             bool historical = IsHistoricalRat(entry.rat);
+            bool focused = entry.path == "root";
             UiStyle.ApplyRounded(image, entry.rat == null
                 ? new Color(0.10f, 0.13f, 0.14f, 0.94f)
-                : (historical ? new Color(0.23f, 0.25f, 0.25f, 0.96f) : new Color(0.08f, 0.18f, 0.17f, 0.96f)), true);
+                : (historical ? new Color(0.23f, 0.25f, 0.25f, 0.96f)
+                    : (focused ? new Color(0.18f, 0.32f, 0.20f, 0.98f)
+                        : new Color(0.08f, 0.18f, 0.17f, 0.96f))), true);
             image.raycastTarget = entry.rat != null;
             var layout = node.gameObject.AddComponent<VerticalLayoutGroup>();
             layout.spacing = 1f;
@@ -2316,7 +2462,9 @@ namespace RatHabitat
                 ? "Hidden" : entry.rat.phenotype.coatColorLabel;
             string markings = entry.rat.phenotype == null || !entry.rat.phenotype.furRevealed
                 ? "Hidden" : entry.rat.phenotype.markingsLabel;
-            AddText(node, entry.rat.name, 12, Color.white, TextAnchor.MiddleCenter).fontStyle = FontStyle.Bold;
+            AddText(node, (focused ? "FOCUS • " : "") + entry.rat.name, 12,
+                historical ? new Color(0.92f, 0.94f, 0.92f) : Color.white,
+                TextAnchor.MiddleCenter).fontStyle = FontStyle.Bold;
             AddText(node, SexLabel(entry.rat.sex) + " • " + GrowthSystem.StageLabel(entry.rat.stage), 10,
                 new Color(0.86f, 0.91f, 0.87f), TextAnchor.MiddleCenter);
             AddText(node, coat + " • " + markings, 9, new Color(1f, 0.84f, 0.52f), TextAnchor.MiddleCenter);

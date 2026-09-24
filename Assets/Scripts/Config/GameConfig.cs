@@ -4,7 +4,7 @@ namespace RatHabitat
 {
     public static class GameConfig
     {
-        public const int SaveVersion = 2;
+        public const int SaveVersion = 3;
         public const long GameDayMs = 24L * 60L * 60L * 1000L;
         public const long StartGameTimeMs = 8L * 60L * 60L * 1000L;
         // Biological timing is expressed in simulated days. The legacy
@@ -28,6 +28,10 @@ namespace RatHabitat
         public const float FertilityDeclinePerDay = 0.06f;
         public const long BreedingCooldownMs = 30L * 1000L;
         public const long PairingCheckIntervalMs = 30L * 1000L;
+        // Applies to a resolved Pairing Habitat attempt, including a failed
+        // conception. This is serialized on each RatData record so a save or
+        // reload cannot cause the same pair to retry immediately.
+        public const long PairingAttemptCooldownMs = 30L * 1000L;
         public const float PairingPregnancyChance = 0.20f;
         public const float DedicatedBreedingSessionHours = 2f;
         public const float DedicatedBreedingSuccessBonus = 0.25f;
@@ -110,7 +114,30 @@ namespace RatHabitat
         public const string PinkiePrototypeResourcePath = "HandPaintedRat_Pinkie";
 
         public static readonly string[] Loci = { "B", "C", "D", "S" };
-        public static readonly string[] PupNames = { "Pip", "Noodle", "Mochi", "Bean", "Peanut", "Dumpling", "Sprout", "Mallow" };
+
+        // Display names are intentionally not unique. Rat IDs remain the
+        // identity used by selection, breeding, history, and save data, so a
+        // repeated friendly name is safe and much more natural than adding a
+        // numeric suffix every time a name is reused.
+        public static readonly string[] MaleRatNames =
+        {
+            "Otto", "Randy", "Branch", "Biscuit", "Pickle", "Peanut", "Milo", "Jasper",
+            "Theo", "Gus", "Waffles", "Truffle", "Oatmeal", "Nugget", "Pippin", "Toby",
+            "Mochi", "Bean", "Sprout", "Pancake", "Toast", "Cricket", "Hobbes", "Bramble"
+        };
+        public static readonly string[] FemaleRatNames =
+        {
+            "Mabel", "Olive", "Mochi", "Noodle", "Peaches", "Marmalade", "Clover", "Bonnie",
+            "Honey", "Pudding", "Daisy", "Hazel", "Maple", "Poppy", "Willow", "Maisie",
+            "Taffy", "Toffee", "Cinnamon", "Biscuit", "Muffin", "Juniper", "Winnie", "Pearl"
+        };
+        // Kept as a compatibility alias for older tooling. These are
+        // individual rat names, not litter names.
+        public static readonly string[] PupNames =
+        {
+            "Pip", "Noodle", "Mochi", "Bean", "Peanut", "Dumpling", "Sprout", "Mallow",
+            "Muffin", "Button", "Pebble", "Taffy", "Toffee", "Poppy", "Cricket", "Bramble"
+        };
 
         public static string DominantAllele(string locus)
         {

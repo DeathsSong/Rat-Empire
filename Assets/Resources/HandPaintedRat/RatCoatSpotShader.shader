@@ -42,20 +42,29 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             fixed4 painted = tex2D(_MainTex, input.uv_MainTex) * _Color;
             float paintedLuminance = dot(painted.rgb, float3(0.299, 0.587, 0.114));
             // Albino remains recognizably hand-painted through luminance
-            // variation, but the source beige/brown hue is removed. This
-            // prevents albino from reading as diluted brown while leaving
-            // the source texture and the shared imported material untouched.
-            fixed3 albinoPainted = _AlbinoBodyColor.rgb * (0.86 + saturate(paintedLuminance) * 0.18);
+            // variation, but the source beige/brown hue is removed. The
+            // original map is intentionally retained: on the imported rat it
+            // contains the face and tail details as pixels on the same mesh.
+            fixed3 albinoFur = _AlbinoBodyColor.rgb * (0.82 + saturate(paintedLuminance) * 0.21);
+
+            // Very dark source pixels are feature lines (eyes, mouth, nose
+            // edges, whisker roots, and tail segmentation) rather than the
+            // fur field. Keep them dark and neutral so they remain readable
+            // after the surrounding fur is neutralized to white. A soft
+            // threshold preserves natural shadow transitions without turning
+            // the whole rat brown again.
+            float darkFeatureSignal = 1.0 - smoothstep(0.08, 0.24, paintedLuminance);
+            fixed3 darkFeature = fixed3(0.10, 0.075, 0.075) *
+                (0.82 + saturate(paintedLuminance) * 0.34);
+            fixed3 albinoPainted = lerp(albinoFur, darkFeature, darkFeatureSignal * 0.92);
+
             // Preserve pink/red accent pixels from the supplied hand-painted
             // texture (ears, nose, paws, and eye accents) without allowing
             // the source beige/tan coat to leak back into the albino body.
             float pinkSignal = saturate((painted.r - painted.g) * 5.0) *
                 saturate(1.0 - abs(painted.g - painted.b) * 8.0);
             fixed3 pinkAccent = fixed3(1.0, 0.58, 0.62) * (0.82 + saturate(painted.r) * 0.16);
-            albinoPainted = lerp(albinoPainted, pinkAccent, pinkSignal * 0.9);
-            float darkFeatureSignal = saturate((0.38 - paintedLuminance) * 4.0);
-            fixed3 paleEyeAccent = fixed3(0.92, 0.5, 0.54);
-            albinoPainted = lerp(albinoPainted, paleEyeAccent, darkFeatureSignal * 0.72);
+            albinoPainted = lerp(albinoPainted, pinkAccent, pinkSignal * 0.78);
             painted.rgb = lerp(painted.rgb, albinoPainted, _AlbinoMode);
             float bodyMask = tex2D(_SpotMask, input.uv_MainTex).r;
             // The organic patch mask is generated once per rat visual from

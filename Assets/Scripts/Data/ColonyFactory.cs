@@ -1,4 +1,5 @@
 using System;
+using UnityEngine;
 
 namespace RatHabitat
 {
@@ -54,9 +55,9 @@ namespace RatHabitat
 
         private static TraitData StarterTraits(string stableId)
         {
-            // Deterministic pseudo-random beginner quality: every generated
-            // value is capped at 15% of the normal 0-100 stat range while the
-            // two founders still receive different, natural-looking values.
+            // Deterministic pseudo-random beginner quality. These are absolute
+            // stat values, not percentages: every founder value is in the
+            // inclusive 0-15 beginner range while the pair remains distinct.
             unchecked
             {
                 uint hash = 2166136261u;
@@ -64,33 +65,55 @@ namespace RatHabitat
                 for (int index = 0; index < key.Length; index++)
                     hash = (hash ^ key[index]) * 16777619u;
                 return new TraitData(
-                    8f + (hash % 8u),
-                    8f + ((hash >> 3) % 8u),
-                    8f + ((hash >> 6) % 8u));
+                    hash % 16u,
+                    (hash >> 3) % 16u,
+                    (hash >> 6) % 16u);
             }
         }
 
         public static bool MigrateLegacyStarterStats(ColonySaveData save)
         {
-            if (save == null || save.schemaVersion >= 2) return false;
+            if (save == null) return false;
             bool changed = false;
-            if (save.rats == null) return false;
-            foreach (var rat in save.rats)
+            changed |= NormalizeDisplayNames(save);
+            if (save.rats != null)
             {
-                if (rat == null || rat.generation != 0 || rat.removalDisposition != RatRemovalDisposition.None) continue;
-                if (rat.id != "rat_mabel" && rat.id != "rat_otto") continue;
+                foreach (var rat in save.rats)
+                {
+                    if (!IsBeginnerFounder(rat)) continue;
 
-                TraitData starter = StarterTraits(rat.id);
-                if (rat.traits == null) rat.traits = new TraitData();
-                rat.traits.size = starter.size;
-                rat.traits.health = starter.health;
-                rat.traits.fertility = starter.fertility;
-                rat.baseHealth = starter.health;
-                rat.baseFertility = starter.fertility;
+                    TraitData starter = StarterTraits(rat.id);
+                    if (rat.traits == null) rat.traits = new TraitData();
+                    if (!Mathf.Approximately(rat.traits.size, starter.size) ||
+                        !Mathf.Approximately(rat.traits.health, starter.health) ||
+                        !Mathf.Approximately(rat.traits.fertility, starter.fertility) ||
+                        !Mathf.Approximately(rat.baseHealth, starter.health) ||
+                        !Mathf.Approximately(rat.baseFertility, starter.fertility))
+                    {
+                        rat.traits.size = starter.size;
+                        rat.traits.health = starter.health;
+                        rat.traits.fertility = starter.fertility;
+                        rat.baseHealth = starter.health;
+                        rat.baseFertility = starter.fertility;
+                        changed = true;
+                    }
+                }
+            }
+
+            if (save.schemaVersion < GameConfig.SaveVersion)
+            {
+                save.schemaVersion = GameConfig.SaveVersion;
                 changed = true;
             }
-            save.schemaVersion = 2;
             return changed;
+        }
+
+        public static bool IsBeginnerFounder(RatData rat)
+        {
+            return rat != null && rat.generation == 0 &&
+                rat.removalDisposition == RatRemovalDisposition.None &&
+                string.IsNullOrEmpty(rat.motherId) && string.IsNullOrEmpty(rat.fatherId) &&
+                (rat.id == "rat_mabel" || rat.id == "rat_otto");
         }
 
         public static void EnsureDefaultHabitatObjects(ColonySaveData save)
@@ -125,7 +148,7 @@ namespace RatHabitat
             var rat = new RatData
             {
                 id = id,
-                name = name,
+                name = string.IsNullOrWhiteSpace(name) ? GeneratedName(id, sex) : NormalizeDisplayName(name),
                 sex = sex,
                 stage = stageOverride,
                 generation = generation,
@@ -152,6 +175,75 @@ namespace RatHabitat
             rat.ageDays = 0f;
             GrowthSystem.EnsureBiologyDefaults(rat);
             return rat;
+        }
+
+        /// <summary>
+        /// Returns a stable friendly name from the sex-specific pool. The
+        /// stable ID is used only to select a name; it is never displayed.
+        /// </summary>
+        public static string GeneratedName(string id, RatSex sex)
+        {
+            string[] pool = sex == RatSex.Female ? GameConfig.FemaleRatNames : GameConfig.MaleRatNames;
+            if (pool == null || pool.Length == 0) return sex == RatSex.Female ? "Mabel" : "Otto";
+            return pool[StableHash(id) % pool.Length];
+        }
+
+        /// <summary>
+        /// Migrates old generated names such as "Mabel 4" while preserving
+        /// arbitrary names and every rat's internal ID.
+        /// </summary>
+        public static string NormalizeDisplayName(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return value;
+            string result = value.Trim();
+            int end = result.Length;
+            int digitStart = end;
+            while (digitStart > 0 && char.IsDigit(result[digitStart - 1])) digitStart--;
+            if (digitStart < end && digitStart > 0 && char.IsWhiteSpace(result[digitStart - 1]))
+                result = result.Substring(0, digitStart).TrimEnd();
+            return result;
+        }
+
+        public static bool NormalizeDisplayNames(ColonySaveData save)
+        {
+            if (save == null) return false;
+            save.EnsureLists();
+            bool changed = false;
+            foreach (var rat in save.rats)
+                changed |= NormalizeRatName(rat);
+            foreach (var rat in save.retiredRats)
+                changed |= NormalizeRatName(rat);
+            foreach (var listing in save.storeRatListings)
+            {
+                if (listing == null) continue;
+                string normalized = NormalizeDisplayName(listing.name);
+                if (normalized != listing.name)
+                {
+                    listing.name = normalized;
+                    changed = true;
+                }
+            }
+            return changed;
+        }
+
+        private static bool NormalizeRatName(RatData rat)
+        {
+            if (rat == null) return false;
+            string normalized = NormalizeDisplayName(rat.name);
+            if (normalized == rat.name) return false;
+            rat.name = normalized;
+            return true;
+        }
+
+        private static int StableHash(string value)
+        {
+            unchecked
+            {
+                uint hash = 2166136261u;
+                string key = value ?? string.Empty;
+                for (int i = 0; i < key.Length; i++) hash = (hash ^ key[i]) * 16777619u;
+                return (int)(hash & 0x7fffffff);
+            }
         }
 
         public static string NewId(string prefix)

@@ -8,8 +8,8 @@ namespace RatHabitat
     /// </summary>
     public static class StoreSystem
     {
-        private static readonly string[] MaleNames = { "Biscuit", "Pancake", "Pickle", "Truffle", "Waffles", "Oatmeal" };
-        private static readonly string[] FemaleNames = { "Marmalade", "Peaches", "Clover", "Bonnie", "Honey", "Pudding" };
+        private static readonly string[] MaleNames = GameConfig.MaleRatNames;
+        private static readonly string[] FemaleNames = GameConfig.FemaleRatNames;
 
         // Weighted toward common pet-rat patterns while keeping rarer families
         // in the market. The selected family is persisted on the listing.
@@ -233,6 +233,7 @@ namespace RatHabitat
             foreach (var listing in save.storeRatListings)
             {
                 if (listing == null) continue;
+                listing.name = ColonyFactory.NormalizeDisplayName(listing.name);
                 if (listing.genotype == null) listing.genotype = new GenotypeData();
                 GeneticsSystem.Normalize(listing.genotype);
                 listing.markingFamily = GeneticsSystem.NormalizeMarkingFamily(listing.markingFamily, listing.genotype);

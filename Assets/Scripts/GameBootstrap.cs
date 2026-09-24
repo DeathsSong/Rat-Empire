@@ -840,7 +840,7 @@ namespace RatHabitat
 
             if (resolved && conceptionSucceeded)
             {
-                StatusMessage = female.name + " is pregnant";
+                StatusMessage = female.name + " and " + male.name + " are breeding";
             }
             else
             {
@@ -1047,6 +1047,7 @@ namespace RatHabitat
         public bool SelectEntity(SelectableEntity entity)
         {
             habitatZoomOffset = 0f;
+            ClearPendingSelectionActions();
             if (entity == null)
             {
                 // A valid world tap that does not hit an interactable is an
@@ -1056,6 +1057,7 @@ namespace RatHabitat
                 selectedObjectId = null;
                 cameraView = HabitatCameraView.Overview;
                 if (rats != null) rats.SetSelected(null);
+                if (ui != null) ui.SuppressGeneratedUiActionsThisFrame();
                 if (ui != null) ui.Refresh(true);
                 return true;
             }
@@ -1090,8 +1092,20 @@ namespace RatHabitat
                 selectedRatId = null;
             }
             if (rats != null) rats.SetSelected(entity.kind == SelectableKind.Rat ? entity.entityId : null);
+            if (ui != null) ui.SuppressGeneratedUiActionsThisFrame();
             if (ui != null) ui.Refresh(true);
             return true;
+        }
+
+        private void ClearPendingSelectionActions()
+        {
+            // Selection is inspection only. Any confirmation that was armed
+            // for a previous rat must be cancelled before a new profile is
+            // rebuilt, otherwise a refreshed control could inherit the old
+            // rat's pending action.
+            sellConfirmationRatId = null;
+            euthanizeConfirmationRatId = null;
+            deleteConfirmationRatId = null;
         }
 
         public void ToggleMultipleSelectionMode()
@@ -1138,6 +1152,7 @@ namespace RatHabitat
             selectedRatId = null;
             selectedObjectId = null;
             if (rats != null) rats.SetSelectedGroup(selectedRatIds);
+            if (ui != null) ui.SuppressGeneratedUiActionsThisFrame();
             if (ui != null) ui.Refresh(true);
         }
 
@@ -1692,6 +1707,7 @@ namespace RatHabitat
                 return;
             }
 
+            ClearPendingSelectionActions();
             habitatZoomOffset = 0f;
             selectedRatId = rat.id;
             selectedObjectId = null;
@@ -1705,6 +1721,7 @@ namespace RatHabitat
             breedingSelectionSlot = BreedingParentSlot.None;
             EnclosureSystem.ClearBreedingPair();
             if (rats != null) rats.SetSelected(rat.id);
+            if (ui != null) ui.SuppressGeneratedUiActionsThisFrame();
             if (ui != null) ui.Refresh(true);
         }
 
@@ -1718,11 +1735,13 @@ namespace RatHabitat
             var rat = BreedingSystem.FindRat(Save, id);
             if (rat == null) return;
 
+            ClearPendingSelectionActions();
             habitatZoomOffset = 0f;
             selectedRatId = rat.id;
             selectedObjectId = null;
             cameraView = CameraViewForRat(rat);
             if (rats != null) rats.SetSelected(rat.id);
+            if (ui != null) ui.SuppressGeneratedUiActionsThisFrame();
             if (ui != null) ui.Refresh(true);
         }
 
@@ -1956,54 +1975,42 @@ namespace RatHabitat
                 return;
             }
 
-            string label;
             GenotypeData genotype;
             switch (preset)
             {
                 case DeveloperRatPreset.SolidBlack:
-                    label = "Solid Black";
                     genotype = GeneticsSystem.CreateFounder("B", "B", "C", "C", "D", "D", "s", "s");
                     break;
                 case DeveloperRatPreset.SolidBrown:
-                    label = "Solid Brown";
                     genotype = GeneticsSystem.CreateFounder("b", "b", "C", "C", "D", "D", "s", "s");
                     break;
                 case DeveloperRatPreset.DilutedBlack:
-                    label = "Diluted Black";
                     genotype = GeneticsSystem.CreateFounder("B", "B", "C", "C", "d", "d", "s", "s");
                     break;
                 case DeveloperRatPreset.DilutedBrown:
-                    label = "Diluted Brown";
                     genotype = GeneticsSystem.CreateFounder("b", "b", "C", "C", "d", "d", "s", "s");
                     break;
                 case DeveloperRatPreset.Albino:
-                    label = "Albino";
                     genotype = GeneticsSystem.CreateFounder("B", "B", "c", "c", "D", "D", "s", "s");
                     break;
                 case DeveloperRatPreset.SpottedBlack:
-                    label = "Spotted Black";
                     genotype = GeneticsSystem.CreateFounder("B", "B", "C", "C", "D", "D", "S", "S");
                     break;
                 default:
-                    label = "Spotted Brown";
                     genotype = GeneticsSystem.CreateFounder("b", "b", "C", "C", "D", "D", "S", "S");
                     break;
             }
 
             Save.EnsureLists();
-            int ordinal = 1;
-            string name;
-            do
-            {
-                name = label + " Test " + ordinal;
-                ordinal++;
-            }
-            while (FindRatByName(name) != null);
-
             RatSex sex = Save.rats.Count % 2 == 0 ? RatSex.Female : RatSex.Male;
             long birthTimestamp = GameTime - (long)((GameConfig.YoungStageDays + 30f) * GameConfig.GameDayMs);
+            string developerId = ColonyFactory.NewId("dev_rat");
+            // Developer presets deliberately reuse the normal sex-specific
+            // friendly-name pools. IDs remain unique, so duplicate display
+            // names never compromise selection or save data.
+            string name = ColonyFactory.GeneratedName(developerId, sex);
             var rat = ColonyFactory.CreateRat(
-                ColonyFactory.NewId("dev_rat"),
+                developerId,
                 name,
                 sex,
                 birthTimestamp,

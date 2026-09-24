@@ -74,6 +74,23 @@ namespace RatHabitat
         {
             if (rat == null) return;
             rat.traits ??= new TraitData();
+
+            // The two new-game founders are intentionally absolute beginner
+            // values. Keep this guard here, at the authoritative biology
+            // boundary, so stage refreshes, save loading, and phenotype
+            // rebuilds cannot restore an old 0-100 default over their saved
+            // values. Bred offspring and developer/test rats do not match the
+            // founder identity check and are never reduced here.
+            bool beginnerFounder = ColonyFactory.IsBeginnerFounder(rat);
+            if (beginnerFounder)
+            {
+                rat.traits.size = Mathf.Clamp(rat.traits.size, 0f, 15f);
+                rat.traits.health = Mathf.Clamp(rat.traits.health, 0f, 15f);
+                rat.traits.fertility = Mathf.Clamp(rat.traits.fertility, 0f, 15f);
+                rat.baseHealth = rat.traits.health;
+                rat.baseFertility = rat.traits.fertility;
+            }
+
             int seed = StableSeed(rat.id);
             int lifespanRange = Mathf.Max(1, Mathf.RoundToInt(GameConfig.MaximumLifespanDays - GameConfig.MinimumLifespanDays));
             int breedingRange = Mathf.Max(1, Mathf.RoundToInt(GameConfig.MaximumBreedingEndDays - GameConfig.MinimumBreedingEndDays));
@@ -92,8 +109,8 @@ namespace RatHabitat
             }
             if (rat.estrousCycleAnchorGameTime <= 0L)
                 rat.estrousCycleAnchorGameTime = rat.birthTimestamp + (long)(rat.sexualMaturityDays * GameConfig.GameDayMs);
-            if (rat.baseHealth <= 0f) rat.baseHealth = rat.traits.health > 0f ? rat.traits.health : 50f;
-            if (rat.baseFertility <= 0f) rat.baseFertility = rat.traits.fertility > 0f ? rat.traits.fertility : 50f;
+            if (!beginnerFounder && rat.baseHealth <= 0f) rat.baseHealth = rat.traits.health > 0f ? rat.traits.health : 50f;
+            if (!beginnerFounder && rat.baseFertility <= 0f) rat.baseFertility = rat.traits.fertility > 0f ? rat.traits.fertility : 50f;
 
             // Only a female can carry a pregnancy. The father remains a
             // historical participant in PregnancyData and stays breedable.

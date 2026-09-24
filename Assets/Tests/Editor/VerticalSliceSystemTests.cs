@@ -27,6 +27,45 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void NewGameFoundersUseAbsoluteBeginnerStats()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            Assert.AreEqual(2, save.rats.Count);
+            Assert.AreNotEqual(save.rats[0].traits.size, save.rats[1].traits.size,
+                "The coordinated starter pair should not be identical clones.");
+            foreach (var rat in save.rats)
+            {
+                Assert.LessOrEqual(rat.traits.size, 15f);
+                Assert.LessOrEqual(rat.traits.health, 15f);
+                Assert.LessOrEqual(rat.traits.fertility, 15f);
+                Assert.LessOrEqual(rat.baseHealth, 15f);
+                Assert.LessOrEqual(rat.baseFertility, 15f);
+                Assert.GreaterOrEqual(rat.traits.size, 0f);
+                Assert.GreaterOrEqual(rat.traits.health, 0f);
+                Assert.GreaterOrEqual(rat.traits.fertility, 0f);
+            }
+        }
+
+        [Test]
+        public void StarterMigrationDoesNotReduceBredOffspringStats()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            var offspring = ColonyFactory.CreateRat(
+                "offspring", "Offspring", RatSex.Female, 1000000L, 1,
+                save.rats[0].genotype.Clone(), new TraitData(88f, 77f, 66f), RatStage.Adult);
+            offspring.motherId = save.rats[0].id;
+            offspring.fatherId = save.rats[1].id;
+            save.rats.Add(offspring);
+            save.schemaVersion = 2;
+
+            Assert.IsTrue(ColonyFactory.MigrateLegacyStarterStats(save));
+            Assert.AreEqual(88f, offspring.traits.size);
+            Assert.AreEqual(77f, offspring.traits.health);
+            Assert.AreEqual(66f, offspring.traits.fertility);
+            Assert.AreEqual(3, save.schemaVersion);
+        }
+
+        [Test]
         public void PreviewIsDeterministicAndDoesNotCreateRats()
         {
             var save = ColonyFactory.CreateNew(1000000L);
@@ -69,6 +108,95 @@ namespace RatHabitat.Tests
                 Assert.AreEqual("Unknown", pup.phenotype.coatColorLabel);
                 Assert.AreEqual(4, pup.genotype.loci.Count);
             }
+        }
+
+        [Test]
+        public void PairingFailureAppliesPersistedCooldownBeforeRetry()
+        {
+            const long gameTime = 500000000L;
+            var save = CreatePairingTestSave(gameTime, 80f);
+            RatData female = save.rats[0];
+            RatData male = save.rats[1];
+
+            bool conceptionSucceeded;
+            string reason;
+            Assert.IsTrue(PairingHabitatSystem.ResolvePair(
+                save, female, male, gameTime, 0f, out conceptionSucceeded, out reason), reason);
+            Assert.IsFalse(conceptionSucceeded);
+            Assert.IsNull(BreedingSystem.FindPendingPregnancyForMother(save, female.id));
+            Assert.AreEqual(gameTime + GameConfig.PairingAttemptCooldownMs, female.breedingCooldownUntil);
+            Assert.AreEqual(gameTime + GameConfig.PairingAttemptCooldownMs, male.breedingCooldownUntil);
+
+            RatData chosenMale;
+            RatData chosenFemale;
+            Assert.IsFalse(PairingHabitatSystem.TryChoosePair(save, gameTime + 1000L, out chosenMale, out chosenFemale));
+            Assert.IsTrue(PairingHabitatSystem.TryChoosePair(
+                save, gameTime + GameConfig.PairingAttemptCooldownMs + 1L, out chosenMale, out chosenFemale));
+        }
+
+        [Test]
+        public void PairingSuccessCreatesOnePregnancyAndBlocksRepeatResolution()
+        {
+            const long gameTime = 600000000L;
+            var save = CreatePairingTestSave(gameTime, 100f);
+            RatData female = save.rats[0];
+            RatData male = save.rats[1];
+
+            bool conceptionSucceeded;
+            string reason;
+            Assert.IsTrue(PairingHabitatSystem.ResolvePair(
+                save, female, male, gameTime, 1f, out conceptionSucceeded, out reason), reason);
+            Assert.IsTrue(conceptionSucceeded);
+            PregnancyData pregnancy = BreedingSystem.FindPendingPregnancyForMother(save, female.id);
+            Assert.IsNotNull(pregnancy);
+            Assert.AreEqual(ReproductiveState.Pregnant, female.reproductiveState);
+
+            bool secondSuccess;
+            Assert.IsFalse(PairingHabitatSystem.ResolvePair(
+                save, female, male, gameTime + GameConfig.PairingAttemptCooldownMs + 1L,
+                1f, out secondSuccess, out reason));
+            Assert.IsFalse(secondSuccess);
+            Assert.AreEqual(pregnancy.id, BreedingSystem.FindPendingPregnancyForMother(save, female.id).id);
+        }
+
+        [Test]
+        public void GeneratedRatNamesUseFriendlyPoolsAndMigrateNumericSuffixes()
+        {
+            string maleName = ColonyFactory.GeneratedName("same-rat-id", RatSex.Male);
+            string femaleName = ColonyFactory.GeneratedName("same-rat-id", RatSex.Female);
+            Assert.IsFalse(char.IsDigit(maleName[maleName.Length - 1]));
+            Assert.IsFalse(char.IsDigit(femaleName[femaleName.Length - 1]));
+            Assert.AreEqual("Mabel", ColonyFactory.NormalizeDisplayName("Mabel 4"));
+            Assert.AreEqual("Randy", ColonyFactory.NormalizeDisplayName("Randy 12"));
+        }
+
+        private static ColonySaveData CreatePairingTestSave(long gameTime, float fertility)
+        {
+            var save = ColonyFactory.CreateNew(gameTime);
+            var genotype = GeneticsSystem.CreateFounder("B", "b", "C", "C", "D", "D", "S", "s");
+            var female = ColonyFactory.CreateRat(
+                "pairing-female", "Olive", RatSex.Female,
+                gameTime - (100L * GameConfig.GameDayMs), 0,
+                genotype.Clone(), new TraitData(80f, 80f, fertility), RatStage.Adult);
+            var male = ColonyFactory.CreateRat(
+                "pairing-male", "Branch", RatSex.Male,
+                gameTime - (100L * GameConfig.GameDayMs), 0,
+                genotype.Clone(), new TraitData(80f, 80f, fertility), RatStage.Adult);
+            foreach (var rat in new[] { female, male })
+            {
+                rat.enclosure = RatEnclosure.Pairing;
+                rat.pairingHabitatAssigned = true;
+                rat.ageDays = 100f;
+                rat.reproductiveState = ReproductiveState.Fertile;
+                rat.estrousCycleAnchorGameTime = gameTime;
+                rat.sexualMaturityDays = rat.sex == RatSex.Female ? 70f : 56f;
+                rat.breedingEndAgeDays = 365f;
+                rat.baseHealth = rat.traits.health;
+                rat.baseFertility = rat.traits.fertility;
+                save.rats.Add(rat);
+                save.ratIds.Add(rat.id);
+            }
+            return save;
         }
 
         [Test]

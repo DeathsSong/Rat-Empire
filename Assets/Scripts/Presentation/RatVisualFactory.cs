@@ -110,10 +110,14 @@ namespace RatHabitat
             bool albino = rat.phenotype.coatColorId == "albino";
             bool spotted = rat.phenotype.spotted && !albino;
             bool importedVisual = IsImportedVisual(visual);
-            // Albino must not inherit the beige/khaki/grey source texture.
-            // Use the white material path below for imported bodies and keep
-            // only the intended pink detail shading.
-            var coatTexture = importedVisual && !albino ? ResolveCoatTexture(rat.phenotype.coatColorId) : null;
+            // Keep the authored hand-painted map for albinos. The map contains
+            // the eyes, mouth, whisker/tail shading, and other feature detail
+            // on this asset's single skinned renderer. The albino shader
+            // neutralizes only the fur color; replacing the map with
+            // Texture2D.whiteTexture erases those details entirely.
+            var coatTexture = importedVisual
+                ? ResolveCoatTexture(albino ? "albino" : rat.phenotype.coatColorId)
+                : null;
             Shader spotShader = null;
             Texture2D spotMask = null;
             // Albino uses the same hand-painted source texture through a
@@ -147,41 +151,41 @@ namespace RatHabitat
                         materials[materialIndex] = material;
                     }
                     string materialName = material.name.ToLowerInvariant();
-                    bool detailMaterial = IsDetailMaterial(rendererName, materialName);
-                    // A separate eye/pupil/nose material, when supplied by a
-                    // future imported variant, should receive the albino
-                    // accent. The current FBX has one rat_mesh material, so
-                    // this remains a no-op for unsupported split materials.
-                    bool albinoDetail = albino && IsAlbinoDetailMaterial(rendererName, materialName);
-                    if (detailMaterial && !albinoDetail) continue;
+                    bool featureMaterial = IsFeatureMaterial(rendererName, materialName);
+                    // A separate feature renderer/material slot must remain
+                    // on its authored texture. This protects eyes, mouth,
+                    // ears, feet, whiskers, and segmented tail materials when
+                    // an imported variant is split into multiple renderers.
+                    // The current FBX has one rat_mesh material, so the shader
+                    // below preserves its baked feature pixels instead.
+                    bool albinoFeature = albino && featureMaterial;
+                    if (featureMaterial && !albinoFeature) continue;
 
-                    if (useCoatShader && !detailMaterial)
+                    if (useCoatShader && !featureMaterial)
                     {
                         material.shader = spotShader;
                     }
 
-                    Color target = (IsAccentMaterial(rendererName, materialName) || albinoDetail) ? accent : coat;
+                    bool albinoPinkFeature = albinoFeature && IsAlbinoPinkFeature(rendererName, materialName);
+                    Color target = IsAccentMaterial(rendererName, materialName) || albinoPinkFeature
+                        ? accent
+                        : (albinoFeature ? Color.white : coat);
                     // Keep the hand-painted texture's detail while making the
                     // genetics result the dominant color signal.
                     target = Color.Lerp(Color.white, target, 0.94f);
                     renderer.SetPropertyBlock(null, materialIndex);
                     if (material.HasProperty("_BaseColor")) material.SetColor("_BaseColor", target);
                     if (material.HasProperty("_Color")) material.SetColor("_Color", target);
-                    if (importedVisual && !detailMaterial && albino)
+                    if (importedVisual && !featureMaterial && coatTexture != null)
                     {
-                        // The imported hand-painted source is warm beige. A
-                        // white base map makes albino fur visibly white in
-                        // habitat, portraits, Store previews, and profiles;
-                        // the material's lighting still supplies form.
-                        if (material.HasProperty("_BaseMap")) material.SetTexture("_BaseMap", Texture2D.whiteTexture);
-                        if (material.HasProperty("_MainTex")) material.SetTexture("_MainTex", Texture2D.whiteTexture);
-                    }
-                    else if (importedVisual && !detailMaterial && coatTexture != null)
-                    {
+                        // Always restore the intended source map on a cloned
+                        // material. This also repairs an already-instantiated
+                        // visual that was created by the old albino path and
+                        // still has Texture2D.whiteTexture assigned.
                         if (material.HasProperty("_BaseMap")) material.SetTexture("_BaseMap", coatTexture);
                         if (material.HasProperty("_MainTex")) material.SetTexture("_MainTex", coatTexture);
                     }
-                    if (material.shader != null && material.shader.name == SpotShaderName && !detailMaterial)
+                    if (material.shader != null && material.shader.name == SpotShaderName && !featureMaterial)
                     {
                         material.SetTexture("_SpotMask", spotMask);
                         material.SetTexture("_SpotPattern", organicSpotPattern == null
@@ -1356,22 +1360,28 @@ namespace RatHabitat
             return ColorUtility.TryParseHtmlString(html, out parsed) ? parsed : fallback;
         }
 
-        private static bool IsDetailMaterial(string rendererName, string materialName)
+        private static bool IsFeatureMaterial(string rendererName, string materialName)
         {
             string name = rendererName + " " + materialName;
-            return name.Contains("eye") || name.Contains("pupil") || name.Contains("teeth") || name.Contains("tooth") || name.Contains("mouth") || name.Contains("nose");
-        }
-
-        private static bool IsAlbinoDetailMaterial(string rendererName, string materialName)
-        {
-            string name = rendererName + " " + materialName;
-            return name.Contains("eye") || name.Contains("pupil") || name.Contains("iris") || name.Contains("nose");
+            return name.Contains("eye") || name.Contains("pupil") || name.Contains("iris") ||
+                name.Contains("teeth") || name.Contains("tooth") || name.Contains("mouth") ||
+                name.Contains("nose") || name.Contains("ear") || name.Contains("paw") ||
+                name.Contains("foot") || name.Contains("whisker") || name.Contains("tail") ||
+                name.Contains("skin") || name.Contains("detail");
         }
 
         private static bool IsAccentMaterial(string rendererName, string materialName)
         {
             string name = rendererName + " " + materialName;
             return name.Contains("ear") || name.Contains("tail") || name.Contains("paw") || name.Contains("foot") || name.Contains("skin");
+        }
+
+        private static bool IsAlbinoPinkFeature(string rendererName, string materialName)
+        {
+            string name = rendererName + " " + materialName;
+            return name.Contains("eye") || name.Contains("iris") || name.Contains("nose") ||
+                name.Contains("ear") || name.Contains("paw") || name.Contains("foot") ||
+                name.Contains("skin") || name.Contains("tail");
         }
 
         private static int StableSpotSeed(string value)

@@ -544,9 +544,10 @@ namespace RatHabitat
             for (int i = 0; i < litterSize; i++)
             {
                 RatSex sex = UnityEngine.Random.Range(0, 2) == 0 ? RatSex.Female : RatSex.Male;
-                string name = GameConfig.PupNames[i % GameConfig.PupNames.Length] + " " + (save.rats.Count + i + 1);
+                string pupId = ColonyFactory.NewId("rat");
+                string name = ColonyFactory.GeneratedName(pupId, sex);
                 var pup = ColonyFactory.CreateRat(
-                    ColonyFactory.NewId("rat"),
+                    pupId,
                     name,
                     sex,
                     gameTime,
@@ -723,12 +724,35 @@ namespace RatHabitat
                 pregnancyChance,
                 0f,
                 Mathf.Clamp01(pregnancyChance));
-            if (UnityEngine.Random.value > chance) return true;
+            if (UnityEngine.Random.value > chance)
+            {
+                // A failed resolution is still a real biological attempt.
+                // Persist a cooldown on both participants so the next
+                // scheduled pairing pass cannot immediately select the same
+                // pair again or replay the interaction every frame.
+                ApplyPairingAttemptCooldown(female, male, gameTime);
+                return true;
+            }
 
             PregnancyData pregnancy;
-            if (!BreedingSystem.StartBreeding(save, female, male, gameTime, out pregnancy, out reason)) return false;
+            if (!BreedingSystem.StartBreeding(save, female, male, gameTime, out pregnancy, out reason))
+            {
+                ApplyPairingAttemptCooldown(female, male, gameTime);
+                return false;
+            }
+            // Apply this immediately rather than waiting until birth. The
+            // pregnancy state blocks the mother; the cooldown also prevents
+            // the same pair from being staged again during the current cycle.
+            ApplyPairingAttemptCooldown(female, male, gameTime);
             conceptionSucceeded = true;
             return true;
+        }
+
+        public static void ApplyPairingAttemptCooldown(RatData female, RatData male, long gameTime)
+        {
+            long until = gameTime + GameConfig.PairingAttemptCooldownMs;
+            if (female != null) female.breedingCooldownUntil = Math.Max(female.breedingCooldownUntil, until);
+            if (male != null) male.breedingCooldownUntil = Math.Max(male.breedingCooldownUntil, until);
         }
 
         public static int Evaluate(ColonySaveData save, long gameTime, float pregnancyChance)
