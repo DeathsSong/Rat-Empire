@@ -254,7 +254,7 @@ namespace RatHabitat
             root.transform.position = position;
 
             var selectable = root.AddComponent<SelectableEntity>();
-            selectable.Configure(SelectableKind.Rat, rat.id, rat.name);
+            selectable.Configure(SelectableKind.Rat, rat.id, ColonyFactory.DisplayName(rat));
             ConfigureRatCollider(root, rat.stage);
 
             controller = root.AddComponent<RatVisualController>();

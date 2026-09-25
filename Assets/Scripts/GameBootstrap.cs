@@ -983,7 +983,7 @@ namespace RatHabitat
 
             if (resolved && conceptionSucceeded)
             {
-                StatusMessage = female.name + " and " + male.name + " are breeding.";
+                StatusMessage = ColonyFactory.DisplayName(female) + " and " + ColonyFactory.DisplayName(male) + " are breeding.";
             }
             else
             {
@@ -1029,8 +1029,8 @@ namespace RatHabitat
                 pairingFailedFemaleTarget = failedApproach.femaleTarget;
                 RatData failedMale = BreedingSystem.FindRat(Save, failedApproach.maleId);
                 RatData failedFemale = BreedingSystem.FindRat(Save, failedApproach.femaleId);
-                string diagnosticRat = failedFemale != null ? failedFemale.name :
-                    (failedMale != null ? failedMale.name : failedApproach.femaleId);
+                string diagnosticRat = failedFemale != null ? ColonyFactory.DisplayName(failedFemale) :
+                    (failedMale != null ? ColonyFactory.DisplayName(failedMale) : failedApproach.femaleId);
                 Debug.Log("[Rat Habitat] " + diagnosticRat + " route recovery: " + failureText);
                 StatusMessage = diagnosticRat + " route recovery — nest blocked";
                 if (pairingRouteRetryCount > MaximumPairingRouteRetries)
@@ -1308,7 +1308,7 @@ namespace RatHabitat
                 var litter = newLitters[0];
                 var mother = BreedingSystem.FindRat(Save, litter.motherId);
                 var father = BreedingSystem.FindRat(Save, litter.fatherId);
-                StatusMessage = "Birth: " + (mother == null ? "Mother" : mother.name) + " and " + (father == null ? "Father" : father.name) + " welcomed " + litter.size + " pinkies in the " + litter.litterName + ".";
+                StatusMessage = "Birth: " + (mother == null ? "Mother" : ColonyFactory.DisplayName(mother)) + " and " + (father == null ? "Father" : ColonyFactory.DisplayName(father)) + " welcomed " + litter.size + " pinkies in the " + litter.litterName + ".";
                 stageChanged = true;
             }
             bool activityChanged = RefreshRatActivities();
@@ -1643,14 +1643,14 @@ namespace RatHabitat
                 // pregnancy eligibility.
                 rat.pairingHabitatAssigned = true;
                 SaveSystem.Save(Save);
-                StatusMessage = rat.name + " is already in the Pairing Habitat.";
+                StatusMessage = ColonyFactory.DisplayName(rat) + " is already in the Pairing Habitat.";
                 if (ui != null) ui.Refresh(false);
                 return;
             }
 
             if (BreedingSystem.FindActiveDedicatedSession(Save, rat.id) != null)
             {
-                StatusMessage = rat.name + " is occupied by a dedicated breeding session.";
+                StatusMessage = ColonyFactory.DisplayName(rat) + " is occupied by a dedicated breeding session.";
                 if (ui != null) ui.Refresh(true);
                 return;
             }
@@ -1689,7 +1689,7 @@ namespace RatHabitat
             lastPairingMoveFrame = Time.frameCount;
             if (rats != null) rats.SetSelected(rat.id);
             cameraView = CameraViewForRat(rat);
-            StatusMessage = "[Rat Empire] " + rat.name + " moved to Pairing Habitat.";
+            StatusMessage = "[Rat Empire] " + ColonyFactory.DisplayName(rat) + " moved to Pairing Habitat.";
             Debug.Log(StatusMessage);
             SaveSystem.Save(Save);
             RefreshWorldAndUi(true);
@@ -1729,7 +1729,7 @@ namespace RatHabitat
             if (rat.stage == RatStage.Adult && rat.sex == RatSex.Female &&
                 (EnclosureSystem.IsPregnant(Save, rat) || EnclosureSystem.HasDependentPinkies(Save, rat.id)))
             {
-                StatusMessage = rat.name + " must remain in the Pairing Habitat until her pregnancy and dependent litter are complete.";
+                StatusMessage = ColonyFactory.DisplayName(rat) + " must remain in the Pairing Habitat until her pregnancy and dependent litter are complete.";
                 if (ui != null) ui.Refresh(true);
                 return;
             }
@@ -1745,7 +1745,7 @@ namespace RatHabitat
             cameraFollowSelectedRat = true;
             if (rats != null) rats.SetSelected(rat.id);
             cameraView = CameraViewForRat(rat);
-            StatusMessage = "[Rat Empire] " + rat.name + " removed from Pairing Habitat.";
+            StatusMessage = "[Rat Empire] " + ColonyFactory.DisplayName(rat) + " removed from Pairing Habitat.";
             Debug.Log(StatusMessage);
             SaveSystem.Save(Save);
             RefreshWorldAndUi(true);
@@ -2051,7 +2051,7 @@ namespace RatHabitat
             }
             if (Save.colonyCredits < listing.price)
             {
-                StatusMessage = "Not enough dollars — need $" + listing.price + " to buy " + listing.name + ".";
+                StatusMessage = "Not enough dollars — need $" + listing.price + " to buy " + ColonyFactory.DisplayName(listing) + ".";
                 if (ui != null) ui.Refresh(false);
                 return;
             }
@@ -2073,7 +2073,7 @@ namespace RatHabitat
             selectedObjectId = null;
             cameraView = CameraViewForRat(purchased);
             cameraFollowSelectedRat = true;
-            StatusMessage = purchased.name + " joined the colony for $" + listing.price + ".";
+            StatusMessage = ColonyFactory.DisplayName(purchased) + " joined the colony for $" + listing.price + ".";
             SaveSystem.Save(Save);
             RefreshWorldAndUi(true);
         }
@@ -2296,7 +2296,7 @@ namespace RatHabitat
             string reason = string.Empty;
             if (candidate.sex != expectedSex || !BreedingSystem.IsBreedEligible(Save, candidate, GameTime, out reason))
             {
-                StatusMessage = candidate.name + " is not an eligible " + (expectedSex == RatSex.Female ? "mother" : "father") + ". " + reason;
+                StatusMessage = ColonyFactory.DisplayName(candidate) + " is not an eligible " + (expectedSex == RatSex.Female ? "mother" : "father") + ". " + reason;
                 if (ui != null) ui.Refresh(false);
                 return;
             }
@@ -2308,7 +2308,7 @@ namespace RatHabitat
             RefreshWorldAndUi(true);
             RatData mother = Mother;
             RatData father = Father;
-            StatusMessage = (breedingSelectionSlot == BreedingParentSlot.Mother ? "Mother" : "Father") + " set to " + candidate.name + "." +
+            StatusMessage = (breedingSelectionSlot == BreedingParentSlot.Mother ? "Mother" : "Father") + " set to " + ColonyFactory.DisplayName(candidate) + "." +
                 (mother != null && father != null ? " Both parents are ready to compare." : " Choose the other parent when ready.");
             if (ui != null) ui.Refresh(true);
         }
@@ -2354,7 +2354,7 @@ namespace RatHabitat
             parentAId = null;
             parentBId = null;
             breedingSelectionSlot = BreedingParentSlot.None;
-            StatusMessage = mother.name + " and " + father.name + " are breeding.";
+            StatusMessage = ColonyFactory.DisplayName(mother) + " and " + ColonyFactory.DisplayName(father) + " are breeding.";
             SaveSystem.Save(Save);
             // Pregnancy begins nursery care immediately. Reuse the stable
             // presenter roots so the mother relocates without creating a
@@ -2367,8 +2367,8 @@ namespace RatHabitat
             if (session == null) return string.Empty;
             var mother = BreedingSystem.FindRat(Save, session.motherId);
             var father = BreedingSystem.FindRat(Save, session.fatherId);
-            string motherName = mother == null ? "Female" : mother.name;
-            string fatherName = father == null ? "Male" : father.name;
+            string motherName = mother == null ? "Female" : ColonyFactory.DisplayName(mother);
+            string fatherName = father == null ? "Male" : ColonyFactory.DisplayName(father);
             bool pregnancyStarted = mother != null &&
                 BreedingSystem.FindPendingPregnancy(Save, mother.id) != null;
             return pregnancyStarted
@@ -2395,7 +2395,7 @@ namespace RatHabitat
             }
             var mother = BreedingSystem.FindRat(Save, litter.motherId);
             var father = BreedingSystem.FindRat(Save, litter.fatherId);
-            StatusMessage = "Birth: " + mother.name + " and " + father.name + " welcomed " + litter.size + " pinkies in the " + litter.litterName + ".";
+            StatusMessage = "Birth: " + ColonyFactory.DisplayName(mother) + " and " + ColonyFactory.DisplayName(father) + " welcomed " + litter.size + " pinkies in the " + litter.litterName + ".";
             EnclosureSystem.RecalculateAssignments(Save);
             SaveSystem.Save(Save);
             rats.Render(Save, habitat.NestPosition);
@@ -2412,7 +2412,7 @@ namespace RatHabitat
                 if (ui != null) ui.Refresh(false);
                 return;
             }
-            StatusMessage = rat.name + " advanced to " + GrowthSystem.StageLabel(rat.stage) + ". Fur and markings now reveal at the young stage.";
+                StatusMessage = ColonyFactory.DisplayName(rat) + " advanced to " + GrowthSystem.StageLabel(rat.stage) + ". Fur and markings now reveal at the young stage.";
             EnclosureSystem.RecalculateAssignments(Save);
             SaveSystem.Save(Save);
             rats.Render(Save, habitat.NestPosition);
@@ -2516,7 +2516,7 @@ namespace RatHabitat
             breedingSelectionSlot = BreedingParentSlot.None;
             EnclosureSystem.ClearBreedingPair();
             deleteConfirmationRatId = null;
-            StatusMessage = "Spawned " + rat.name + " with genotype " + DeveloperGeneSummary(rat.genotype) + ".";
+                StatusMessage = "Spawned " + ColonyFactory.DisplayName(rat) + " with genotype " + DeveloperGeneSummary(rat.genotype) + ".";
             SaveSystem.Save(Save);
             RefreshWorldAndUi(true);
         }
@@ -2641,7 +2641,7 @@ namespace RatHabitat
                 return;
             }
             int dollars = SellValue(rat);
-            string name = rat.name;
+            string name = ColonyFactory.DisplayName(rat);
             if (!RetireActiveRat(rat, RatRemovalDisposition.Sold, true)) return;
             StatusMessage = name + " was sold for $" + dollars + ".";
             SaveSystem.Save(Save);
@@ -2665,7 +2665,7 @@ namespace RatHabitat
             }
             euthanizeConfirmationRatId = rat.id;
             sellConfirmationRatId = null;
-            StatusMessage = "FINAL CONFIRMATION: permanently euthanize " + rat.name + " for $" + GameConfig.EuthanasiaCostDollars + "? This cannot be undone. " + SelectedRatRemovalWarning;
+            StatusMessage = "FINAL CONFIRMATION: permanently euthanize " + ColonyFactory.DisplayName(rat) + " for $" + GameConfig.EuthanasiaCostDollars + "? This cannot be undone. " + SelectedRatRemovalWarning;
             if (ui != null) ui.Refresh(true);
         }
 
@@ -2686,7 +2686,7 @@ namespace RatHabitat
                 if (ui != null) ui.Refresh(true);
                 return;
             }
-            string name = rat.name;
+            string name = ColonyFactory.DisplayName(rat);
             if (!RetireActiveRat(rat, RatRemovalDisposition.Euthanized, false)) return;
             Save.colonyCredits = Mathf.Max(0, Save.colonyCredits - GameConfig.EuthanasiaCostDollars);
             StatusMessage = name + " was euthanized for $" + GameConfig.EuthanasiaCostDollars + ".";
@@ -2740,7 +2740,7 @@ namespace RatHabitat
                 return;
             }
             deleteConfirmationRatId = selected.id;
-            StatusMessage = "Confirm deletion of " + selected.name + ". Pending pregnancies will be cancelled safely; completed litter history will remain.";
+            StatusMessage = "Confirm deletion of " + ColonyFactory.DisplayName(selected) + ". Pending pregnancies will be cancelled safely; completed litter history will remain.";
             if (ui != null) ui.Refresh(true);
         }
 
@@ -2762,7 +2762,7 @@ namespace RatHabitat
                 return;
             }
 
-            string removedName = selected.name;
+            string removedName = ColonyFactory.DisplayName(selected);
             int cancelledPregnancies = CountPendingPregnanciesFor(selected.id);
             if (!RetireActiveRat(selected, RatRemovalDisposition.Deleted, false))
             {

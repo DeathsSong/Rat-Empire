@@ -189,6 +189,45 @@ namespace RatHabitat
             return result;
         }
 
+        /// <summary>
+        /// Formats a rat name for player-facing text without changing the
+        /// persisted name. Sex symbols are display-only and are stripped first
+        /// so a rebuilt UI cannot append them twice.
+        /// </summary>
+        public static string DisplayName(RatData rat)
+        {
+            return rat == null ? "Unknown" : DisplayName(rat.name, rat.sex);
+        }
+
+        public static string DisplayName(StoreRatListingData listing)
+        {
+            return listing == null ? "Unknown" : DisplayName(listing.name, listing.sex);
+        }
+
+        public static string DisplayName(string name, RatSex sex)
+        {
+            string result = NormalizeDisplayName(name);
+            if (string.IsNullOrWhiteSpace(result)) result = "Unknown";
+            result = RemoveTrailingSexSymbol(result);
+            return result + " " + SexSymbol(sex);
+        }
+
+        public static string SexSymbol(RatSex sex)
+        {
+            return sex == RatSex.Female ? "♀" : "♂";
+        }
+
+        private static string RemoveTrailingSexSymbol(string value)
+        {
+            string result = value == null ? string.Empty : value.TrimEnd();
+            if (result.EndsWith("♂", StringComparison.Ordinal) ||
+                result.EndsWith("♀", StringComparison.Ordinal))
+            {
+                result = result.Substring(0, result.Length - 1).TrimEnd();
+            }
+            return result;
+        }
+
         public static bool NormalizeDisplayNames(ColonySaveData save)
         {
             if (save == null) return false;

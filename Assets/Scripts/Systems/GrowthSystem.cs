@@ -171,7 +171,8 @@ namespace RatHabitat
             if (rat.sex == RatSex.Female && !string.IsNullOrEmpty(rat.pregnancyId))
                 rat.reproductiveState = ReproductiveState.Pregnant;
             else if (rat.nursing) rat.reproductiveState = ReproductiveState.Nursing;
-            else if (rat.stage == RatStage.Pinkie || rat.stage == RatStage.YoungRat)
+            else if (rat.stage == RatStage.Pinkie || rat.stage == RatStage.YoungRat ||
+                rat.ageDays < rat.sexualMaturityDays)
                 rat.reproductiveState = ReproductiveState.Immature;
             else if (rat.reproductiveState == ReproductiveState.Immature)
                 rat.reproductiveState = ReproductiveState.Fertile;
@@ -284,7 +285,9 @@ namespace RatHabitat
             EnsureBiologyDefaults(rat);
             rat.developerGrowthOverride = true;
             rat.growthTimestamp = gameTime;
-            rat.growthAnchorAgeDays = Mathf.Max(rat.ageDays, MinimumAgeForStage(next, rat.sex));
+            float nextStageMinimumAge = MinimumAgeForStage(next, rat.sex);
+            if (next == RatStage.Adult) nextStageMinimumAge = Mathf.Max(nextStageMinimumAge, rat.sexualMaturityDays);
+            rat.growthAnchorAgeDays = Mathf.Max(rat.ageDays, nextStageMinimumAge);
             rat.ageDays = rat.growthAnchorAgeDays;
             rat.stage = next;
             GeneticsSystem.EnsureCoatAppearance(rat);
@@ -292,7 +295,8 @@ namespace RatHabitat
                 rat.coatColorVariant, rat.coatTone);
             if (string.IsNullOrEmpty(rat.markingFamily)) rat.markingFamily = GeneticsSystem.DefaultMarkingFamily(rat.genotype);
             GeneticsSystem.ApplyMarkingFamily(rat.phenotype, rat.markingFamily);
-            if (rat.stage == RatStage.Adult && rat.reproductiveState == ReproductiveState.Immature)
+            if (rat.stage == RatStage.Adult && rat.ageDays >= rat.sexualMaturityDays &&
+                rat.reproductiveState == ReproductiveState.Immature)
                 rat.reproductiveState = ReproductiveState.Fertile;
             RatActivitySystem.Record(null, rat, "growth", "Growing", gameTime,
                 "Grew to " + StageLabel(rat.stage));

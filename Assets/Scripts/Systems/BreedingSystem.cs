@@ -7,6 +7,14 @@ namespace RatHabitat
 {
     public static class BreedingSystem
     {
+        public struct ReproductiveStatus
+        {
+            public ReproductiveState state;
+            public bool canBreed;
+            public string label;
+            public string eligibilityReason;
+        }
+
         public static RatData FindRat(ColonySaveData save, string id)
         {
             if (save == null || string.IsNullOrEmpty(id)) return null;
@@ -109,57 +117,132 @@ namespace RatHabitat
 
         public static bool IsBreedEligible(ColonySaveData save, RatData rat, long gameTime, out string reason)
         {
-            reason = string.Empty;
             if (rat == null)
             {
                 reason = "Rat not found.";
                 return false;
             }
+            ReproductiveStatus status = GetReproductiveStatus(save, rat, gameTime);
+            reason = status.eligibilityReason;
+            return status.canBreed;
+        }
+
+        /// <summary>
+        /// Single source of truth for the player-facing reproductive state and
+        /// the corresponding breeding eligibility. Keeping these decisions in
+        /// one result prevents an adult who is still below her randomized
+        /// sexual maturity age from being labelled Fertile while the Breed
+        /// action rejects her.
+        /// </summary>
+        public static ReproductiveStatus GetReproductiveStatus(ColonySaveData save, RatData rat, long gameTime)
+        {
+            if (rat == null)
+            {
+                return new ReproductiveStatus
+                {
+                    state = ReproductiveState.Infertile,
+                    canBreed = false,
+                    label = "Unknown",
+                    eligibilityReason = "Rat not found.",
+                };
+            }
+
             ClearLegacyMalePregnancyState(save, rat);
             GrowthSystem.EnsureBiologyDefaults(rat);
-            if (rat.stage != RatStage.Adult)
+
+            DedicatedBreedingSessionData session = FindActiveDedicatedSession(save, rat.id);
+            if (session != null)
             {
-                reason = rat.stage == RatStage.Senior ? "Past the normal breeding age." : "Adult rats only.";
-                return false;
+                string label = "Breeding session — ends in " + FormatDuration(Math.Max(0L, session.endsAt - gameTime));
+                return Unavailable(ReproductiveState.Fertile, label, "Occupied by a dedicated breeding session.");
             }
-            if (FindPendingPregnancyForMother(save, rat.id) != null ||
-                (rat.sex == RatSex.Female && !string.IsNullOrEmpty(rat.pregnancyId)))
+
+            PregnancyData pregnancy = FindPendingPregnancyForMother(save, rat.id);
+            if (pregnancy != null || (rat.sex == RatSex.Female && !string.IsNullOrEmpty(rat.pregnancyId)))
             {
-                reason = "Currently pregnant.";
-                return false;
+                string label = pregnancy == null
+                    ? "Pregnant"
+                    : "Pregnant — birth in " + FormatDuration(Math.Max(0L, pregnancy.dueAt - gameTime));
+                return Unavailable(ReproductiveState.Pregnant, label, "Currently pregnant.");
             }
-            if (FindActiveDedicatedSession(save, rat.id) != null)
+
+            if (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing)
             {
-                reason = "Occupied by a dedicated breeding session.";
-                return false;
+                string label = "Nursing — weaning in " + FormatDuration(Math.Max(0L, rat.nursingUntil - gameTime));
+                return Unavailable(ReproductiveState.Nursing, label, "Nursing — weaning in " +
+                    FormatDuration(Math.Max(0L, rat.nursingUntil - gameTime)) + ".");
             }
+
+            if (rat.reproductiveState == ReproductiveState.Recovery)
+            {
+                string label = "Recovery — fertile again in " + FormatDuration(Math.Max(0L, rat.recoveryUntil - gameTime));
+                return Unavailable(ReproductiveState.Recovery, label, label + ".");
+            }
+
+            if (rat.stage == RatStage.Senior || rat.ageDays >= rat.breedingEndAgeDays ||
+                rat.reproductiveState == ReproductiveState.Infertile)
+            {
+                return Unavailable(ReproductiveState.Infertile, "Past breeding age", "Past breeding age.");
+            }
+
+            // The randomized sexualMaturityDays value is authoritative even
+            // while the visual life stage already reads Adult.
+            if (rat.stage == RatStage.Pinkie || rat.stage == RatStage.YoungRat ||
+                rat.ageDays < rat.sexualMaturityDays)
+            {
+                long remaining = Math.Max(0L, (long)((rat.sexualMaturityDays - rat.ageDays) * GameConfig.GameDayMs));
+                string label = "Immature — breeding available in " + FormatDuration(remaining);
+                return Unavailable(ReproductiveState.Immature, label, label + ".");
+            }
+
             if (rat.breedingCooldownUntil > gameTime)
             {
-                reason = "On breeding cooldown.";
-                return false;
+                string label = "Breeding cooldown — available in " +
+                    FormatDuration(Math.Max(0L, rat.breedingCooldownUntil - gameTime));
+                return Unavailable(ReproductiveState.Fertile, label, label + ".");
             }
-            if (rat.reproductiveState == ReproductiveState.Pregnant ||
-                rat.reproductiveState == ReproductiveState.Nursing ||
-                rat.reproductiveState == ReproductiveState.Recovery ||
-                rat.reproductiveState == ReproductiveState.Infertile ||
-                rat.reproductiveState == ReproductiveState.Immature)
+
+            if (rat.sex == RatSex.Female)
             {
-                reason = rat.reproductiveState == ReproductiveState.Recovery
-                    ? "Resting after nursing."
-                    : "Not currently fertile.";
-                return false;
+                long cycleMs = Math.Max(1L, (long)(GameConfig.EstrousCycleDays * GameConfig.GameDayMs));
+                long windowMs = Math.Max(1L, (long)(GameConfig.EstrousFertileWindowDays * GameConfig.GameDayMs));
+                long elapsed = gameTime - rat.estrousCycleAnchorGameTime;
+                elapsed %= cycleMs;
+                if (elapsed < 0L) elapsed += cycleMs;
+                if (elapsed < windowMs)
+                {
+                    string label = "Fertile — window ends in " + FormatDuration(windowMs - elapsed);
+                    return Available(ReproductiveState.Fertile, label);
+                }
+
+                string nextWindow = "Next fertile window: " + FormatDuration(cycleMs - elapsed);
+                return Unavailable(ReproductiveState.Fertile, nextWindow,
+                    "Outside the fertile window — next window in " + FormatDuration(cycleMs - elapsed) + ".");
             }
-            if (rat.ageDays < rat.sexualMaturityDays || rat.ageDays >= rat.breedingEndAgeDays)
+
+            return Available(ReproductiveState.Fertile, "Fertile");
+        }
+
+        private static ReproductiveStatus Available(ReproductiveState state, string label)
+        {
+            return new ReproductiveStatus
             {
-                reason = "Outside the breeding age window.";
-                return false;
-            }
-            if (rat.sex == RatSex.Female && !IsInFertileWindow(rat, gameTime))
+                state = state,
+                canBreed = true,
+                label = label,
+                eligibilityReason = string.Empty,
+            };
+        }
+
+        private static ReproductiveStatus Unavailable(ReproductiveState state, string label, string reason)
+        {
+            return new ReproductiveStatus
             {
-                reason = "Outside the fertile window.";
-                return false;
-            }
-            return true;
+                state = state,
+                canBreed = false,
+                label = label,
+                eligibilityReason = reason,
+            };
         }
 
         public static bool IsInFertileWindow(RatData rat, long gameTime)
@@ -248,35 +331,7 @@ namespace RatHabitat
 
         public static string ReproductiveStateLabel(ColonySaveData save, RatData rat, long gameTime)
         {
-            if (rat == null) return "Unknown";
-            ClearLegacyMalePregnancyState(save, rat);
-            GrowthSystem.EnsureBiologyDefaults(rat);
-            DedicatedBreedingSessionData session = FindActiveDedicatedSession(save, rat.id);
-            if (session != null) return "Breeding session — ends in " + FormatDuration(Math.Max(0L, session.endsAt - gameTime));
-
-            PregnancyData pregnancy = FindPendingPregnancyForMother(save, rat.id);
-            if (pregnancy != null)
-                return "Pregnant — birth in " + FormatDuration(Math.Max(0L, pregnancy.dueAt - gameTime));
-            if (rat.stage == RatStage.Pinkie || rat.stage == RatStage.YoungRat || rat.reproductiveState == ReproductiveState.Immature)
-                return "Immature";
-            if (rat.stage == RatStage.Senior || rat.ageDays >= rat.breedingEndAgeDays || rat.reproductiveState == ReproductiveState.Infertile)
-                return "Past breeding age";
-            if (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing)
-                return "Nursing — weaning in " + FormatDuration(Math.Max(0L, rat.nursingUntil - gameTime));
-            if (rat.reproductiveState == ReproductiveState.Recovery)
-                return "Recovery — fertile again in " + FormatDuration(Math.Max(0L, rat.recoveryUntil - gameTime));
-            if (rat.sex == RatSex.Female)
-            {
-                long cycleMs = Math.Max(1L, (long)(GameConfig.EstrousCycleDays * GameConfig.GameDayMs));
-                long windowMs = Math.Max(1L, (long)(GameConfig.EstrousFertileWindowDays * GameConfig.GameDayMs));
-                long elapsed = gameTime - rat.estrousCycleAnchorGameTime;
-                elapsed %= cycleMs;
-                if (elapsed < 0L) elapsed += cycleMs;
-                if (elapsed < windowMs)
-                    return "Fertile — window ends in " + FormatDuration(windowMs - elapsed);
-                return "Next fertile window: " + FormatDuration(cycleMs - elapsed);
-            }
-            return "Fertile";
+            return GetReproductiveStatus(save, rat, gameTime).label;
         }
 
         private static string FormatDuration(long milliseconds)
@@ -299,7 +354,8 @@ namespace RatHabitat
                 GrowthSystem.EnsureBiologyDefaults(rat);
                 ReproductiveState oldState = rat.reproductiveState;
                 PregnancyData pending = FindPendingPregnancyForMother(save, rat.id);
-                if (rat.stage == RatStage.Pinkie || rat.stage == RatStage.YoungRat)
+                if (rat.stage == RatStage.Pinkie || rat.stage == RatStage.YoungRat ||
+                    rat.ageDays < rat.sexualMaturityDays)
                 {
                     rat.reproductiveState = ReproductiveState.Immature;
                 }
@@ -381,12 +437,12 @@ namespace RatHabitat
             string secondReason;
             if (!IsBreedEligible(save, first, gameTime, out firstReason))
             {
-                reason = first.name + ": " + firstReason;
+                reason = ColonyFactory.DisplayName(first) + ": " + firstReason;
                 return false;
             }
             if (!IsBreedEligible(save, second, gameTime, out secondReason))
             {
-                reason = second.name + ": " + secondReason;
+                reason = ColonyFactory.DisplayName(second) + ": " + secondReason;
                 return false;
             }
             return true;
@@ -743,12 +799,12 @@ namespace RatHabitat
             string maleReason;
             if (!BreedingSystem.IsBreedEligible(save, female, gameTime, out femaleReason))
             {
-                reason = female.name + ": " + femaleReason;
+                reason = ColonyFactory.DisplayName(female) + ": " + femaleReason;
                 return false;
             }
             if (!BreedingSystem.IsBreedEligible(save, male, gameTime, out maleReason))
             {
-                reason = male.name + ": " + maleReason;
+                reason = ColonyFactory.DisplayName(male) + ": " + maleReason;
                 return false;
             }
 

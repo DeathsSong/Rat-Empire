@@ -116,6 +116,8 @@ namespace RatHabitat
         private bool rosterSortAscending = true;
         private string expandedMyRatsId;
         private string familyTreeSubjectId;
+        private string profileMoreInformationRatId;
+        private bool profileMoreInformationExpanded;
 
         private enum MainPanel
         {
@@ -1085,6 +1087,7 @@ namespace RatHabitat
             if (game != null) game.DeactivateMultipleSelection();
             expandedMyRatsId = null;
             familyTreeSubjectId = null;
+            ResetProfileInformationExpansion();
             welcomeOpen = false;
             settingsOpen = false;
             developerToolsOpen = false;
@@ -1150,6 +1153,7 @@ namespace RatHabitat
             // replace any previous page panel in the same refresh.
             if (panel != MainPanel.MyRats) expandedMyRatsId = null;
             if (panel != MainPanel.FamilyTree) familyTreeSubjectId = null;
+            ResetProfileInformationExpansion();
             settingsOpen = false;
             developerToolsOpen = false;
             ratAnimationShowcaseOpen = false;
@@ -1243,6 +1247,7 @@ namespace RatHabitat
             if (game != null) game.PrepareForSettings();
             expandedMyRatsId = null;
             familyTreeSubjectId = null;
+            ResetProfileInformationExpansion();
             welcomeOpen = false;
             developerToolsOpen = false;
             ratAnimationShowcaseOpen = false;
@@ -1551,7 +1556,7 @@ namespace RatHabitat
             {
                 string reason;
                 bool eligible = BreedingSystem.IsBreedEligible(game.Save, game.SelectedRat, game.GameTime, out reason);
-                AddButton(card, eligible ? "Start breeding with " + game.SelectedRat.name : "Breeding unavailable — " + reason,
+                AddButton(card, eligible ? "Start breeding with " + ColonyFactory.DisplayName(game.SelectedRat) : "Breeding unavailable — " + reason,
                     eligible, game.OpenBreeding);
             }
         }
@@ -1688,7 +1693,7 @@ namespace RatHabitat
                 new Color(1f, 0.52f, 0.38f), TextAnchor.UpperLeft);
             if (game.EuthanizeConfirmationPending && game.SelectedRat != null)
             {
-                AddText(parent, "FINAL CONFIRMATION: euthanize " + game.SelectedRat.name + " for $" + GameConfig.EuthanasiaCostDollars + "? " + game.SelectedRatRemovalWarning,
+                AddText(parent, "FINAL CONFIRMATION: euthanize " + ColonyFactory.DisplayName(game.SelectedRat) + " for $" + GameConfig.EuthanasiaCostDollars + "? " + game.SelectedRatRemovalWarning,
                     13, new Color(1f, 0.42f, 0.30f), TextAnchor.UpperLeft);
                 AddButtonTo(parent, "CONFIRM EUTHANIZE RAT", true, game.ConfirmEuthanizeSelectedRat, new Color(0.70f, 0.12f, 0.10f), 50f);
                 AddButtonTo(parent, "Cancel euthanasia", true, game.CancelEuthanizeSelectedRat, new Color(0.20f, 0.30f, 0.34f), 42f);
@@ -1818,7 +1823,7 @@ namespace RatHabitat
             string coat = rat.phenotype == null || !rat.phenotype.furRevealed ? "Unknown" : rat.phenotype.coatColorLabel;
             string markings = rat.phenotype == null || !rat.phenotype.furRevealed ? "Hidden" : rat.phenotype.markingsLabel;
             TraitData traits = rat.traits ?? new TraitData();
-            AddText(info, rat.name + "  •  " + SexLabel(rat.sex) + "  •  " + GrowthSystem.StageLabel(rat.stage), 14, Color.white, TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
+            AddText(info, ColonyFactory.DisplayName(rat) + "  •  " + SexLabel(rat.sex) + "  •  " + GrowthSystem.StageLabel(rat.stage), 14, Color.white, TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
             AddText(info, "Coat: " + coat + "  •  " + markings, 12, new Color(1f, 0.84f, 0.52f), TextAnchor.UpperLeft);
             AddText(info, "Size " + traits.size.ToString("0") + "  •  Health " + traits.health.ToString("0") + "  •  Fertility " + traits.fertility.ToString("0"),
                 12, Color.white, TextAnchor.UpperLeft);
@@ -1912,7 +1917,7 @@ namespace RatHabitat
             infoElement.minHeight = portraitSize;
             infoElement.preferredHeight = portraitSize;
 
-            AddText(info, listing.name + "  •  " + SexLabel(listing.sex) + "  •  Adult", 14, Color.white, TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
+            AddText(info, ColonyFactory.DisplayName(listing) + "  •  " + SexLabel(listing.sex) + "  •  Adult", 14, Color.white, TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
             string fur = previewRat == null || previewRat.phenotype == null ? "Unknown" : previewRat.phenotype.coatColorLabel;
             string markings = previewRat == null || previewRat.phenotype == null ? "Unknown" : previewRat.phenotype.markingsLabel;
             AddText(info, "Coat: " + fur + "  •  " + markings, 13, new Color(1f, 0.84f, 0.52f), TextAnchor.UpperLeft);
@@ -1994,6 +1999,12 @@ namespace RatHabitat
 
         private void AddRatProfile(RatData rat)
         {
+            if (profileMoreInformationRatId != rat.id)
+            {
+                profileMoreInformationRatId = rat.id;
+                profileMoreInformationExpanded = false;
+            }
+
             var card = CreateCard(string.Empty);
             // This profile is a cutout over the ordinary Game view. Keep the
             // card itself transparent so the Main Camera can show the focused
@@ -2088,9 +2099,16 @@ namespace RatHabitat
             detailsLayout.spacing = 3f;
             detailsLayout.padding = new RectOffset(12, 12, 10, 10);
 
-            Text nameText = AddText(details, rat.name, 18, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft);
+            Text nameText = AddText(details, ColonyFactory.DisplayName(rat), 18, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft);
             nameText.fontStyle = FontStyle.Bold;
-            string historicalStatus = HistoricalStatusLabel(rat);
+            // Active rats do not need an "Alive" label. Keep status text only
+            // for historical records where it communicates something useful.
+            string historicalStatus = historical &&
+                (rat.removalDisposition == RatRemovalDisposition.NaturalDeath ||
+                 rat.removalDisposition == RatRemovalDisposition.Euthanized ||
+                 rat.removalDisposition == RatRemovalDisposition.Sold)
+                ? HistoricalStatusLabel(rat)
+                : string.Empty;
             if (!string.IsNullOrEmpty(historicalStatus))
             {
                 AddText(details, historicalStatus, 13,
@@ -2099,20 +2117,66 @@ namespace RatHabitat
             Text activityText = AddText(details, string.Empty, 14,
                 new Color(1f, 0.82f, 0.38f), TextAnchor.UpperLeft);
             BindLiveText(activityText, () => "Current activity: " + game.CurrentRatActivityLabel(rat));
-            AddDetailedRatInformation(details, rat, 14);
-            AddRatActivityHistory(details, rat);
 
-            AddButtonTo(details, "Family Tree", true, () => OpenFamilyTree(rat.id),
+            AddBasicRatProfileInformation(details, rat, 14);
+            AddButtonTo(details,
+                profileMoreInformationExpanded ? "More Information  ▴" : "More Information  ▾",
+                true, ToggleProfileMoreInformation,
+                new Color(0.18f, 0.35f, 0.39f), 42f);
+
+            if (profileMoreInformationExpanded)
+            {
+                AddExpandedRatProfileInformation(details, rat, historical);
+            }
+
+            if (rat.removalDisposition == RatRemovalDisposition.Sold)
+            {
+                AddSoldStamp(card);
+            }
+        }
+
+        private void AddBasicRatProfileInformation(RectTransform parent, RatData rat, int fontSize)
+        {
+            if (parent == null || rat == null) return;
+            TraitData traits = rat.traits ?? new TraitData();
+            AddText(parent, "Age: " + GrowthSystem.FormatAge(rat.ageDays), fontSize,
+                Color.white, TextAnchor.UpperLeft);
+            AddText(parent, "Size " + traits.size.ToString("0") +
+                "  •  Health " + traits.health.ToString("0") +
+                "  •  Fertility " + traits.fertility.ToString("0"), fontSize,
+                Color.white, TextAnchor.UpperLeft);
+        }
+
+        private void AddExpandedRatProfileInformation(RectTransform parent, RatData rat, bool historical)
+        {
+            if (parent == null || rat == null) return;
+
+            var more = CreateRect("Rat Profile More Information", parent);
+            var moreImage = more.gameObject.AddComponent<Image>();
+            UiStyle.ApplyRounded(moreImage, new Color(0.02f, 0.07f, 0.08f, historical ? 0.74f : 0.84f), false);
+            moreImage.raycastTarget = false;
+            var moreLayout = more.gameObject.AddComponent<VerticalLayoutGroup>();
+            moreLayout.spacing = 3f;
+            moreLayout.padding = new RectOffset(8, 8, 7, 7);
+            moreLayout.childControlWidth = true;
+            moreLayout.childControlHeight = true;
+            moreLayout.childForceExpandWidth = true;
+            moreLayout.childForceExpandHeight = false;
+
+            AddExpandedRatProfileDetails(more, rat, 14);
+            AddRatActivityHistory(more, rat);
+
+            AddButtonTo(more, "Family Tree", true, () => OpenFamilyTree(rat.id),
                 new Color(0.22f, 0.34f, 0.43f), 42f);
 
             bool liveRat = !historical && BreedingSystem.FindRat(game.Save, rat.id) != null;
             if (liveRat && game.IsSellConfirmationFor(rat.id))
             {
-                AddInlineProfileSaleConfirmation(details, rat);
+                AddInlineProfileSaleConfirmation(more, rat);
             }
             else if (liveRat)
             {
-                AddButtonTo(details, "Sell Rat\n$" + game.SellValue(rat), true,
+                AddButtonTo(more, "Sell Rat\n$" + game.SellValue(rat), true,
                     () => game.RequestSellRat(rat.id), new Color(0.17f, 0.34f, 0.37f), 46f);
             }
 
@@ -2122,7 +2186,7 @@ namespace RatHabitat
                 bool pendingPregnancy = EnclosureSystem.IsPregnant(game.Save, rat);
                 bool canRemove = !(rat.stage == RatStage.Adult && rat.sex == RatSex.Female &&
                     (dependentLitter || pendingPregnancy));
-                AddButton(details, canRemove ? "Remove from Pairing Habitat" : "Remain in Pairing Habitat while caring for litter",
+                AddButton(more, canRemove ? "Remove from Pairing Habitat" : "Remain in Pairing Habitat while caring for litter",
                     canRemove, () => game.RemoveRatFromPairingHabitat(rat.id));
             }
             else if (liveRat)
@@ -2130,30 +2194,65 @@ namespace RatHabitat
                 // Pass the profile's ID explicitly. The profile may have been
                 // opened from family-history navigation, so the global world
                 // selection is not a safe source for this action.
-                AddButton(details, "Move to Pairing Habitat", true,
+                AddButton(more, "Move to Pairing Habitat", true,
                     () => game.MoveRatToPairingHabitat(rat.id));
             }
+
             PregnancyData pregnancy = liveRat ? FindPregnancyForFemale(rat) : null;
             if (pregnancy != null)
             {
-                AddPregnancyProgress(details, pregnancy);
+                AddPregnancyProgress(more, pregnancy);
             }
             else if (liveRat)
             {
                 string reason;
                 bool canBreed = BreedingSystem.IsBreedEligible(game.Save, rat, game.GameTime, out reason);
-                var breedButton = AddButton(details, canBreed ? "Breed" : "Breed unavailable — " + reason, canBreed, game.OpenBreeding);
+                var breedButton = AddButton(more, canBreed ? "Breed" : "Breed unavailable — " + reason, canBreed, game.OpenBreeding);
                 breedButton.gameObject.name = "Breed Button";
             }
+
             UnityEngine.Events.UnityAction returnAction = liveRat
                 ? new UnityEngine.Events.UnityAction(game.ReturnToHabitat)
                 : new UnityEngine.Events.UnityAction(() => OpenFamilyTree(rat.id));
-            AddButton(details, liveRat ? "Return to Habitat" : "Back to Family Tree", true, returnAction);
+            AddButton(more, liveRat ? "Return to Habitat" : "Back to Family Tree", true, returnAction);
+        }
 
-            if (rat.removalDisposition == RatRemovalDisposition.Sold)
-            {
-                AddSoldStamp(card);
-            }
+        private void AddExpandedRatProfileDetails(RectTransform parent, RatData rat, int fontSize)
+        {
+            if (parent == null || rat == null) return;
+            string coat = rat.phenotype == null || !rat.phenotype.furRevealed
+                ? "Hidden while Pinkie"
+                : rat.phenotype.coatColorLabel;
+            string markings = rat.phenotype == null || !rat.phenotype.furRevealed
+                ? "Hidden while Pinkie"
+                : rat.phenotype.markingsLabel;
+
+            AddText(parent, "Stage: " + GrowthSystem.StageLabel(rat.stage) +
+                "  •  Sex: " + SexLabel(rat.sex) +
+                "  •  Generation: " + rat.generation, fontSize, Color.white, TextAnchor.UpperLeft);
+            AddText(parent, "Coat: " + coat + "  •  Markings: " + markings, fontSize,
+                new Color(0.95f, 0.83f, 0.55f), TextAnchor.UpperLeft);
+            AddText(parent, "Known genes: " + KnownGeneSummary(rat), fontSize - 1,
+                new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
+            AddText(parent, "Parents: " + ParentSummary(rat) + "  •  Litter: " + LitterNameForRat(rat), fontSize - 1,
+                new Color(0.70f, 0.78f, 0.74f), TextAnchor.UpperLeft);
+            AddText(parent, "Current habitat: " + EnclosureSystem.Label(rat.enclosure), fontSize,
+                new Color(0.78f, 0.90f, 0.82f), TextAnchor.UpperLeft);
+            Text reproductiveStateText = AddText(parent, string.Empty, fontSize,
+                new Color(0.72f, 0.84f, 0.78f), TextAnchor.UpperLeft);
+            BindLiveText(reproductiveStateText, () => "Reproductive state: " + ReproductiveStateLabel(rat));
+        }
+
+        private void ToggleProfileMoreInformation()
+        {
+            profileMoreInformationExpanded = !profileMoreInformationExpanded;
+            Refresh(true);
+        }
+
+        private void ResetProfileInformationExpansion()
+        {
+            profileMoreInformationRatId = null;
+            profileMoreInformationExpanded = false;
         }
 
         private void AddInlineProfileSaleConfirmation(RectTransform parent, RatData rat)
@@ -2169,7 +2268,7 @@ namespace RatHabitat
             layout.childControlHeight = true;
             layout.childForceExpandWidth = true;
             layout.childForceExpandHeight = false;
-            AddText(confirmation, "Are you sure? Sell " + rat.name + " for $" + game.SellValue(rat) + "?", 13,
+            AddText(confirmation, "Are you sure? Sell " + ColonyFactory.DisplayName(rat) + " for $" + game.SellValue(rat) + "?", 13,
                 new Color(1f, 0.80f, 0.42f), TextAnchor.UpperLeft);
             AddText(confirmation, "Warnings: " + game.SaleWarningsFor(rat), 12,
                 new Color(1f, 0.72f, 0.38f), TextAnchor.UpperLeft);
@@ -2207,6 +2306,7 @@ namespace RatHabitat
         private void OpenFamilyTree(string ratId)
         {
             if (game == null || BreedingSystem.FindHistoricalRat(game.Save, ratId) == null) return;
+            ResetProfileInformationExpansion();
             familyTreeSubjectId = ratId;
             activeMainPanel = MainPanel.FamilyTree;
             Refresh(true);
@@ -2216,6 +2316,7 @@ namespace RatHabitat
 
         private void ReturnToFamilyTreeProfile()
         {
+            ResetProfileInformationExpansion();
             activeMainPanel = MainPanel.None;
             Refresh(true);
             SetOverlayVisibility();
@@ -2250,11 +2351,11 @@ namespace RatHabitat
             }
 
             var card = CreateCard("Family Tree");
-            AddText(card, "Selected rat: " + subject.name + ". Tap any family member to select them.", 13,
+            AddText(card, "Selected rat: " + ColonyFactory.DisplayName(subject) + ". Tap any family member to select them.", 13,
                 new Color(0.78f, 0.90f, 0.82f), TextAnchor.UpperLeft);
             AddText(card, "Drag to pan • Mouse wheel or pinch to zoom", 12,
                 new Color(0.70f, 0.82f, 0.76f), TextAnchor.UpperLeft);
-            AddButtonTo(card, "Back to " + subject.name + " Profile", true, ReturnToFamilyTreeProfile,
+            AddButtonTo(card, "Back to " + ColonyFactory.DisplayName(subject) + " Profile", true, ReturnToFamilyTreeProfile,
                 new Color(0.14f, 0.30f, 0.30f), 42f);
 
             var scrollRoot = CreateRect("Family Tree Scroll", card);
@@ -2515,6 +2616,7 @@ namespace RatHabitat
             portraitLayout.minWidth = 48f;
             portraitLayout.preferredHeight = 48f;
             portraitLayout.minHeight = 48f;
+            ConfigureSquarePortraitSlot(portraitRoot, 48f);
             var portrait = portraitRoot.gameObject.AddComponent<RawImage>();
             portrait.texture = portraitPreview == null ? null : portraitPreview.GetPortrait(entry.rat);
             portrait.color = historical ? new Color(0.62f, 0.64f, 0.63f, 1f) : Color.white;
@@ -2533,7 +2635,7 @@ namespace RatHabitat
                 ? "Hidden" : entry.rat.phenotype.coatColorLabel;
             string markings = entry.rat.phenotype == null || !entry.rat.phenotype.furRevealed
                 ? "Hidden" : entry.rat.phenotype.markingsLabel;
-            AddText(node, entry.rat.name, 12,
+            AddText(node, ColonyFactory.DisplayName(entry.rat), 12,
                 historical ? new Color(0.92f, 0.94f, 0.92f) : Color.white,
                 TextAnchor.MiddleCenter).fontStyle = FontStyle.Bold;
             AddText(node, SexLabel(entry.rat.sex) + " • " + GrowthSystem.StageLabel(entry.rat.stage), 10,
@@ -2934,7 +3036,7 @@ namespace RatHabitat
         {
             if (rat == null) return string.Empty;
             string markings = rat.phenotype == null || !rat.phenotype.furRevealed ? "Hidden" : rat.phenotype.markingsLabel;
-            return (selected ? "✓ " : string.Empty) + rat.name + "  •  " + SexLabel(rat.sex) + "  •  " + GrowthSystem.StageLabel(rat.stage) + "\n" +
+            return (selected ? "✓ " : string.Empty) + ColonyFactory.DisplayName(rat) + "  •  " + SexLabel(rat.sex) + "  •  " + GrowthSystem.StageLabel(rat.stage) + "\n" +
                 "Markings " + markings + "  •  Age " + GrowthSystem.FormatAge(rat.ageDays) + "  •  Gen " + rat.generation +
                 RosterPregnancySuffix(rat) + "\nHabitat: " + EnclosureSystem.Label(rat.enclosure) +
                 "\nState: " + ReproductiveStateLabel(rat);
@@ -3212,7 +3314,7 @@ namespace RatHabitat
             foreach (var candidate in candidates)
             {
                 if (candidate == null) continue;
-                string label = (game.IsActiveBreedingSelection(candidate.id) ? "✓ " : string.Empty) + candidate.name +
+                string label = (game.IsActiveBreedingSelection(candidate.id) ? "✓ " : string.Empty) + ColonyFactory.DisplayName(candidate) +
                     "  •  " + SexLabel(candidate.sex) + "  •  Age " + GrowthSystem.FormatAge(candidate.ageDays) + "\n" +
                     "Habitat: " + EnclosureSystem.Label(candidate.enclosure) + "\n" +
                     "State: " + ReproductiveStateLabel(candidate);
@@ -3276,7 +3378,7 @@ namespace RatHabitat
                 return;
             }
 
-            AddTextTo(card, rat.name, 13, Color.white, TextAnchor.MiddleCenter);
+            AddTextTo(card, ColonyFactory.DisplayName(rat), 13, Color.white, TextAnchor.MiddleCenter);
             // The card's vertical layout intentionally controls the width of
             // direct children. Keep that stretched layout row separate from
             // the centered portrait slot so the RawImage cannot become a
@@ -3288,14 +3390,7 @@ namespace RatHabitat
             portraitRowElement.flexibleHeight = 0f;
 
             var portraitRoot = CreateRect("Compact Parent Portrait", portraitRow);
-            portraitRoot.anchorMin = new Vector2(0.5f, 0.5f);
-            portraitRoot.anchorMax = new Vector2(0.5f, 0.5f);
-            portraitRoot.pivot = new Vector2(0.5f, 0.5f);
-            portraitRoot.anchoredPosition = Vector2.zero;
-            portraitRoot.sizeDelta = new Vector2(portraitSize, portraitSize);
-            var portraitAspect = portraitRoot.gameObject.AddComponent<AspectRatioFitter>();
-            portraitAspect.aspectMode = AspectRatioFitter.AspectMode.FitInParent;
-            portraitAspect.aspectRatio = 1f;
+            ConfigureSquarePortraitSlot(portraitRoot, portraitSize);
             var portrait = portraitRoot.gameObject.AddComponent<RawImage>();
             portrait.texture = portraitPreview == null ? null : portraitPreview.GetPortrait(rat);
             portrait.color = Color.white;
@@ -3417,7 +3512,7 @@ namespace RatHabitat
             {
                 bool selected = game.IsActiveBreedingSelection(mate.id);
                 string fur = mate.phenotype == null || !mate.phenotype.furRevealed ? "Unknown" : mate.phenotype.coatColorLabel;
-                string label = (selected ? "✓ " : "") + mate.name + "  •  " + SexLabel(mate.sex) + "  •  " + GrowthSystem.StageLabel(mate.stage) + "\n" +
+                string label = (selected ? "✓ " : "") + ColonyFactory.DisplayName(mate) + "  •  " + SexLabel(mate.sex) + "  •  " + GrowthSystem.StageLabel(mate.stage) + "\n" +
                     "Fur " + fur + "  |  Size " + mate.traits.size.ToString("0") + "  Health " + mate.traits.health.ToString("0") + "  Fertility " + mate.traits.fertility.ToString("0");
                 AddMateRow(listContent, mate, label, selected ? new Color(0.16f, 0.3f, 0.24f) : new Color(0.1f, 0.16f, 0.14f));
             }
@@ -3479,7 +3574,7 @@ namespace RatHabitat
             {
                 RatData live = BreedingSystem.FindRat(game.Save, mateId);
                 if (live == null) return label;
-                return (game.IsActiveBreedingSelection(live.id) ? "✓ " : string.Empty) + live.name +
+                return (game.IsActiveBreedingSelection(live.id) ? "✓ " : string.Empty) + ColonyFactory.DisplayName(live) +
                     "  •  " + SexLabel(live.sex) + "  •  Age " + GrowthSystem.FormatAge(live.ageDays) + "\n" +
                     "Habitat: " + EnclosureSystem.Label(live.enclosure) + "\n" +
                     "State: " + ReproductiveStateLabel(live);
@@ -3708,7 +3803,7 @@ namespace RatHabitat
             else if (game.DeleteConfirmationPending)
             {
                 AddText(developerToolsCard, "This removes the selected rat, cancels any pending pregnancy safely, and preserves completed litter history.", 13, new Color(1f, 0.72f, 0.42f), TextAnchor.UpperLeft);
-                AddButtonTo(developerToolsCard, "CONFIRM DELETE  •  " + game.SelectedRat.name, true, game.ConfirmDeleteSelectedRat, new Color(0.55f, 0.18f, 0.16f), 48f);
+                AddButtonTo(developerToolsCard, "CONFIRM DELETE  •  " + ColonyFactory.DisplayName(game.SelectedRat), true, game.ConfirmDeleteSelectedRat, new Color(0.55f, 0.18f, 0.16f), 48f);
                 AddButtonTo(developerToolsCard, "Cancel deletion", true, game.CancelDeleteSelectedRat, new Color(0.22f, 0.31f, 0.4f), 46f);
             }
             else
@@ -3825,6 +3920,21 @@ namespace RatHabitat
 #endif
         }
 
+        private static void ConfigureSquarePortraitSlot(RectTransform slot, float size)
+        {
+            if (slot == null) return;
+            slot.anchorMin = new Vector2(0.5f, 0.5f);
+            slot.anchorMax = new Vector2(0.5f, 0.5f);
+            slot.pivot = new Vector2(0.5f, 0.5f);
+            slot.anchoredPosition = Vector2.zero;
+            slot.sizeDelta = new Vector2(size, size);
+
+            var aspect = slot.gameObject.GetComponent<AspectRatioFitter>();
+            if (aspect == null) aspect = slot.gameObject.AddComponent<AspectRatioFitter>();
+            aspect.aspectMode = AspectRatioFitter.AspectMode.FitInParent;
+            aspect.aspectRatio = 1f;
+        }
+
         private Button AddButtonTo(Transform parent, string label, bool enabled, UnityEngine.Events.UnityAction action, Color color, float height)
         {
             var objectRoot = new GameObject("Button");
@@ -3918,8 +4028,8 @@ namespace RatHabitat
             RatData father = game == null ? null : BreedingSystem.FindHistoricalRat(game.Save, rat.fatherId);
             if (mother != null && father != null && mother.generation == 0 && father.generation == 0) return "N/A";
 
-            string motherName = mother == null ? rat.motherId : mother.name;
-            string fatherName = father == null ? rat.fatherId : father.name;
+            string motherName = mother == null ? rat.motherId : ColonyFactory.DisplayName(mother);
+            string fatherName = father == null ? rat.fatherId : ColonyFactory.DisplayName(father);
             return (string.IsNullOrEmpty(motherName) ? "—" : motherName) + " / " + (string.IsNullOrEmpty(fatherName) ? "—" : fatherName);
         }
 

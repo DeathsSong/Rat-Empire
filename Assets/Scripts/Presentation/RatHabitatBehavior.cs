@@ -138,8 +138,8 @@ namespace RatHabitat
                     candidate.rat.stage == RatStage.Pinkie) continue;
 
                 return string.Format(
-                    "Rat {0}: simulation {1:0.#}x | actual {2:0.00} u/s | target {3:0.00} u/s | time=scaled movement delta",
-                    candidate.rat.name,
+                "Rat {0}: simulation {1:0.#}x | actual {2:0.00} u/s | target {3:0.00} u/s | time=scaled movement delta",
+                ColonyFactory.DisplayName(candidate.rat),
                     GrowthSystem.RuntimeSimulationSpeed,
                     candidate.ActualWorldMovementSpeed,
                     candidate.TargetWorldMovementSpeed);

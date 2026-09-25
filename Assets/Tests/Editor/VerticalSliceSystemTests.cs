@@ -178,6 +178,64 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void ReproductiveLabelsAndEligibilityShareSexualMaturityRules()
+        {
+            const long birthTime = 0L;
+            long maturityTime = (long)(GameConfig.FemaleSexualMaturityDays * GameConfig.GameDayMs);
+            var save = ColonyFactory.CreateNew(maturityTime);
+            var female = ColonyFactory.CreateRat(
+                "maturity-test-female", "Maturity Test", RatSex.Female,
+                birthTime, 0, save.rats[0].genotype.Clone(),
+                new TraitData(50f, 50f, 50f), RatStage.Adult);
+            female.ageDays = GameConfig.FemaleSexualMaturityDays - 1f;
+            female.sexualMaturityDays = GameConfig.FemaleSexualMaturityDays;
+            female.breedingEndAgeDays = 365f;
+            female.estrousCycleAnchorGameTime = maturityTime;
+            female.reproductiveState = ReproductiveState.Fertile;
+            save.rats.Add(female);
+            save.ratIds.Add(female.id);
+
+            string reason;
+            Assert.IsFalse(BreedingSystem.IsBreedEligible(save, female, maturityTime - GameConfig.GameDayMs, out reason));
+            StringAssert.StartsWith("Immature — breeding available in 1 days, 0 hours",
+                BreedingSystem.ReproductiveStateLabel(save, female, maturityTime - GameConfig.GameDayMs));
+            StringAssert.StartsWith("Immature — breeding available", reason);
+
+            female.ageDays = GameConfig.FemaleSexualMaturityDays;
+            Assert.IsTrue(BreedingSystem.IsBreedEligible(save, female, maturityTime, out reason));
+            StringAssert.StartsWith("Fertile", BreedingSystem.ReproductiveStateLabel(save, female, maturityTime));
+            Assert.IsTrue(string.IsNullOrEmpty(reason));
+
+            long outsideWindowTime = maturityTime + (2L * GameConfig.GameDayMs);
+            female.ageDays = GameConfig.FemaleSexualMaturityDays + 2f;
+            Assert.IsFalse(BreedingSystem.IsBreedEligible(save, female, outsideWindowTime, out reason));
+            StringAssert.StartsWith("Next fertile window:",
+                BreedingSystem.ReproductiveStateLabel(save, female, outsideWindowTime));
+            StringAssert.StartsWith("Outside the fertile window", reason);
+
+            save.pregnancies.Add(new PregnancyData
+            {
+                id = "maturity-test-pregnancy",
+                motherId = female.id,
+                fatherId = save.rats[1].id,
+                startedAt = outsideWindowTime,
+                dueAt = outsideWindowTime + GameConfig.PregnancyMs,
+                status = "pending",
+            });
+            Assert.IsFalse(BreedingSystem.IsBreedEligible(save, female, outsideWindowTime, out reason));
+            StringAssert.StartsWith("Pregnant", BreedingSystem.ReproductiveStateLabel(save, female, outsideWindowTime));
+            Assert.AreEqual("Currently pregnant.", reason);
+
+            save.pregnancies.Clear();
+            female.ageDays = 400f;
+            female.stage = RatStage.Senior;
+            female.reproductiveState = ReproductiveState.Infertile;
+            Assert.IsFalse(BreedingSystem.IsBreedEligible(save, female, outsideWindowTime, out reason));
+            Assert.AreEqual("Past breeding age", BreedingSystem.ReproductiveStateLabel(save, female, outsideWindowTime));
+            Assert.AreEqual("Past breeding age.", reason);
+        }
+
+        [Test]
         public void StoreQualityUpgradesUsePersistedFivePointStepsForFutureStock()
         {
             var save = ColonyFactory.CreateNew(1000000L);
@@ -351,6 +409,12 @@ namespace RatHabitat.Tests
             Assert.IsFalse(char.IsDigit(femaleName[femaleName.Length - 1]));
             Assert.AreEqual("Mabel", ColonyFactory.NormalizeDisplayName("Mabel 4"));
             Assert.AreEqual("Randy", ColonyFactory.NormalizeDisplayName("Randy 12"));
+
+            var male = new RatData { name = "Otto", sex = RatSex.Male };
+            var female = new RatData { name = "Mabel", sex = RatSex.Female };
+            Assert.AreEqual("Otto ♂", ColonyFactory.DisplayName(male));
+            Assert.AreEqual("Mabel ♀", ColonyFactory.DisplayName(female));
+            Assert.AreEqual("Mabel ♀", ColonyFactory.DisplayName("Mabel ♀", RatSex.Female));
         }
 
         [Test]
