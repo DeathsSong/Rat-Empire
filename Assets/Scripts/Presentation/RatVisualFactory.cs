@@ -123,7 +123,11 @@ namespace RatHabitat
             // dedicated shader mode that removes the beige/tan cast while
             // preserving luminance detail. It is still a per-renderer
             // material instance, so no other rat is recolored.
-            bool useCoatShader = importedVisual && (spotted || albino) && TryResolveSpotResources(out spotShader, out spotMask);
+            // Route every imported coat through the same deterministic shader,
+            // not only spotted/albino rats. This keeps the expanded natural
+            // palette, subtle fur variation, and UV-attached markings on one
+            // material path while feature slots remain untouched below.
+            bool useCoatShader = importedVisual && TryResolveSpotResources(out spotShader, out spotMask);
             Texture2D organicSpotPattern = useCoatShader && spotted
                 ? GetOrCreateOrganicSpotPattern(rat)
                 : null;
@@ -199,6 +203,11 @@ namespace RatHabitat
                         material.SetFloat("_SpotSeed", SpotSeed01(string.IsNullOrEmpty(rat.id) ? rat.name : rat.id));
                         material.SetColor("_SpotColor", Color.white);
                         material.SetFloat("_SpotStrength", spotted ? 1f : 0f);
+                        if (material.HasProperty("_PinkEyeMode"))
+                        {
+                            string variant = rat.coatColorVariant ?? string.Empty;
+                            material.SetFloat("_PinkEyeMode", variant.IndexOf("pink-eye", System.StringComparison.OrdinalIgnoreCase) >= 0 ? 1f : 0f);
+                        }
                         if (material.HasProperty("_AlbinoMode")) material.SetFloat("_AlbinoMode", albino ? 1f : 0f);
                         if (material.HasProperty("_AlbinoBodyColor")) material.SetColor("_AlbinoBodyColor", new Color(0.98f, 0.965f, 0.92f, 1f));
                     }
@@ -369,10 +378,13 @@ namespace RatHabitat
         /// </summary>
         private static Texture2D GetOrCreateOrganicSpotPattern(RatData rat)
         {
+            string family = rat == null
+                ? string.Empty
+                : GeneticsSystem.NormalizeMarkingFamily(rat.markingFamily, rat.genotype);
             string identity = (rat == null ? string.Empty :
                 (string.IsNullOrEmpty(rat.id) ? rat.name : rat.id)) + "|" +
                 (rat == null ? string.Empty : GenotypeSummary(rat.genotype)) + "|" +
-                (rat == null ? string.Empty : rat.markingFamily) + "|organic-patterns-v4";
+                family + "|organic-patterns-v5";
             if (organicSpotPatternCache.TryGetValue(identity, out Texture2D cached) && cached != null)
                 return cached;
 
@@ -388,9 +400,10 @@ namespace RatHabitat
 
             Color32[] pixels = new Color32[OrganicSpotMaskWidth * OrganicSpotMaskHeight];
             var random = new OrganicSpotRandom((uint)StableSpotSeed(identity));
-            string family = rat == null ? string.Empty : rat.markingFamily;
             switch (family)
             {
+                case "Self":
+                    break;
                 case "Hooded":
                     // Keep a colored dorsal stripe while whitening the belly
                     // and side bands. The irregular edges prevent a hard
@@ -406,6 +419,14 @@ namespace RatHabitat
                     PaintJitteredRegion(pixels, 0.24f, 0.36f, 0.205f, 0.285f, ref random);
                     PaintJitteredRegion(pixels, 0.50f, 0.61f, 0.205f, 0.275f, ref random);
                     break;
+                case "Broken hooded":
+                    // A broken hooded base keeps the head/shoulder color but
+                    // interrupts the dorsal white/colored transition with
+                    // organic gaps instead of evenly stamped spots.
+                    PaintJitteredRegion(pixels, 0.03f, 0.70f, 0.055f, 0.19f, ref random);
+                    PaintJitteredRegion(pixels, 0.03f, 0.70f, 0.31f, 0.395f, ref random);
+                    PaintIrregularSpotPatches(pixels, HoodedSpotAnchors, 2, ref random);
+                    break;
                 case "Bareback":
                     // Colored head/shoulders transition into a mostly white
                     // body at a naturally uneven neck line.
@@ -416,6 +437,23 @@ namespace RatHabitat
                     // The body is white; the head/cap remains colored because
                     // this mask is clipped to the body UV island.
                     PaintJitteredRegion(pixels, 0.02f, 0.72f, 0.045f, 0.405f, ref random);
+                    break;
+                case "Mask":
+                    // A broad, soft body field leaves the colored facial mask
+                    // attached to the head/ear UV island.
+                    PaintJitteredRegion(pixels, 0.18f, 0.72f, 0.08f, 0.405f, ref random);
+                    PaintJitteredRegion(pixels, 0.24f, 0.68f, 0.22f, 0.395f, ref random);
+                    break;
+                case "Patch":
+                    PaintJitteredRegion(pixels, 0.34f, 0.63f, 0.15f, 0.34f, ref random);
+                    PaintIrregularSpotPatches(pixels, CappedSpotAnchors, 1, ref random);
+                    break;
+                case "Black-eye white":
+                    // The body is predominantly white. The UV body mask
+                    // does not cover feature islands, so the dark eyes and
+                    // facial details remain readable.
+                    PaintJitteredRegion(pixels, 0.02f, 0.72f, 0.045f, 0.405f, ref random);
+                    PaintJitteredRegion(pixels, 0.05f, 0.70f, 0.10f, 0.40f, ref random);
                     break;
                 case "Berkshire":
                     // White lower belly plus a chest/foot sweep, leaving the
@@ -435,11 +473,46 @@ namespace RatHabitat
                     PaintJitteredRegion(pixels, 0.04f, 0.18f, 0.22f, 0.38f, ref random);
                     PaintJitteredRegion(pixels, 0.09f, 0.16f, 0.13f, 0.24f, ref random);
                     break;
+                case "Lightning blaze Siamese":
+                    // A narrow, irregular facial wedge over the pale point
+                    // base; the jitter keeps it organic rather than a hard
+                    // geometric stripe.
+                    PaintJitteredRegion(pixels, 0.06f, 0.19f, 0.19f, 0.38f, ref random);
+                    PaintIrregularSpotPatches(pixels, CappedSpotAnchors, 1, ref random);
+                    break;
+                case "Badger blaze Siamese":
+                    PaintJitteredRegion(pixels, 0.04f, 0.21f, 0.12f, 0.38f, ref random);
+                    PaintJitteredRegion(pixels, 0.10f, 0.25f, 0.20f, 0.32f, ref random);
+                    break;
                 case "Variegated":
                     PaintJitteredRegion(pixels, 0.08f, 0.22f, 0.09f, 0.32f, ref random);
                     PaintJitteredRegion(pixels, 0.26f, 0.42f, 0.19f, 0.38f, ref random);
                     PaintJitteredRegion(pixels, 0.45f, 0.60f, 0.07f, 0.27f, ref random);
                     PaintJitteredRegion(pixels, 0.57f, 0.70f, 0.22f, 0.37f, ref random);
+                    break;
+                case "Variberk":
+                    // Berkshire-like lower white with additional irregular
+                    // side breaks, giving each rat a different balance.
+                    PaintJitteredRegion(pixels, 0.02f, 0.72f, 0.05f, 0.17f, ref random);
+                    PaintJitteredRegion(pixels, 0.11f, 0.30f, 0.16f, 0.36f, ref random);
+                    PaintJitteredRegion(pixels, 0.49f, 0.68f, 0.14f, 0.33f, ref random);
+                    break;
+                case "Dominant white spotted":
+                    PaintJitteredRegion(pixels, 0.02f, 0.72f, 0.045f, 0.405f, ref random);
+                    PaintIrregularSpotPatches(pixels, OrganicSpotAnchors, 3, ref random);
+                    break;
+                case "White side":
+                    PaintJitteredRegion(pixels, 0.02f, 0.29f, 0.07f, 0.40f, ref random);
+                    PaintJitteredRegion(pixels, 0.52f, 0.72f, 0.11f, 0.37f, ref random);
+                    break;
+                case "Merle":
+                    PaintIrregularSpotPatches(pixels, OrganicSpotAnchors, 7, ref random);
+                    PaintIrregularSpotPatches(pixels, HoodedSpotAnchors, 3, ref random);
+                    break;
+                case "Tabby/Marble":
+                    PaintJitteredRegion(pixels, 0.08f, 0.20f, 0.07f, 0.39f, ref random);
+                    PaintJitteredRegion(pixels, 0.31f, 0.42f, 0.08f, 0.39f, ref random);
+                    PaintJitteredRegion(pixels, 0.55f, 0.68f, 0.06f, 0.38f, ref random);
                     break;
                 case "Dalmatian-style":
                     PaintIrregularSpotPatches(pixels, OrganicSpotAnchors, 6, ref random);

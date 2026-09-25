@@ -52,6 +52,8 @@ namespace RatHabitat
         private RatPresenter rats;
         private InteractionManager interaction;
         private VerticalSliceUI ui;
+        private float habitatSwipeLockUntil;
+        private const float HabitatSwipeDebounceSeconds = 0.24f;
         private float saveTimer;
         private string selectedRatId;
         private string selectedObjectId;
@@ -2054,6 +2056,10 @@ namespace RatHabitat
         public bool TryNavigateHabitatSwipe(int direction)
         {
             if (direction == 0 || ui == null || ui.IsModalOverlayOpen) return false;
+            // A single touch/mouse gesture can generate several end/move
+            // callbacks on mobile. Lock only after a page actually changes,
+            // so one gesture can never skip a habitat.
+            if (Time.unscaledTime < habitatSwipeLockUntil) return false;
             // A profile is an intentional inspection surface. Keep it stable
             // until the player returns to the habitat rather than changing
             // the live camera underneath a profile during a swipe.
@@ -2068,6 +2074,7 @@ namespace RatHabitat
             habitatZoomOffset = 0f;
             cameraMoveVelocity = Vector3.zero;
             cameraZoomVelocity = 0f;
+            habitatSwipeLockUntil = Time.unscaledTime + HabitatSwipeDebounceSeconds;
             if (ui != null) ui.RefreshHeader();
             return true;
         }

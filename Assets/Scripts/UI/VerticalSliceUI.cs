@@ -115,6 +115,7 @@ namespace RatHabitat
         private MainPanel activeMainPanel = MainPanel.None;
         private RosterSortField rosterSortField = RosterSortField.Name;
         private bool rosterSortAscending = true;
+        private RosterSexFilter rosterSexFilter = RosterSexFilter.All;
         private string expandedMyRatsId;
         private string familyTreeSubjectId;
         private string profileMoreInformationRatId;
@@ -142,7 +143,15 @@ namespace RatHabitat
             Fertility,
             Sex,
             CoatColor,
+            Markings,
             Generation,
+        }
+
+        private enum RosterSexFilter
+        {
+            All,
+            Males,
+            Females,
         }
 
         public void Initialize(GameBootstrap owner)
@@ -2700,12 +2709,14 @@ namespace RatHabitat
         {
             if (parent == null || game == null || game.Save == null) return;
 
-            int ratCount = CountColonyRats();
+            int ratCount = CountVisibleColonyRats();
             var card = CreateCard("My Rats");
-            AddText(card, ratCount + " colony rats  •  Sort: " + RosterSortLabel(), 13,
+            AddText(card, ratCount + " shown of " + CountColonyRats() + " colony rats  •  " +
+                RosterSexFilterLabel() + "  •  Sort: " + RosterSortLabel(), 13,
                 new Color(0.78f, 0.9f, 0.82f), TextAnchor.UpperLeft);
             AddButtonTo(card, "Close My Rats", true, () => ToggleTopPanel(MainPanel.MyRats),
                 new Color(0.14f, 0.22f, 0.25f), 40f);
+            AddRosterSexFilters(card);
             AddRosterSortControls(card);
             AddButtonTo(card, game.MultipleSelectionMode ? "Stop Select Multiple" : "Select Multiple", true,
                 game.ToggleMultipleSelectionMode,
@@ -2780,7 +2791,7 @@ namespace RatHabitat
             var roster = new List<RatData>();
             foreach (var rat in game.Save.rats)
             {
-                if (rat != null) roster.Add(rat);
+                if (rat != null && IsRosterRatVisible(rat)) roster.Add(rat);
             }
             roster.Sort(CompareRosterRats);
             if (roster.Count == 0)
@@ -2801,6 +2812,76 @@ namespace RatHabitat
                 if (rat != null) count++;
             }
             return count;
+        }
+
+        private int CountVisibleColonyRats()
+        {
+            if (game == null || game.Save == null || game.Save.rats == null) return 0;
+            int count = 0;
+            foreach (var rat in game.Save.rats)
+                if (rat != null && IsRosterRatVisible(rat)) count++;
+            return count;
+        }
+
+        private bool IsRosterRatVisible(RatData rat)
+        {
+            if (rat == null) return false;
+            switch (rosterSexFilter)
+            {
+                case RosterSexFilter.Males: return rat.sex == RatSex.Male;
+                case RosterSexFilter.Females: return rat.sex == RatSex.Female;
+                default: return true;
+            }
+        }
+
+        private void AddRosterSexFilters(RectTransform parent)
+        {
+            var row = CreateRect("Rat Sex Filters", parent);
+            var layout = row.gameObject.AddComponent<HorizontalLayoutGroup>();
+            layout.spacing = 4f;
+            layout.childControlWidth = true;
+            layout.childControlHeight = true;
+            layout.childForceExpandWidth = true;
+            layout.childForceExpandHeight = false;
+            AddRosterSexFilterButton(row, RosterSexFilter.All);
+            AddRosterSexFilterButton(row, RosterSexFilter.Males);
+            AddRosterSexFilterButton(row, RosterSexFilter.Females);
+        }
+
+        private void AddRosterSexFilterButton(RectTransform parent, RosterSexFilter filter)
+        {
+            bool active = rosterSexFilter == filter;
+            AddButtonTo(parent, RosterSexFilterLabel(filter), true,
+                () => SetRosterSexFilter(filter),
+                active ? new Color(0.30f, 0.48f, 0.32f) : new Color(0.14f, 0.25f, 0.24f), 36f);
+        }
+
+        private void SetRosterSexFilter(RosterSexFilter filter)
+        {
+            if (rosterSexFilter == filter) return;
+            rosterSexFilter = filter;
+            if (game != null) game.DeactivateMultipleSelection();
+            if (!string.IsNullOrEmpty(expandedMyRatsId))
+            {
+                RatData expanded = BreedingSystem.FindRat(game.Save, expandedMyRatsId);
+                if (!IsRosterRatVisible(expanded)) expandedMyRatsId = null;
+            }
+            Refresh(true);
+        }
+
+        private string RosterSexFilterLabel()
+        {
+            return "Sex: " + RosterSexFilterLabel(rosterSexFilter);
+        }
+
+        private static string RosterSexFilterLabel(RosterSexFilter filter)
+        {
+            switch (filter)
+            {
+                case RosterSexFilter.Males: return "Males";
+                case RosterSexFilter.Females: return "Females";
+                default: return "All";
+            }
         }
 
         private void AddRosterSortControls(RectTransform parent)
@@ -2824,6 +2905,7 @@ namespace RatHabitat
                 RosterSortField.Fertility,
                 RosterSortField.Sex,
                 RosterSortField.CoatColor,
+                RosterSortField.Markings,
                 RosterSortField.Generation,
             };
             for (int index = 0; index < fields.Length; index += 4)
@@ -2872,6 +2954,7 @@ namespace RatHabitat
                 case RosterSortField.Fertility: return "Fertility";
                 case RosterSortField.Sex: return "Sex";
                 case RosterSortField.CoatColor: return "Coat";
+                case RosterSortField.Markings: return "Markings";
                 case RosterSortField.Generation: return "Generation";
                 default: return "Name";
             }
@@ -2888,6 +2971,7 @@ namespace RatHabitat
                 case RosterSortField.Fertility: result = TraitValue(first, 2).CompareTo(TraitValue(second, 2)); break;
                 case RosterSortField.Sex: result = first.sex.CompareTo(second.sex); break;
                 case RosterSortField.CoatColor: result = string.Compare(CoatSortKey(first), CoatSortKey(second), StringComparison.OrdinalIgnoreCase); break;
+                case RosterSortField.Markings: result = string.Compare(MarkingSortKey(first), MarkingSortKey(second), StringComparison.OrdinalIgnoreCase); break;
                 case RosterSortField.Generation: result = first.generation.CompareTo(second.generation); break;
                 default: result = string.Compare(first.name, second.name, StringComparison.OrdinalIgnoreCase); break;
             }
@@ -2919,6 +3003,14 @@ namespace RatHabitat
         {
             if (rat == null || rat.phenotype == null || !rat.phenotype.furRevealed) return "unknown";
             return rat.phenotype.coatColorLabel ?? "unknown";
+        }
+
+        private static string MarkingSortKey(RatData rat)
+        {
+            if (rat == null) return "unknown";
+            if (rat.phenotype != null && !string.IsNullOrEmpty(rat.phenotype.markingsLabel))
+                return rat.phenotype.markingsLabel;
+            return rat.markingFamily ?? "unknown";
         }
 
         private void AddRatRosterRow(Transform parent, RatData rat)

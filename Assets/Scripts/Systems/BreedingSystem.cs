@@ -651,6 +651,13 @@ namespace RatHabitat
                 pup.developerGrowthOverride = false;
                 pup.growthAnchorAgeDays = 0f;
                 pup.markingFamily = GeneticsSystem.ResolveOffspringMarkingFamily(mother, father, pup.genotype);
+                // Preserve the stable coat-family appearance through
+                // inheritance. The variant is chosen from both parents and
+                // the pup's stable ID, so a UI refresh or reload never
+                // rerolls an offspring's visible color.
+                pup.coatColorVariant = GeneticsSystem.ResolveOffspringCoatColorVariant(
+                    mother, father, pup.genotype, pup.id);
+                pup.coatTone = GeneticsSystem.DefaultCoatTone(pup.id, pup.genotype);
                 // A Pairing Habitat litter stays with its mother there for
                 // pregnancy, birth, nursing, and growth. Normal pregnancies
                 // continue using the existing Nursery assignment.

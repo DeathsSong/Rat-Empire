@@ -14,8 +14,11 @@ namespace RatHabitat
         // family. They do not replace the B/C/D/S loci used by inheritance.
         public static readonly string[] MarkingFamilies =
         {
-            "Solid", "Hooded", "Berkshire", "Capped", "Bareback",
-            "Variegated", "Irish", "Blaze", "Dalmatian-style", "Mismarked hooded"
+            "Solid", "Self", "Hooded", "Broken hooded", "Berkshire", "Bareback",
+            "Capped", "Mask", "Patch", "Black-eye white", "Variegated", "Variberk",
+            "Irish", "Blaze", "Lightning blaze Siamese", "Badger blaze Siamese",
+            "Dalmatian-style", "Dominant white spotted", "White side", "Merle", "Tabby/Marble",
+            "Mismarked hooded"
         };
 
         // These are visual phenotype families layered on top of the existing
@@ -24,19 +27,25 @@ namespace RatHabitat
         // within that genetic family.
         private static readonly string[] BlackCoatVariants =
         {
-            "black", "agouti", "blue-gray", "dove-gray", "lilac", "silver-fawn"
+            "black", "black marten", "silvermane", "tonkinese", "roan", "agouti marten", "agouti",
+            "tabby/marble"
         };
         private static readonly string[] BrownCoatVariants =
         {
-            "chocolate", "cinnamon", "beige", "champagne", "agouti", "silver-fawn"
+            "agouti", "mink", "chocolate", "beige", "champagne", "fawn", "cinnamon",
+            "russian cinnamon", "burmese", "aussie mink", "coffee", "agouti marten", "seal point siamese",
+            "merle"
         };
         private static readonly string[] DilutedBlackCoatVariants =
         {
-            "blue-gray", "dove-gray", "lilac", "silver-fawn"
+            "russian blue", "blue agouti", "american blue", "russian dove", "blue marten",
+            "dove gray", "lilac", "silver fawn", "roan", "blue point siamese", "tabby/marble"
         };
         private static readonly string[] DilutedBrownCoatVariants =
         {
-            "beige", "champagne", "cinnamon", "lilac", "silver-fawn"
+            "beige", "champagne", "fawn", "cinnamon", "russian cinnamon", "silver fawn",
+            "lilac", "pink-eye platinum", "russian dove", "pink-eye white", "blue marten", "himalayan",
+            "lightning blaze siamese"
         };
 
         [Serializable]
@@ -306,7 +315,7 @@ namespace RatHabitat
                 rat.coatTone = DefaultCoatTone(stableId, rat.genotype);
         }
 
-        private static bool IsKnownCoatColorVariant(string variant)
+        public static bool IsKnownCoatColorVariant(string variant)
         {
             if (string.IsNullOrEmpty(variant)) return false;
             switch (variant.ToLowerInvariant())
@@ -314,13 +323,39 @@ namespace RatHabitat
                 case "black":
                 case "chocolate":
                 case "agouti":
-                case "blue-gray":
+                case "mink":
+                case "russian blue":
+                case "blue agouti":
+                case "dove gray":
                 case "dove-gray":
+                case "blue-gray":
                 case "beige":
                 case "champagne":
+                case "fawn":
                 case "cinnamon":
-                case "lilac":
+                case "russian cinnamon":
+                case "silver fawn":
                 case "silver-fawn":
+                case "american blue":
+                case "black marten":
+                case "tonkinese":
+                case "burmese":
+                case "roan":
+                case "agouti marten":
+                case "aussie mink":
+                case "coffee":
+                case "blue marten":
+                case "pink-eye platinum":
+                case "russian dove":
+                case "pink-eye white":
+                case "lilac":
+                case "silvermane":
+                case "seal point siamese":
+                case "blue point siamese":
+                case "himalayan":
+                case "merle":
+                case "tabby/marble":
+                case "lightning blaze siamese":
                 case "brown":
                 case "diluted-black":
                 case "diluted-brown":
@@ -338,10 +373,13 @@ namespace RatHabitat
 
             bool black = HasDominant(genotype, "B");
             bool diluted = IsRecessive(genotype, "D");
+            bool carriesAlbino = HasAllele(genotype, "C", "c");
             string[] palette = black
                 ? (diluted ? DilutedBlackCoatVariants : BlackCoatVariants)
                 : (diluted ? DilutedBrownCoatVariants : BrownCoatVariants);
             uint seed = StableColorHash((stableId ?? string.Empty) + "|" + GenotypeKey(genotype));
+            if (carriesAlbino && seed % 17u == 0u)
+                return diluted ? "pink-eye white" : "pink-eye platinum";
             return palette[seed % (uint)palette.Length];
         }
 
@@ -362,29 +400,43 @@ namespace RatHabitat
             string label;
             switch (variant.ToLowerInvariant())
             {
-                case "black":
-                    label = "Black"; baseColor = Hex("272a30"); accentColor = Hex("8d949d"); break;
+                case "black": label = "Black"; baseColor = Hex("272a30"); accentColor = Hex("8d949d"); break;
+                case "agouti": label = "Agouti"; baseColor = Hex("806044"); accentColor = Hex("b99568"); break;
+                case "mink": label = "Mink"; baseColor = Hex("897064"); accentColor = Hex("c2a697"); break;
+                case "russian blue": label = "Russian blue"; baseColor = Hex("66727f"); accentColor = Hex("aab7c3"); break;
+                case "blue agouti": label = "Blue agouti"; baseColor = Hex("74767a"); accentColor = Hex("afb1b1"); break;
+                case "dove gray":
+                case "dove-gray": label = "Dove gray"; baseColor = Hex("9299a0"); accentColor = Hex("c8cdd0"); break;
+                case "blue-gray": label = "Blue-gray"; baseColor = Hex("7e8792"); accentColor = Hex("b8c0c8"); break;
+                case "beige": label = "Beige"; baseColor = Hex("b39a79"); accentColor = Hex("d7bd98"); break;
+                case "champagne": label = "Champagne"; baseColor = Hex("d1b99b"); accentColor = Hex("f0ddc2"); break;
+                case "fawn": label = "Fawn"; baseColor = Hex("c48d5b"); accentColor = Hex("e3b17e"); break;
+                case "cinnamon": label = "Cinnamon"; baseColor = Hex("a56d4b"); accentColor = Hex("d19a6a"); break;
+                case "russian cinnamon": label = "Russian cinnamon"; baseColor = Hex("ae6d35"); accentColor = Hex("d59652"); break;
+                case "silver fawn":
+                case "silver-fawn": label = "Silver fawn"; baseColor = Hex("bda090"); accentColor = Hex("e1cbb8"); break;
+                case "american blue": label = "American blue"; baseColor = Hex("788391"); accentColor = Hex("b3bfca"); break;
+                case "black marten": label = "Black marten"; baseColor = Hex("393b40"); accentColor = Hex("81858d"); break;
+                case "tonkinese": label = "Tonkinese"; baseColor = Hex("71584d"); accentColor = Hex("aa806b"); break;
+                case "burmese": label = "Burmese"; baseColor = Hex("806047"); accentColor = Hex("bb916c"); break;
+                case "roan": label = "Roan"; baseColor = Hex("a6a3a0"); accentColor = Hex("dfdcd7"); break;
+                case "agouti marten": label = "Agouti marten"; baseColor = Hex("786e65"); accentColor = Hex("b5a99d"); break;
+                case "aussie mink": label = "Aussie mink"; baseColor = Hex("9d8278"); accentColor = Hex("ceb2a4"); break;
+                case "coffee": label = "Coffee"; baseColor = Hex("826351"); accentColor = Hex("b58d73"); break;
                 case "chocolate":
-                    label = "Chocolate"; baseColor = Hex("684536"); accentColor = Hex("b6815d"); break;
-                case "agouti":
-                    label = "Agouti"; baseColor = Hex("806044"); accentColor = Hex("b99568"); break;
-                case "blue-gray":
-                    label = "Blue-gray"; baseColor = Hex("687582"); accentColor = Hex("aeb8c0"); break;
-                case "dove-gray":
-                    label = "Dove gray"; baseColor = Hex("9299a0"); accentColor = Hex("c8cdd0"); break;
-                case "beige":
-                    label = "Beige"; baseColor = Hex("b39a79"); accentColor = Hex("d7bd98"); break;
-                case "champagne":
-                    label = "Champagne"; baseColor = Hex("c4a88b"); accentColor = Hex("e0c7a8"); break;
-                case "cinnamon":
-                    label = "Cinnamon"; baseColor = Hex("a56d4b"); accentColor = Hex("d19a6a"); break;
-                case "lilac":
-                    label = "Lilac"; baseColor = Hex("8b7d91"); accentColor = Hex("b8adba"); break;
-                case "silver-fawn":
-                    label = "Silver fawn"; baseColor = Hex("a38e7d"); accentColor = Hex("c8b9a8"); break;
-                case "brown":
-                    // Compatibility with older serialized phenotype values.
-                    label = "Chocolate"; baseColor = Hex("684536"); accentColor = Hex("b6815d"); break;
+                case "brown": label = "Chocolate"; baseColor = Hex("684536"); accentColor = Hex("b6815d"); break;
+                case "blue marten": label = "Blue marten"; baseColor = Hex("8a8f99"); accentColor = Hex("c2c7ce"); break;
+                case "pink-eye platinum": label = "Pink-eye platinum"; baseColor = Hex("e1dedb"); accentColor = Hex("faf8f3"); break;
+                case "russian dove": label = "Russian dove"; baseColor = Hex("b9b7b3"); accentColor = Hex("dfdcda"); break;
+                case "pink-eye white": label = "Pink-eye white"; baseColor = Hex("f5f2eb"); accentColor = Hex("fffdf8"); break;
+                case "lilac": label = "Lilac"; baseColor = Hex("8b7d91"); accentColor = Hex("b8adba"); break;
+                case "silvermane": label = "Silvermane"; baseColor = Hex("4f5359"); accentColor = Hex("a7adb5"); break;
+                case "seal point siamese": label = "Seal point Siamese"; baseColor = Hex("e3d6c5"); accentColor = Hex("8b735f"); break;
+                case "blue point siamese": label = "Blue point Siamese"; baseColor = Hex("d8dde1"); accentColor = Hex("7b8793"); break;
+                case "himalayan": label = "Himalayan"; baseColor = Hex("f1eee8"); accentColor = Hex("b8a896"); break;
+                case "merle": label = "Merle"; baseColor = Hex("877b76"); accentColor = Hex("c0b6af"); break;
+                case "tabby/marble": label = "Tabby / Marble"; baseColor = Hex("5e6066"); accentColor = Hex("a6a8ad"); break;
+                case "lightning blaze siamese": label = "Lightning blaze Siamese"; baseColor = Hex("e7ded0"); accentColor = Hex("9a806b"); break;
                 default:
                     return;
             }
@@ -437,6 +489,35 @@ namespace RatHabitat
         {
             if (string.IsNullOrEmpty(family))
                 return HasDominant(genotype, "S") ? "Dalmatian-style" : "Solid";
+            string normalizedFamily = family.Trim().ToLowerInvariant();
+            switch (normalizedFamily)
+            {
+                case "self": return "Self";
+                case "solid": return "Solid";
+                case "broken hooded": return "Broken hooded";
+                case "hooded": return "Hooded";
+                case "berkshire": return "Berkshire";
+                case "bareback": return "Bareback";
+                case "cap":
+                case "capped": return "Capped";
+                case "mask": return "Mask";
+                case "patch": return "Patch";
+                case "black-eye white": return "Black-eye white";
+                case "variegated": return "Variegated";
+                case "variberk": return "Variberk";
+                case "irish": return "Irish";
+                case "blaze":
+                case "facial blaze": return "Blaze";
+                case "lightning blaze siamese": return "Lightning blaze Siamese";
+                case "badger blaze siamese": return "Badger blaze Siamese";
+                case "dalmatian-style": return "Dalmatian-style";
+                case "dalmatian": return "Dalmatian-style";
+                case "dominant white spotted": return "Dominant white spotted";
+                case "white side": return "White side";
+                case "merle": return "Merle";
+                case "tabby/marble": return "Tabby/Marble";
+                case "mismarked hooded": return "Mismarked hooded";
+            }
             for (int i = 0; i < MarkingFamilies.Length; i++)
             {
                 if (string.Equals(MarkingFamilies[i], family, StringComparison.OrdinalIgnoreCase))
@@ -465,8 +546,36 @@ namespace RatHabitat
                 ? (phenotype.spotted ? "Dalmatian-style" : "Solid")
                 : NormalizeMarkingFamily(family, null);
             phenotype.markingFamily = normalized;
-            phenotype.spotted = normalized != "Solid";
-            phenotype.markingsLabel = normalized == "Solid" ? "Solid coat" : normalized;
+            phenotype.spotted = normalized != "Solid" && normalized != "Self";
+            phenotype.markingsLabel = normalized == "Solid" || normalized == "Self"
+                ? "Self / solid coat" : normalized;
+        }
+
+        public static string ResolveOffspringCoatColorVariant(
+            RatData mother, RatData father, GenotypeData childGenotype, string childId)
+        {
+            if (childGenotype == null) childGenotype = new GenotypeData();
+            Normalize(childGenotype);
+            if (IsRecessive(childGenotype, "C")) return "albino";
+
+            string motherVariant = mother == null ? string.Empty : mother.coatColorVariant;
+            string fatherVariant = father == null ? string.Empty : father.coatColorVariant;
+            if (!IsKnownCoatColorVariant(motherVariant)) motherVariant = string.Empty;
+            if (!IsKnownCoatColorVariant(fatherVariant)) fatherVariant = string.Empty;
+            if (!string.IsNullOrEmpty(motherVariant) && motherVariant == fatherVariant)
+                return motherVariant;
+            if (string.IsNullOrEmpty(motherVariant)) return string.IsNullOrEmpty(fatherVariant)
+                ? DefaultCoatColorVariant(childId, childGenotype) : fatherVariant;
+            if (string.IsNullOrEmpty(fatherVariant)) return motherVariant;
+
+            uint seed = StableColorHash((childId ?? string.Empty) + "|inherited-coat|" + GenotypeKey(childGenotype));
+            return (seed & 1u) == 0u ? motherVariant : fatherVariant;
+        }
+
+        private static bool HasAllele(GenotypeData genotype, string locus, string allele)
+        {
+            var pair = GetLocus(genotype, locus);
+            return pair.firstAllele == allele || pair.secondAllele == allele;
         }
 
         public static string DefaultMarkingFamily(GenotypeData genotype)
@@ -483,12 +592,20 @@ namespace RatHabitat
                 father == null ? childGenotype : father.genotype);
             bool childSpotted = HasDominant(childGenotype, "S");
             if (!childSpotted) return "Solid";
-            if (motherFamily == fatherFamily && motherFamily != "Solid") return motherFamily;
-            if (motherFamily != "Solid" && fatherFamily == "Solid") return motherFamily;
-            if (fatherFamily != "Solid" && motherFamily == "Solid") return fatherFamily;
-            if (motherFamily != "Solid" && UnityEngine.Random.value < 0.5f) return motherFamily;
-            if (fatherFamily != "Solid") return fatherFamily;
+            bool motherSolid = IsSolidMarkingFamily(motherFamily);
+            bool fatherSolid = IsSolidMarkingFamily(fatherFamily);
+            if (motherFamily == fatherFamily && !motherSolid) return motherFamily;
+            if (!motherSolid && fatherSolid) return motherFamily;
+            if (!fatherSolid && motherSolid) return fatherFamily;
+            if (!motherSolid && UnityEngine.Random.value < 0.5f) return motherFamily;
+            if (!fatherSolid) return fatherFamily;
             return fallback;
+        }
+
+        private static bool IsSolidMarkingFamily(string family)
+        {
+            return string.Equals(family, "Solid", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(family, "Self", StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool HasDominant(GenotypeData genotype, string locus)

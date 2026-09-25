@@ -15,9 +15,12 @@ namespace RatHabitat
         // in the market. The selected family is persisted on the listing.
         private static readonly string[] MarkingFamilies =
         {
-            "Solid", "Solid", "Solid", "Solid", "Hooded", "Hooded",
-            "Berkshire", "Berkshire", "Capped", "Bareback", "Variegated",
-            "Irish", "Blaze", "Dalmatian-style", "Mismarked hooded"
+            "Solid", "Solid", "Solid", "Self", "Hooded", "Hooded",
+            "Broken hooded", "Berkshire", "Berkshire", "Bareback", "Capped",
+            "Mask", "Patch", "Black-eye white", "Variegated", "Variberk",
+            "Irish", "Blaze", "Lightning blaze Siamese", "Badger blaze Siamese",
+            "Dalmatian-style", "Dominant white spotted", "White side", "Merle", "Tabby/Marble",
+            "Mismarked hooded"
         };
 
         public static void EnsureStoreState(ColonySaveData save)
@@ -308,7 +311,8 @@ namespace RatHabitat
             bool albino = random.NextDouble() < 0.08;
             string c1 = albino ? "c" : (random.Next(4) == 0 ? "c" : "C");
             string c2 = albino ? "c" : (random.Next(4) == 0 ? "c" : "C");
-            bool solid = string.Equals(markingFamily, "Solid", StringComparison.OrdinalIgnoreCase);
+            bool solid = string.Equals(markingFamily, "Solid", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(markingFamily, "Self", StringComparison.OrdinalIgnoreCase);
             string s1 = solid ? "s" : "S";
             string s2 = solid ? "s" : (random.Next(2) == 0 ? "S" : "s");
             return GeneticsSystem.CreateFounder(
