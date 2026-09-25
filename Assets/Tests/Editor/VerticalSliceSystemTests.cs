@@ -47,6 +47,189 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void NewGameFoundersUseRandomizedStoreStylePair()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            Assert.AreEqual(2, save.rats.Count);
+
+            RatData female = save.rats.Find(rat => rat.sex == RatSex.Female);
+            RatData male = save.rats.Find(rat => rat.sex == RatSex.Male);
+            Assert.IsNotNull(female);
+            Assert.IsNotNull(male);
+            Assert.IsTrue(female.isStarterRat);
+            Assert.IsTrue(male.isStarterRat);
+            Assert.AreNotEqual(female.id, male.id);
+            Assert.IsTrue(System.Array.IndexOf(GameConfig.FemaleRatNames, female.name) >= 0);
+            Assert.IsTrue(System.Array.IndexOf(GameConfig.MaleRatNames, male.name) >= 0);
+            Assert.IsFalse(string.IsNullOrEmpty(female.coatColorVariant));
+            Assert.IsFalse(string.IsNullOrEmpty(male.coatColorVariant));
+            Assert.IsFalse(string.IsNullOrEmpty(female.markingFamily));
+            Assert.IsFalse(string.IsNullOrEmpty(male.markingFamily));
+            Assert.GreaterOrEqual(female.ageDays, GameConfig.StarterFemaleMinimumAgeDays);
+            Assert.LessOrEqual(female.ageDays, GameConfig.StarterFemaleMaximumAgeDays);
+            Assert.GreaterOrEqual(male.ageDays, GameConfig.StarterMaleMinimumAgeDays);
+            Assert.LessOrEqual(male.ageDays, GameConfig.StarterMaleMaximumAgeDays);
+            Assert.AreEqual(RatStage.Adult, female.stage);
+            Assert.AreEqual(RatStage.Adult, male.stage);
+            Assert.AreEqual(RatEnclosure.Pairing, female.enclosure);
+            Assert.AreEqual(RatEnclosure.Pairing, male.enclosure);
+            Assert.IsTrue(female.pairingHabitatAssigned);
+            Assert.IsTrue(male.pairingHabitatAssigned);
+        }
+
+        [Test]
+        public void BehaviorDeltaFollowsSelectedSimulationSpeed()
+        {
+            // This also exercises a slower WebGL frame. No elapsed real time
+            // may be discarded before the simulation multiplier is applied.
+            const float realFrameSeconds = 0.06f;
+
+            GrowthSystem.SetRuntimeSpeed(1f);
+            float oneX = GrowthSystem.SimulationBehaviorDeltaSeconds(realFrameSeconds);
+            GrowthSystem.SetRuntimeSpeed(2f);
+            float twoX = GrowthSystem.SimulationBehaviorDeltaSeconds(realFrameSeconds);
+            GrowthSystem.SetRuntimeSpeed(3f);
+            float threeX = GrowthSystem.SimulationBehaviorDeltaSeconds(realFrameSeconds);
+            GrowthSystem.SetRuntimeSpeed(1f);
+
+            Assert.AreEqual(oneX * 2f, twoX, 0.00001f,
+                "2x should advance moment-to-moment rat behavior twice as quickly as 1x.");
+            Assert.AreEqual(oneX * 3f, threeX, 0.00001f,
+                "3x should advance moment-to-moment rat behavior three times as quickly as 1x.");
+        }
+
+        [Test]
+        public void WorldMovementStepProducesProportionalTravelTimes()
+        {
+            const float distance = 6f;
+            const float baseWorldSpeed = 0.75f;
+            const float realFrameSeconds = 0.037f;
+            const int frameCount = 180;
+
+            float[] travelled = new float[3];
+            for (int speedIndex = 0; speedIndex < travelled.Length; speedIndex++)
+            {
+                float speed = speedIndex + 1f;
+                GrowthSystem.SetRuntimeSpeed(speed);
+                for (int frame = 0; frame < frameCount; frame++)
+                {
+                    travelled[speedIndex] += GrowthSystem.SimulationMovementStep(
+                        baseWorldSpeed, realFrameSeconds);
+                }
+            }
+            GrowthSystem.SetRuntimeSpeed(1f);
+
+            Assert.AreEqual(travelled[0] * 2f, travelled[1], 0.0001f,
+                "2x world-space travel must cover twice the distance in the same real time.");
+            Assert.AreEqual(travelled[0] * 3f, travelled[2], 0.0001f,
+                "3x world-space travel must cover three times the distance in the same real time.");
+
+            float oneXDuration = distance / baseWorldSpeed;
+            float twoXDuration = distance / (baseWorldSpeed * 2f);
+            float threeXDuration = distance / (baseWorldSpeed * 3f);
+            Assert.AreEqual(oneXDuration * 0.5f, twoXDuration, 0.0001f);
+            Assert.AreEqual(oneXDuration / 3f, threeXDuration, 0.0001f);
+        }
+
+        [Test]
+        public void ConceptionChanceKeepsLowFertilityViableWithoutChangingHabitatMaximums()
+        {
+            const long gameTime = 700000000L;
+            float[] fertilityValues = { 0f, 1f, 5f, 15f, 50f, 100f };
+            float previousPairingChance = -1f;
+            float previousDedicatedChance = -1f;
+
+            foreach (float fertility in fertilityValues)
+            {
+                var save = CreatePairingTestSave(gameTime, fertility);
+                RatData female = save.rats[0];
+                RatData male = save.rats[1];
+                float pairingChance = BreedingSystem.CalculateConceptionChance(
+                    female, male, GameConfig.PairingPregnancyChance, 0f, 0.20f);
+                float dedicatedChance = BreedingSystem.CalculateConceptionChance(
+                    female, male, GameConfig.PairingPregnancyChance,
+                    GameConfig.DedicatedBreedingSuccessBonus,
+                    GameConfig.DedicatedBreedingSuccessCap);
+
+                Assert.GreaterOrEqual(pairingChance, previousPairingChance);
+                Assert.GreaterOrEqual(dedicatedChance, previousDedicatedChance);
+                previousPairingChance = pairingChance;
+                previousDedicatedChance = dedicatedChance;
+
+                if (fertility <= 0f)
+                {
+                    Assert.AreEqual(0f, pairingChance, 0.000001f);
+                    Assert.AreEqual(0f, dedicatedChance, 0.000001f);
+                }
+                if (Mathf.Approximately(fertility, 1f))
+                {
+                    Assert.That(pairingChance * 100f, Is.InRange(0.9f, 1.3f));
+                    Assert.That(dedicatedChance * 100f, Is.InRange(2.0f, 2.9f));
+                    StringAssert.AreEqualIgnoringCase(
+                        "1.1%", BreedingSystem.ConceptionChanceLabel(
+                            female, male, GameConfig.PairingPregnancyChance, 0f, 0.20f));
+                }
+                if (Mathf.Approximately(fertility, 100f))
+                {
+                    Assert.AreEqual(0.20f, pairingChance, 0.000001f);
+                    Assert.AreEqual(0.45f, dedicatedChance, 0.000001f);
+                }
+            }
+        }
+
+        [Test]
+        public void StoreQualityUpgradesUsePersistedFivePointStepsForFutureStock()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            Assert.AreEqual(15, UpgradeSystem.StoreQualityCap(save));
+            var originalListings = new List<StoreRatListingData>();
+            foreach (var listing in save.storeRatListings)
+            {
+                originalListings.Add(new StoreRatListingData
+                {
+                    id = listing.id,
+                    traits = new TraitData(listing.traits.size, listing.traits.health, listing.traits.fertility),
+                });
+                Assert.LessOrEqual(listing.traits.size, 15f);
+                Assert.LessOrEqual(listing.traits.health, 15f);
+                Assert.LessOrEqual(listing.traits.fertility, 15f);
+            }
+
+            save.colonyCredits = 10000;
+            int nextCap;
+            Assert.IsTrue(UpgradeSystem.PurchaseStoreQualityUpgrade(save, out nextCap));
+            Assert.AreEqual(20, nextCap);
+            for (int index = 0; index < originalListings.Count; index++)
+            {
+                StoreRatListingData current = save.storeRatListings[index];
+                StoreRatListingData original = originalListings[index];
+                Assert.AreEqual(original.traits.size, current.traits.size);
+                Assert.AreEqual(original.traits.health, current.traits.health);
+                Assert.AreEqual(original.traits.fertility, current.traits.fertility);
+            }
+
+            StoreSystem.RestockNow(save, save.clock.gameTimeMs);
+            foreach (var listing in save.storeRatListings)
+            {
+                Assert.LessOrEqual(listing.traits.size, 20f);
+                Assert.LessOrEqual(listing.traits.health, 20f);
+                Assert.LessOrEqual(listing.traits.fertility, 20f);
+            }
+        }
+
+        [Test]
+        public void ColonyCapacityUpgradeUsesPersistedFiveRatSteps()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            Assert.AreEqual(GameConfig.BaseColonyCapacity, UpgradeSystem.ColonyCapacity(save));
+            save.colonyCredits = 10000;
+            int nextCapacity;
+            Assert.IsTrue(UpgradeSystem.PurchaseColonyCapacityUpgrade(save, out nextCapacity));
+            Assert.AreEqual(GameConfig.BaseColonyCapacity + GameConfig.ColonyCapacityUpgradeStep, nextCapacity);
+            Assert.AreEqual(25, UpgradeSystem.ColonyCapacity(save));
+        }
+
+        [Test]
         public void StarterMigrationDoesNotReduceBredOffspringStats()
         {
             var save = ColonyFactory.CreateNew(1000000L);
@@ -62,7 +245,7 @@ namespace RatHabitat.Tests
             Assert.AreEqual(88f, offspring.traits.size);
             Assert.AreEqual(77f, offspring.traits.health);
             Assert.AreEqual(66f, offspring.traits.fertility);
-            Assert.AreEqual(3, save.schemaVersion);
+            Assert.AreEqual(GameConfig.SaveVersion, save.schemaVersion);
         }
 
         [Test]
@@ -170,6 +353,32 @@ namespace RatHabitat.Tests
             Assert.AreEqual("Randy", ColonyFactory.NormalizeDisplayName("Randy 12"));
         }
 
+        [Test]
+        public void RatActivityHistoryIsStableByIdAndPersistsThroughJson()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            RatData rat = save.rats[0];
+            string ratId = rat.id;
+
+            Assert.IsTrue(RatActivitySystem.SetCurrent(save, rat, "eating", "Eating", 2000000L));
+            Assert.IsFalse(RatActivitySystem.SetCurrent(save, rat, "eating", "Eating", 3000000L),
+                "Repeated activity labels should not create repeated history entries.");
+            Assert.IsTrue(RatActivitySystem.SetCurrent(save, rat, "movement", "Moving habitats", 4000000L,
+                "Moved to Pairing Habitat"));
+
+            string json = SaveSystem.ToJson(save);
+            ColonySaveData restored = SaveSystem.FromJson(json);
+            RatData restoredRat = BreedingSystem.FindRat(restored, ratId);
+
+            Assert.IsNotNull(restoredRat);
+            Assert.IsNotNull(restoredRat.activity);
+            Assert.AreEqual("Moving habitats", restoredRat.activity.currentActivityLabel,
+                "The activity data belongs to the rat ID, not its display name.");
+            Assert.AreEqual(2, restoredRat.activity.history.Count);
+            Assert.AreEqual("Moved to Pairing Habitat", restoredRat.activity.history[0].message);
+            Assert.AreEqual(4000000L, restoredRat.activity.history[0].gameTimeMs);
+        }
+
         private static ColonySaveData CreatePairingTestSave(long gameTime, float fertility)
         {
             var save = ColonyFactory.CreateNew(gameTime);
@@ -266,20 +475,32 @@ namespace RatHabitat.Tests
         }
 
         [Test]
-        public void PhysicalEnclosuresAreSeparateAndNurseryIsNestedInFemaleBounds()
+        public void PhysicalEnclosuresAreEqualFullSizeAndArrangedLeftToRight()
         {
-            EnclosureSystem.Definition male = EnclosureSystem.GetDefinition(RatEnclosure.MaleColony);
-            EnclosureSystem.Definition female = EnclosureSystem.GetDefinition(RatEnclosure.FemaleColony);
-            EnclosureSystem.Definition nursery = EnclosureSystem.GetDefinition(RatEnclosure.Nursery);
+            RatEnclosure[] pages =
+            {
+                RatEnclosure.MaleColony,
+                RatEnclosure.FemaleColony,
+                RatEnclosure.Nursery,
+                RatEnclosure.Breeding,
+                RatEnclosure.Pairing,
+            };
+            EnclosureSystem.Definition previous = null;
+            for (int index = 0; index < pages.Length; index++)
+            {
+                EnclosureSystem.Definition current = EnclosureSystem.GetDefinition(pages[index]);
+                Assert.AreEqual(10.70f, current.Width, 0.001f);
+                Assert.AreEqual(22.00f, current.Depth, 0.001f);
+                if (previous != null)
+                    Assert.Less(previous.maxX, current.minX, "Habitat pages must have a visible horizontal gap.");
+                previous = current;
+            }
 
-            Assert.Less(male.maxX, female.minX, "Male and female cages must have a visible gap.");
-            Assert.GreaterOrEqual(nursery.minX, female.minX);
-            Assert.LessOrEqual(nursery.maxX, female.maxX);
-            Assert.GreaterOrEqual(nursery.minZ, female.minZ);
-            Assert.LessOrEqual(nursery.maxZ, female.maxZ);
-            Assert.IsTrue(EnclosureSystem.IsBehaviorPointAllowed(RatEnclosure.FemaleColony, new Vector3(1.5f, 0.45f, 4f)));
-            Assert.IsFalse(EnclosureSystem.IsBehaviorPointAllowed(RatEnclosure.FemaleColony, nursery.Center));
-            Assert.IsTrue(EnclosureSystem.IsBehaviorPointAllowed(RatEnclosure.Nursery, nursery.Center));
+            Vector3 femalePoint = EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, -1.5f, 4f);
+            Vector3 nurseryOpenPoint = EnclosureSystem.PointInEnclosure(RatEnclosure.Nursery, 3f, 4f);
+            Assert.IsTrue(EnclosureSystem.IsBehaviorPointAllowed(RatEnclosure.FemaleColony, femalePoint));
+            Assert.IsFalse(EnclosureSystem.IsBehaviorPointAllowed(RatEnclosure.Nursery, EnclosureSystem.NurseryNestPosition));
+            Assert.IsTrue(EnclosureSystem.IsBehaviorPointAllowed(RatEnclosure.Nursery, nurseryOpenPoint));
         }
 
         [Test]

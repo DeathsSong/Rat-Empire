@@ -27,26 +27,29 @@ namespace RatHabitat
         private static Bounds pairingNestRendererBounds;
         private static bool pairingNestRendererBoundsRegistered;
 
-        // Male and Female retain the original full-depth cage dimensions.
-        // Nursery and Breeding occupy a separate lower row in the previously
-        // unused open space; no cage is scaled to make room for another one.
-        private static readonly Definition MaleDefinition = new Definition(
-            RatEnclosure.MaleColony, "Male Cage", -5.35f, -0.65f, -5.95f, 8.15f,
+        // Every habitat uses the Pairing Habitat's full footprint. The world
+        // layout is a single horizontal row so the camera pager moves between
+        // independent, equally framed enclosures instead of switching among
+        // a mixture of small cages and a large off-screen cage.
+        private const float FullHabitatMinZ = -13.85f;
+        private const float FullHabitatMaxZ = 8.15f;
+        private const float FullHabitatWidth = 10.70f;
+        private const float HabitatColumnSpacing = 12.00f;
+
+        private static readonly Definition MaleDefinition = CreateFullHabitatDefinition(
+            RatEnclosure.MaleColony, "Male Cage", 0f,
             new Color(0.54f, 0.68f, 0.48f), new Color(0.24f, 0.43f, 0.30f));
-        private static readonly Definition FemaleDefinition = new Definition(
-            RatEnclosure.FemaleColony, "Female Cage", 0.65f, 5.35f, -5.95f, 8.15f,
+        private static readonly Definition FemaleDefinition = CreateFullHabitatDefinition(
+            RatEnclosure.FemaleColony, "Female Cage", HabitatColumnSpacing,
             new Color(0.58f, 0.68f, 0.51f), new Color(0.30f, 0.42f, 0.28f));
-        private static readonly Definition NurseryDefinition = new Definition(
-            RatEnclosure.Nursery, "Nursery", -5.35f, -0.65f, -13.85f, -7.45f,
+        private static readonly Definition NurseryDefinition = CreateFullHabitatDefinition(
+            RatEnclosure.Nursery, "Nursery", HabitatColumnSpacing * 2f,
             new Color(0.72f, 0.62f, 0.48f), new Color(0.45f, 0.29f, 0.20f));
-        private static readonly Definition BreedingDefinition = new Definition(
-            RatEnclosure.Breeding, "Breeding", 0.65f, 5.35f, -13.85f, -7.45f,
+        private static readonly Definition BreedingDefinition = CreateFullHabitatDefinition(
+            RatEnclosure.Breeding, "Breeding", HabitatColumnSpacing * 3f,
             new Color(0.50f, 0.58f, 0.72f), new Color(0.25f, 0.32f, 0.52f));
-        // Pairing is a complete second habitat placed beside the existing
-        // 2x2 layout. It is deliberately outside the normal overview frame,
-        // but it uses the same footprint so rats remain fully simulated.
-        private static readonly Definition PairingDefinition = new Definition(
-            RatEnclosure.Pairing, "Pairing Habitat", 12.00f, 22.70f, -13.85f, 8.15f,
+        private static readonly Definition PairingDefinition = CreateFullHabitatDefinition(
+            RatEnclosure.Pairing, "Pairing Habitat", HabitatColumnSpacing * 4f,
             new Color(0.48f, 0.55f, 0.42f), new Color(0.23f, 0.34f, 0.25f));
 
         private static string activeBreedingMotherId;
@@ -90,6 +93,16 @@ namespace RatHabitat
             public Vector3 Center { get { return new Vector3((minX + maxX) * 0.5f, 0.45f, (minZ + maxZ) * 0.5f); } }
         }
 
+        private static Definition CreateFullHabitatDefinition(RatEnclosure enclosure, string label,
+            float centerX, Color floorColor, Color barrierColor)
+        {
+            float halfWidth = FullHabitatWidth * 0.5f;
+            return new Definition(enclosure, label,
+                centerX - halfWidth, centerX + halfWidth,
+                FullHabitatMinZ, FullHabitatMaxZ,
+                floorColor, barrierColor);
+        }
+
         public static Definition GetDefinition(RatEnclosure enclosure)
         {
             switch (enclosure)
@@ -114,12 +127,21 @@ namespace RatHabitat
 
         public static Vector3 NurseryNestPosition
         {
-            get { return new Vector3(-3.0f, NurseryNestY, -10.55f); }
+            get { return PointInEnclosure(RatEnclosure.Nursery, 0f, 0.10f, NurseryNestY); }
         }
 
         public static Vector3 PairingNestPosition
         {
-            get { return new Vector3(17.35f, NurseryNestY, -10.55f); }
+            // Preserve the Pairing nest's front-of-habitat placement while the
+            // complete habitat moves to the last column in the row.
+            get { return PointInEnclosure(RatEnclosure.Pairing, 0f, -7.70f, NurseryNestY); }
+        }
+
+        public static Vector3 PointInEnclosure(RatEnclosure enclosure, float localX, float localZ,
+            float y = 0.45f)
+        {
+            Definition definition = GetDefinition(enclosure);
+            return new Vector3(definition.Center.x + localX, y, definition.Center.z + localZ);
         }
 
         /// <summary>
@@ -552,28 +574,42 @@ namespace RatHabitat
             switch (enclosure)
             {
                 case RatEnclosure.MaleColony:
-                    AddTarget(targets, "male_food_spot", "Food corner", RatBehaviorTargetKind.Food, -3.75f, -3.2f);
-                    AddTarget(targets, "male_hide_spot", "Male hide", RatBehaviorTargetKind.Hide, -2.55f, 3.15f);
-                    AddTarget(targets, "male_explore_spot", "Male explore point", RatBehaviorTargetKind.Toy, -4.35f, 7.35f);
+                    AddTarget(targets, "male_food_spot", "Food corner", RatBehaviorTargetKind.Food,
+                        PointInEnclosure(enclosure, -1.40f, -4.30f));
+                    AddTarget(targets, "male_hide_spot", "Male hide", RatBehaviorTargetKind.Hide,
+                        PointInEnclosure(enclosure, -0.20f, 2.05f));
+                    AddTarget(targets, "male_explore_spot", "Male explore point", RatBehaviorTargetKind.Toy,
+                        PointInEnclosure(enclosure, -2.00f, 6.25f));
                     break;
                 case RatEnclosure.FemaleColony:
-                    AddTarget(targets, "female_explore_front", "Female explore point", RatBehaviorTargetKind.Toy, 1.35f, 2.05f);
-                    AddTarget(targets, "female_rest_spot", "Female rest point", RatBehaviorTargetKind.Hide, 2.15f, 4.15f);
-                    AddTarget(targets, "female_explore_back", "Female explore point", RatBehaviorTargetKind.Tunnel, 1.55f, 6.55f);
+                    AddTarget(targets, "female_explore_front", "Female explore point", RatBehaviorTargetKind.Toy,
+                        PointInEnclosure(enclosure, -1.65f, 0.95f));
+                    AddTarget(targets, "female_rest_spot", "Female rest point", RatBehaviorTargetKind.Hide,
+                        PointInEnclosure(enclosure, -0.85f, 3.05f));
+                    AddTarget(targets, "female_explore_back", "Female explore point", RatBehaviorTargetKind.Tunnel,
+                        PointInEnclosure(enclosure, -1.45f, 5.45f));
                     break;
                 case RatEnclosure.Nursery:
-                    AddTarget(targets, "nursery_water_spot", "Nursery water point", RatBehaviorTargetKind.Water, -4.35f, -12.75f);
-                    AddTarget(targets, "nursery_explore_spot", "Nursery explore point", RatBehaviorTargetKind.Toy, -1.55f, -8.25f);
+                    AddTarget(targets, "nursery_water_spot", "Nursery water point", RatBehaviorTargetKind.Water,
+                        PointInEnclosure(enclosure, -1.35f, -2.10f));
+                    AddTarget(targets, "nursery_explore_spot", "Nursery explore point", RatBehaviorTargetKind.Toy,
+                        PointInEnclosure(enclosure, 1.45f, 2.40f));
                     break;
                 case RatEnclosure.Breeding:
-                    AddTarget(targets, "breeding_meet_spot", "Breeding meet point", RatBehaviorTargetKind.Toy, 3.0f, -10.55f);
-                    AddTarget(targets, "breeding_rest_spot", "Breeding rest point", RatBehaviorTargetKind.Hide, 1.55f, -8.35f);
-                    AddTarget(targets, "breeding_explore_spot", "Breeding explore point", RatBehaviorTargetKind.Toy, 4.45f, -12.75f);
+                    AddTarget(targets, "breeding_meet_spot", "Breeding meet point", RatBehaviorTargetKind.Toy,
+                        PointInEnclosure(enclosure, 0f, 0.10f));
+                    AddTarget(targets, "breeding_rest_spot", "Breeding rest point", RatBehaviorTargetKind.Hide,
+                        PointInEnclosure(enclosure, -1.45f, 2.30f));
+                    AddTarget(targets, "breeding_explore_spot", "Breeding explore point", RatBehaviorTargetKind.Toy,
+                        PointInEnclosure(enclosure, 1.45f, -2.10f));
                     break;
                 case RatEnclosure.Pairing:
-                    AddTarget(targets, "pairing_meet_spot", "Pairing meet point", RatBehaviorTargetKind.Toy, 14.65f, -1.15f);
-                    AddTarget(targets, "pairing_explore_spot", "Pairing explore point", RatBehaviorTargetKind.Toy, 20.25f, 5.85f);
-                    AddTarget(targets, "pairing_rest_spot", "Pairing rest spot", RatBehaviorTargetKind.Hide, 20.35f, -8.25f);
+                    AddTarget(targets, "pairing_meet_spot", "Pairing meet point", RatBehaviorTargetKind.Toy,
+                        PointInEnclosure(enclosure, -2.70f, 1.70f));
+                    AddTarget(targets, "pairing_explore_spot", "Pairing explore point", RatBehaviorTargetKind.Toy,
+                        PointInEnclosure(enclosure, 2.90f, 8.70f));
+                    AddTarget(targets, "pairing_rest_spot", "Pairing rest spot", RatBehaviorTargetKind.Hide,
+                        PointInEnclosure(enclosure, 3.00f, -5.40f));
                     break;
             }
             return targets;
@@ -589,14 +625,14 @@ namespace RatHabitat
         }
 
         private static void AddTarget(List<RatBehaviorTarget> targets, string id, string label,
-            RatBehaviorTargetKind kind, float x, float z)
+            RatBehaviorTargetKind kind, Vector3 position)
         {
             targets.Add(new RatBehaviorTarget
             {
                 id = id,
                 label = label,
                 kind = kind,
-                position = new Vector3(x, 0.45f, z),
+                position = position,
             });
         }
     }

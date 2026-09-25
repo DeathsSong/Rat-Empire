@@ -47,16 +47,16 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // contains the face and tail details as pixels on the same mesh.
             fixed3 albinoFur = _AlbinoBodyColor.rgb * (0.82 + saturate(paintedLuminance) * 0.21);
 
-            // Very dark source pixels are feature lines (eyes, mouth, nose
-            // edges, whisker roots, and tail segmentation) rather than the
-            // fur field. Keep them dark and neutral so they remain readable
-            // after the surrounding fur is neutralized to white. A soft
-            // threshold preserves natural shadow transitions without turning
-            // the whole rat brown again.
-            float darkFeatureSignal = 1.0 - smoothstep(0.08, 0.24, paintedLuminance);
-            fixed3 darkFeature = fixed3(0.10, 0.075, 0.075) *
-                (0.82 + saturate(paintedLuminance) * 0.34);
-            fixed3 albinoPainted = lerp(albinoFur, darkFeature, darkFeatureSignal * 0.92);
+            // Source pixels for eyes, mouth, nose edges, whisker roots, and
+            // tail segmentation can be mid-dark rather than nearly black.
+            // Keep that detail visible after neutralizing the fur, while
+            // leaving ordinary fur shadows white. The wider, soft threshold
+            // is important because these details are baked into the same
+            // skinned mesh texture on the imported rat.
+            float darkFeatureSignal = 1.0 - smoothstep(0.12, 0.42, paintedLuminance);
+            fixed3 darkFeature = fixed3(0.07, 0.055, 0.06) *
+                (0.82 + saturate(paintedLuminance) * 0.45);
+            fixed3 albinoPainted = lerp(albinoFur, darkFeature, darkFeatureSignal * 0.94);
 
             // Preserve pink/red accent pixels from the supplied hand-painted
             // texture (ears, nose, paws, and eye accents) without allowing

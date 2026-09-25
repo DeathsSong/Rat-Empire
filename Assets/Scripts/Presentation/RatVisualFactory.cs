@@ -106,7 +106,6 @@ namespace RatHabitat
             if (rat.phenotype == null || !rat.phenotype.furRevealed) return;
 
             Color coat = ParseColor(rat.phenotype.coatColorHex, new Color(0.3f, 0.3f, 0.34f));
-            Color accent = ParseColor(rat.phenotype.accentHex, new Color(0.68f, 0.68f, 0.7f));
             bool albino = rat.phenotype.coatColorId == "albino";
             bool spotted = rat.phenotype.spotted && !albino;
             bool importedVisual = IsImportedVisual(visual);
@@ -158,18 +157,24 @@ namespace RatHabitat
                     // an imported variant is split into multiple renderers.
                     // The current FBX has one rat_mesh material, so the shader
                     // below preserves its baked feature pixels instead.
-                    bool albinoFeature = albino && featureMaterial;
-                    if (featureMaterial && !albinoFeature) continue;
+                    // Never run the coat/albino override on a feature slot.
+                    // Feature renderers and slots carry their own authored
+                    // eyes, pupils, mouth, ears, feet, whiskers, and tail
+                    // detail materials and must remain readable against a
+                    // white albino coat.
+                    if (featureMaterial)
+                    {
+                        if (materialAudit.Length > 0) materialAudit += "; ";
+                        materialAudit += renderer.gameObject.name + "=" + material.name + " preserved-feature";
+                        continue;
+                    }
 
                     if (useCoatShader && !featureMaterial)
                     {
                         material.shader = spotShader;
                     }
 
-                    bool albinoPinkFeature = albinoFeature && IsAlbinoPinkFeature(rendererName, materialName);
-                    Color target = IsAccentMaterial(rendererName, materialName) || albinoPinkFeature
-                        ? accent
-                        : (albinoFeature ? Color.white : coat);
+                    Color target = coat;
                     // Keep the hand-painted texture's detail while making the
                     // genetics result the dominant color signal.
                     target = Color.Lerp(Color.white, target, 0.94f);
@@ -851,7 +856,7 @@ namespace RatHabitat
             return seed / 2147483647f;
         }
 
-        private static void ApplyEnclosureVisualPlacement(GameObject visual, RatData rat)
+        private void ApplyEnclosureVisualPlacement(GameObject visual, RatData rat)
         {
             if (visual == null || rat == null || rat.stage == RatStage.Pinkie) return;
             var importedMarker = visual.GetComponent<ImportedRatVisualMarker>();
@@ -867,6 +872,29 @@ namespace RatHabitat
             if (rat.enclosure == RatEnclosure.Pairing)
                 placement.y += GameConfig.PairingAdultVisualVerticalOffset;
             visual.transform.localPosition = placement;
+
+            KeepPairingVisualGrounded(visual, rat);
+        }
+
+        /// <summary>
+        /// Keeps the actual imported mesh above the generated Pairing floor.
+        /// The hand-painted animator can move feet, tail, or other appendages
+        /// below the authored root plane after the initial placement, so this
+        /// is also called from RatPresenter.LateUpdate. It only ever lifts a
+        /// sunk visual; it never lowers one and therefore cannot introduce a
+        /// new floor intersection from an animated bounds change.
+        /// </summary>
+        public void KeepPairingVisualGrounded(GameObject visual, RatData rat)
+        {
+            if (visual == null || rat == null || rat.stage == RatStage.Pinkie ||
+                rat.enclosure != RatEnclosure.Pairing) return;
+            if (!TryGetWorldBounds(visual, out Bounds visualBounds)) return;
+
+            float desiredMinY = GameConfig.PairingHabitatFloorTop +
+                GameConfig.PairingAdultGroundClearance;
+            float correction = desiredMinY - visualBounds.min.y;
+            if (correction > 0.0001f)
+                visual.transform.position += Vector3.up * correction;
         }
 
         private static void ApplyPinkieVisualYaw(GameObject visual, RatData rat)
@@ -1248,7 +1276,17 @@ namespace RatHabitat
                 if (renderer == null) continue;
                 var materials = renderer.sharedMaterials;
                 if (materials == null || materials.Length == 0) continue;
-                for (int index = 0; index < materials.Length; index++) materials[index] = cachedPinkieSkin;
+                string rendererName = renderer.gameObject.name.ToLowerInvariant();
+                for (int index = 0; index < materials.Length; index++)
+                {
+                    Material material = materials[index];
+                    string materialName = material == null ? string.Empty : material.name.ToLowerInvariant();
+                    // Pinkie skin belongs only on the body. Preserve authored
+                    // feature materials so eyes, mouth, ears, feet, whiskers,
+                    // and tail details remain visible on every stage.
+                    if (IsFeatureMaterial(rendererName, materialName)) continue;
+                    materials[index] = cachedPinkieSkin;
+                }
                 renderer.sharedMaterials = materials;
             }
         }
@@ -1368,20 +1406,6 @@ namespace RatHabitat
                 name.Contains("nose") || name.Contains("ear") || name.Contains("paw") ||
                 name.Contains("foot") || name.Contains("whisker") || name.Contains("tail") ||
                 name.Contains("skin") || name.Contains("detail");
-        }
-
-        private static bool IsAccentMaterial(string rendererName, string materialName)
-        {
-            string name = rendererName + " " + materialName;
-            return name.Contains("ear") || name.Contains("tail") || name.Contains("paw") || name.Contains("foot") || name.Contains("skin");
-        }
-
-        private static bool IsAlbinoPinkFeature(string rendererName, string materialName)
-        {
-            string name = rendererName + " " + materialName;
-            return name.Contains("eye") || name.Contains("iris") || name.Contains("nose") ||
-                name.Contains("ear") || name.Contains("paw") || name.Contains("foot") ||
-                name.Contains("skin") || name.Contains("tail");
         }
 
         private static int StableSpotSeed(string value)

@@ -166,6 +166,8 @@ namespace RatHabitat
                 GeneticsSystem.ApplyMarkingFamily(rat.phenotype, rat.markingFamily);
                 if (!save.ratIds.Contains(rat.id)) save.ratIds.Add(rat.id);
             }
+            RatActivitySystem.EnsureSaveState(save,
+                save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
             GrowthSystem.AdvanceClock(save, now);
             GrowthSystem.RefreshRatStages(save);
             BreedingSystem.RefreshReproductiveStates(save, save.clock.gameTimeMs);
@@ -185,6 +187,7 @@ namespace RatHabitat
             try
             {
                 save.EnsureLists();
+                RatActivitySystem.EnsureSaveState(save, save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
                 save.schemaVersion = GameConfig.SaveVersion;
                 save.updatedAt = GameConfig.NowMs();
                 string json = JsonUtility.ToJson(save, true);
@@ -247,7 +250,10 @@ namespace RatHabitat
 
         public static string ToJson(ColonySaveData save)
         {
-            return save == null ? string.Empty : JsonUtility.ToJson(save, true);
+            if (save == null) return string.Empty;
+            save.EnsureLists();
+            RatActivitySystem.EnsureSaveState(save, save.clock.gameTimeMs);
+            return JsonUtility.ToJson(save, true);
         }
 
         public static ColonySaveData FromJson(string json)
@@ -258,6 +264,8 @@ namespace RatHabitat
                 var save = JsonUtility.FromJson<ColonySaveData>(json);
                 if (save == null) return null;
                 save.EnsureLists();
+                RatActivitySystem.EnsureSaveState(save,
+                    save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
                 ColonyFactory.MigrateLegacyStarterStats(save);
                 foreach (var rat in save.rats)
                     if (rat != null && rat.enclosure == RatEnclosure.Pairing) rat.pairingHabitatAssigned = true;

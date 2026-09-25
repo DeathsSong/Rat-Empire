@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using UnityEngine;
 
 namespace RatHabitat
@@ -176,7 +177,8 @@ namespace RatHabitat
         /// <summary>
         /// Calculates conception from both fertility values. Fertility is
         /// combined geometrically so a very low-fertility parent meaningfully
-        /// limits the pair, then curved so low values fall off faster. The
+        /// limits the pair, then curved gently so low-stat beginner rats remain
+        /// viable. The
         /// habitat base chance and bonus remain separate inputs, allowing the
         /// dedicated two-hour session to be better than automatic pairing.
         /// </summary>
@@ -190,14 +192,37 @@ namespace RatHabitat
             float femaleFertility = female == null || female.traits == null ? 0f : Mathf.Clamp01(female.traits.fertility / 100f);
             float maleFertility = male == null || male.traits == null ? 0f : Mathf.Clamp01(male.traits.fertility / 100f);
             float geometricMean = Mathf.Sqrt(femaleFertility * maleFertility);
-            float fertilityCurve = Mathf.Pow(geometricMean, 1.5f);
+            float fertilityCurve = geometricMean <= 0f
+                ? 0f
+                : Mathf.Pow(geometricMean, GameConfig.ConceptionFertilityCurveExponent);
             float habitatMaximum = Mathf.Clamp(habitatBaseChance + habitatBonus, 0f, cap);
             return Mathf.Clamp01(habitatMaximum * fertilityCurve);
         }
 
         public static string ConceptionChanceLabel(RatData female, RatData male, float habitatBaseChance, float habitatBonus, float cap)
         {
-            return Mathf.RoundToInt(CalculateConceptionChance(female, male, habitatBaseChance, habitatBonus, cap) * 100f) + "%";
+            return FormatChancePercent(CalculateConceptionChance(
+                female, male, habitatBaseChance, habitatBonus, cap));
+        }
+
+        /// <summary>
+        /// Keeps small nonzero conception chances visible in the UI. Whole
+        /// percentages stay compact, while low values retain enough precision
+        /// to avoid displaying a real chance as 0%.
+        /// </summary>
+        public static string FormatChancePercent(float chance)
+        {
+            float percent = Mathf.Clamp01(chance) * 100f;
+            if (percent <= 0f) return "0%";
+            if (percent < 1f)
+            {
+                return percent.ToString("0.###", CultureInfo.InvariantCulture) + "%";
+            }
+            if (percent < 10f)
+            {
+                return percent.ToString("0.0", CultureInfo.InvariantCulture) + "%";
+            }
+            return percent.ToString("0.#", CultureInfo.InvariantCulture) + "%";
         }
 
         public static void GetLitterSizeRange(RatData mother, RatData father, out int minimum, out int maximum)
@@ -401,6 +426,8 @@ namespace RatHabitat
             father.pregnancyId = null;
             mother.reproductiveState = ReproductiveState.Pregnant;
             father.reproductiveState = ReproductiveState.Fertile;
+            RatActivitySystem.SetCurrent(save, mother, "pregnant", "Pregnant", gameTime);
+            RatActivitySystem.SetCurrent(save, father, "exploring", "Exploring", gameTime);
             return pregnancy;
         }
 
@@ -441,6 +468,8 @@ namespace RatHabitat
             };
             save.EnsureLists();
             save.breedingSessions.Add(session);
+            RatActivitySystem.SetCurrent(save, parentA, "breeding", "Breeding", gameTime);
+            RatActivitySystem.SetCurrent(save, parentB, "breeding", "Breeding", gameTime);
             reason = string.Empty;
             return true;
         }
@@ -575,6 +604,7 @@ namespace RatHabitat
                 pup.phenotype = GeneticsSystem.DerivePhenotype(RatStage.Pinkie, pup.genotype,
                     pup.coatColorVariant, pup.coatTone);
                 GeneticsSystem.ApplyMarkingFamily(pup.phenotype, pup.markingFamily);
+                RatActivitySystem.SetCurrent(save, pup, "nest", "Resting in nest", gameTime);
                 save.rats.Add(pup);
                 save.ratIds.Add(pup.id);
                 litter.pupIds.Add(pup.id);
@@ -592,6 +622,10 @@ namespace RatHabitat
             father.reproductiveState = ReproductiveState.Fertile;
             mother.breedingCooldownUntil = gameTime + GameConfig.BreedingCooldownMs;
             father.breedingCooldownUntil = gameTime + GameConfig.BreedingCooldownMs;
+            RatActivitySystem.SetCurrent(save, mother, "nursing", "Nursing", gameTime);
+            RatActivitySystem.Record(save, mother, "birth", "Giving birth", gameTime, "Giving birth");
+            RatActivitySystem.Record(save, mother, "caring", "Caring for pinkies", gameTime, "Caring for pinkies");
+            RatActivitySystem.SetCurrent(save, father, "exploring", "Exploring", gameTime);
             save.litters.Add(litter);
             return true;
         }

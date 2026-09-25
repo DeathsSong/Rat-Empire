@@ -16,6 +16,7 @@ namespace RatHabitat
         private readonly Dictionary<string, GameObject> selectionRings = new Dictionary<string, GameObject>();
         private readonly Dictionary<string, RatStage> ringStages = new Dictionary<string, RatStage>();
         private readonly Dictionary<string, RatHabitatBehavior> behaviors = new Dictionary<string, RatHabitatBehavior>();
+        private readonly Dictionary<string, RatData> liveRats = new Dictionary<string, RatData>();
         private readonly HashSet<string> selectedIds = new HashSet<string>();
         private string selectedId;
         private RatVisualFactory visualFactory;
@@ -64,6 +65,7 @@ namespace RatHabitat
             {
                 if (rat == null || string.IsNullOrEmpty(rat.id)) continue;
                 liveIds.Add(rat.id);
+                liveRats[rat.id] = rat;
                 Vector3 position = GetPosition(rat, nestPosition, pinkieSlotById, ref pinkieIndex, ref maleIndex, ref femaleIndex, ref nurseryIndex, ref breedingIndex, ref pairingIndex);
 
                 GameObject root;
@@ -153,6 +155,16 @@ namespace RatHabitat
                 if (controller.TryGetSelectionBounds(out bounds))
                 {
                     ConfigureRatCollider(root, controller.CurrentStage, controller);
+                }
+
+                RatData rat;
+                GameObject currentVisual;
+                if (liveRats.TryGetValue(item.Key, out rat) &&
+                    controller.TryGetCurrentVisual(out currentVisual))
+                {
+                    // Keep animation-driven feet/tails from dipping below
+                    // the actual Pairing cage floor after the render pass.
+                    EnsureVisualFactory().KeepPairingVisualGrounded(currentVisual, rat);
                 }
             }
         }
@@ -380,6 +392,7 @@ namespace RatHabitat
                 ratRoots.Remove(id);
                 visualControllers.Remove(id);
                 behaviors.Remove(id);
+                liveRats.Remove(id);
                 selectionRings.Remove(id);
                 ringStages.Remove(id);
             }
@@ -394,6 +407,7 @@ namespace RatHabitat
             ratRoots.Clear();
             visualControllers.Clear();
             behaviors.Clear();
+            liveRats.Clear();
             selectionRings.Clear();
             ringStages.Clear();
         }

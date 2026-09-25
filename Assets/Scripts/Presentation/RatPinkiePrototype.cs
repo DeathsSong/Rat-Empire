@@ -17,6 +17,7 @@ namespace RatHabitat
         private Transform rightHindFoot;
         private Vector3 leftHindFootBase;
         private Vector3 rightHindFootBase;
+        private float animationClock;
 
         private void Awake()
         {
@@ -94,7 +95,8 @@ namespace RatHabitat
         private void Update()
         {
             if (!built || leftHindFoot == null || rightHindFoot == null) return;
-            float phase = Time.time * 4.6f;
+            animationClock += GrowthSystem.SimulationBehaviorDeltaSeconds(Time.unscaledDeltaTime);
+            float phase = animationClock * 4.6f;
             Kick(leftHindFoot, leftHindFootBase, Mathf.Sin(phase));
             Kick(rightHindFoot, rightHindFootBase, Mathf.Sin(phase + Mathf.PI));
         }

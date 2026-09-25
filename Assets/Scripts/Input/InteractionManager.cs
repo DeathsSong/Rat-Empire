@@ -24,6 +24,7 @@ namespace RatHabitat
         private Action<string> diagnosticHandler;
         private Action<float> zoomHandler;
         private Action<Vector3> emptyWorldTapHandler;
+        private Func<int, bool> habitatSwipeHandler;
         private Func<bool> modalOverlayHandler;
         private VerticalSliceUI pageUi;
         private Vector3 cameraTarget;
@@ -98,6 +99,7 @@ namespace RatHabitat
             Action<string> onDiagnostic = null,
             Action<float> onZoom = null,
             Action<Vector3> onEmptyWorldTap = null,
+            Func<int, bool> onHabitatSwipe = null,
             Func<bool> isModalOverlayOpen = null)
         {
             targetCamera = camera != null ? camera : Camera.main;
@@ -107,6 +109,7 @@ namespace RatHabitat
             diagnosticHandler = onDiagnostic;
             zoomHandler = onZoom;
             emptyWorldTapHandler = onEmptyWorldTap;
+            habitatSwipeHandler = onHabitatSwipe;
             modalOverlayHandler = isModalOverlayOpen;
             cameraTarget = new Vector3(0f, 0f, 1f);
             clickableLayerMask = ~0;
@@ -252,7 +255,10 @@ namespace RatHabitat
                     }
                     else if (moved)
                     {
-                        RecordNoWorldRay("touch drag ignored");
+                        if (TryInvokeHabitatSwipe(touch.position - touchStart))
+                            RecordNoWorldRay("habitat swipe handled");
+                        else
+                            RecordNoWorldRay("touch drag ignored");
                     }
                     else
                     {
@@ -315,7 +321,10 @@ namespace RatHabitat
                 }
                 else if (moved)
                 {
-                    RecordNoWorldRay("mouse drag ignored");
+                    if (TryInvokeHabitatSwipe(pointerPosition - mousePressPosition))
+                        RecordNoWorldRay("habitat swipe handled");
+                    else
+                        RecordNoWorldRay("mouse drag ignored");
                 }
                 else
                 {
@@ -335,6 +344,19 @@ namespace RatHabitat
         {
             if (pageUi == null) pageUi = FindObjectOfType<VerticalSliceUI>();
             return pageUi != null && pageUi.TryInvokePageControlAt(screenPosition);
+        }
+
+        private bool TryInvokeHabitatSwipe(Vector2 delta)
+        {
+            // A page change is only a horizontal gesture. Vertical drags are
+            // left to the page ScrollRect or ignored by the world path. The
+            // completed drag is consumed before ProcessPointer, so it can
+            // never select or move the rat underneath the gesture.
+            if (habitatSwipeHandler == null) return false;
+            if (delta.magnitude < TouchMoveThreshold) return false;
+            if (Mathf.Abs(delta.x) <= Mathf.Abs(delta.y)) return false;
+            int direction = delta.x < 0f ? 1 : -1;
+            return habitatSwipeHandler(direction);
         }
 
         private void UpdateHover(Vector2 screenPosition)

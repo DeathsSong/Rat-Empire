@@ -4,7 +4,7 @@ namespace RatHabitat
 {
     public static class GameConfig
     {
-        public const int SaveVersion = 3;
+        public const int SaveVersion = 5;
         public const long GameDayMs = 24L * 60L * 60L * 1000L;
         public const long StartGameTimeMs = 8L * 60L * 60L * 1000L;
         // Biological timing is expressed in simulated days. The legacy
@@ -33,6 +33,11 @@ namespace RatHabitat
         // reload cannot cause the same pair to retry immediately.
         public const long PairingAttemptCooldownMs = 30L * 1000L;
         public const float PairingPregnancyChance = 0.20f;
+        // A gentler curve keeps low-fertility beginner pairs viable while the
+        // geometric mean still prevents a strong parent from masking a weak
+        // one. At 1/1 fertility this produces about 1.1% in Pairing and 2.5%
+        // in a dedicated session, while 100/100 remains at the habitat max.
+        public const float ConceptionFertilityCurveExponent = 0.625f;
         public const float DedicatedBreedingSessionHours = 2f;
         public const float DedicatedBreedingSuccessBonus = 0.25f;
         public const float DedicatedBreedingSuccessCap = 0.95f;
@@ -42,8 +47,27 @@ namespace RatHabitat
         public const long StoreRestockIntervalGameMs = GameDayMs;
         public const int StoreRestockListingCount = 2;
         public const float StoreSharedMarkingFamilyChance = 0.70f;
-        public const float StoreLowTraitMinimum = 34f;
-        public const float StoreLowTraitMaximum = 58f;
+        // New-game founders are deliberately weak but still varied. These
+        // are absolute stat values, not percentages.
+        public const float StarterBeginnerTraitMinimum = 0f;
+        public const float StarterBeginnerTraitMaximum = 15f;
+        public const float StarterMaleMinimumAgeDays = MaleSexualMaturityDays;
+        public const float StarterMaleMaximumAgeDays = 86f;
+        public const float StarterFemaleMinimumAgeDays = FemaleSexualMaturityDays;
+        public const float StarterFemaleMaximumAgeDays = 100f;
+        // Store quality is intentionally a small, absolute beginner range.
+        // UpgradeSystem raises the maximum for future listings by exactly five
+        // points per purchased level without changing existing rats/listings.
+        public const float StoreLowTraitMinimum = 0f;
+        public const float StoreLowTraitMaximum = 15f;
+        public const int BaseStoreQualityCap = 15;
+        public const int StoreQualityUpgradeStep = 5;
+        public const int StoreQualityUpgradeBaseCost = 100;
+        public const int StoreQualityUpgradeCostStep = 100;
+        public const int BaseColonyCapacity = 20;
+        public const int ColonyCapacityUpgradeStep = 5;
+        public const int ColonyCapacityUpgradeBaseCost = 150;
+        public const int ColonyCapacityUpgradeCostStep = 100;
         // A full-fertility female can carry a realistic 6-18 pinkie litter.
         // Lower fertility scales both limits down, with a successful
         // pregnancy always clamped to at least one pinkie.
@@ -70,11 +94,16 @@ namespace RatHabitat
         // nursery surface in the imported scene. Lift the stable pinkie root
         // by the manually matched +0.225 world-unit reference amount.
         public const float PairingPinkieVerticalLift = 0.225f;
-        // The imported young/adult model sits too high relative to the raised
-        // Pairing Habitat floor. This is a visual-child offset only; the
-        // stable gameplay root, collider, movement targets, and nest remain
-        // unchanged. The value matches the manual 0.092 -> -0.728 reference.
-        public const float PairingAdultVisualVerticalOffset = -0.82f;
+        // The imported young/adult model uses a raised Pairing gameplay root.
+        // Keep the visual child's lowest mesh point just above the cage floor;
+        // this is visual-only and does not change the stable root, collider,
+        // movement targets, or nest. Root lift 0.522 + this offset places the
+        // normalized model at the generated floor top (0.235) with clearance.
+        public const float PairingAdultVisualVerticalOffset = -0.728f;
+        // The generated full-size cage floor is a 0.24-unit slab centered at
+        // Y 0.115, so its actual visible upper surface is Y 0.235.
+        public const float PairingHabitatFloorTop = 0.235f;
+        public const float PairingAdultGroundClearance = 0.012f;
         // Pairing Habitat gameplay roots use the screenshot reference of
         // local Y 0.972 instead of the normal 0.45 spawn height. This is a
         // root-height correction for young/adult rats; X/Z placement remains
@@ -95,11 +124,12 @@ namespace RatHabitat
         // Legacy aliases retained for older callers and save tooling.
         public const int MinimumLitterSize = 1;
         public const int MaximumLitterSize = MaximumLitterSizeAtFullFertility;
-        public const float HabitatWidth = 12f;
-        public const float HabitatDepth = 16f;
-        // The overview now spans the original full-depth Male/Female cages
-        // plus the separate lower Nursery/Breeding row. This frames the
-        // taller group without shrinking any enclosure geometry.
+        // Legacy aliases now match the common full-size enclosure footprint
+        // used by every horizontal habitat page.
+        public const float HabitatWidth = 10.7f;
+        public const float HabitatDepth = 22f;
+        // Each page frames one complete enclosure. The camera shifts between
+        // the horizontal row rather than shrinking a multi-habitat overview.
         public const float CameraDefaultOrthographicSize = 10.8f;
         public const float CameraMinimumOrthographicSize = 7.5f;
         public const float CameraMaximumOrthographicSize = 16f;

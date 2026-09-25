@@ -27,20 +27,16 @@ namespace RatHabitat
                 },
             };
 
-            var mabel = CreateRat(
-                "rat_mabel", "Mabel", RatSex.Female, save.clock.gameTimeMs - 48L * GameConfig.GameDayMs, 0,
-                GeneticsSystem.CreateFounder("B", "b", "C", "C", "D", "D", "s", "s"),
-                // Founders are intentionally beginner-level, with small
-                // deterministic differences rather than identical stats.
-                StarterTraits("rat_mabel"), RatStage.Adult);
-            var otto = CreateRat(
-                "rat_otto", "Otto", RatSex.Male, save.clock.gameTimeMs - 53L * GameConfig.GameDayMs, 0,
-                GeneticsSystem.CreateFounder("b", "b", "C", "C", "D", "D", "S", "s"),
-                StarterTraits("rat_otto"), RatStage.Adult);
-            save.rats.Add(mabel);
-            save.rats.Add(otto);
-            save.ratIds.Add(mabel.id);
-            save.ratIds.Add(otto.id);
+            // New-game founders use the same randomized name/genetics/coat/
+            // marking pipeline as Store rats. The pair is generated once here
+            // and then persisted with the save, so loading never rerolls it.
+            RatData femaleStarter;
+            RatData maleStarter;
+            StoreSystem.CreateStarterPair(save.clock.gameTimeMs, StableSeed(now), out femaleStarter, out maleStarter);
+            save.rats.Add(femaleStarter);
+            save.rats.Add(maleStarter);
+            save.ratIds.Add(femaleStarter.id);
+            save.ratIds.Add(maleStarter.id);
 
             save.habitatObjects.Add(new HabitatObjectData { id = "object_food", type = HabitatObjectType.Food, label = "Food dish", condition = 86f, lastServicedAt = save.clock.gameTimeMs });
             save.habitatObjects.Add(new HabitatObjectData { id = "object_water", type = HabitatObjectType.Water, label = "Water bottle", condition = 94f, lastServicedAt = save.clock.gameTimeMs });
@@ -53,28 +49,15 @@ namespace RatHabitat
             return save;
         }
 
-        private static TraitData StarterTraits(string stableId)
-        {
-            // Deterministic pseudo-random beginner quality. These are absolute
-            // stat values, not percentages: every founder value is in the
-            // inclusive 0-15 beginner range while the pair remains distinct.
-            unchecked
-            {
-                uint hash = 2166136261u;
-                string key = stableId ?? string.Empty;
-                for (int index = 0; index < key.Length; index++)
-                    hash = (hash ^ key[index]) * 16777619u;
-                return new TraitData(
-                    hash % 16u,
-                    (hash >> 3) % 16u,
-                    (hash >> 6) % 16u);
-            }
-        }
-
         public static bool MigrateLegacyStarterStats(ColonySaveData save)
         {
             if (save == null) return false;
             bool changed = false;
+            int capacityLevelBefore = save.colonyCapacityUpgradeLevel;
+            int qualityLevelBefore = save.storeQualityUpgradeLevel;
+            UpgradeSystem.EnsureState(save);
+            changed |= capacityLevelBefore != save.colonyCapacityUpgradeLevel ||
+                qualityLevelBefore != save.storeQualityUpgradeLevel;
             changed |= NormalizeDisplayNames(save);
             if (save.rats != null)
             {
@@ -82,19 +65,21 @@ namespace RatHabitat
                 {
                     if (!IsBeginnerFounder(rat)) continue;
 
-                    TraitData starter = StarterTraits(rat.id);
                     if (rat.traits == null) rat.traits = new TraitData();
-                    if (!Mathf.Approximately(rat.traits.size, starter.size) ||
-                        !Mathf.Approximately(rat.traits.health, starter.health) ||
-                        !Mathf.Approximately(rat.traits.fertility, starter.fertility) ||
-                        !Mathf.Approximately(rat.baseHealth, starter.health) ||
-                        !Mathf.Approximately(rat.baseFertility, starter.fertility))
+                    float size = Mathf.Clamp(rat.traits.size, 0f, GameConfig.StarterBeginnerTraitMaximum);
+                    float health = Mathf.Clamp(rat.traits.health, 0f, GameConfig.StarterBeginnerTraitMaximum);
+                    float fertility = Mathf.Clamp(rat.traits.fertility, 0f, GameConfig.StarterBeginnerTraitMaximum);
+                    if (!Mathf.Approximately(rat.traits.size, size) ||
+                        !Mathf.Approximately(rat.traits.health, health) ||
+                        !Mathf.Approximately(rat.traits.fertility, fertility) ||
+                        !Mathf.Approximately(rat.baseHealth, health) ||
+                        !Mathf.Approximately(rat.baseFertility, fertility))
                     {
-                        rat.traits.size = starter.size;
-                        rat.traits.health = starter.health;
-                        rat.traits.fertility = starter.fertility;
-                        rat.baseHealth = starter.health;
-                        rat.baseFertility = starter.fertility;
+                        rat.traits.size = size;
+                        rat.traits.health = health;
+                        rat.traits.fertility = fertility;
+                        rat.baseHealth = health;
+                        rat.baseFertility = fertility;
                         changed = true;
                     }
                 }
@@ -113,7 +98,7 @@ namespace RatHabitat
             return rat != null && rat.generation == 0 &&
                 rat.removalDisposition == RatRemovalDisposition.None &&
                 string.IsNullOrEmpty(rat.motherId) && string.IsNullOrEmpty(rat.fatherId) &&
-                (rat.id == "rat_mabel" || rat.id == "rat_otto");
+                (rat.isStarterRat || rat.id == "rat_mabel" || rat.id == "rat_otto");
         }
 
         public static void EnsureDefaultHabitatObjects(ColonySaveData save)
@@ -243,6 +228,20 @@ namespace RatHabitat
                 string key = value ?? string.Empty;
                 for (int i = 0; i < key.Length; i++) hash = (hash ^ key[i]) * 16777619u;
                 return (int)(hash & 0x7fffffff);
+            }
+        }
+
+        private static int StableSeed(long value)
+        {
+            unchecked
+            {
+                ulong mixed = (ulong)value;
+                mixed ^= mixed >> 33;
+                mixed *= 0xff51afd7ed558ccdUL;
+                mixed ^= mixed >> 33;
+                mixed *= 0xc4ceb9fe1a85ec53UL;
+                mixed ^= mixed >> 33;
+                return (int)(mixed & 0x7fffffff);
             }
         }
 

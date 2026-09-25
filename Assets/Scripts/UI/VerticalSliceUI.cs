@@ -22,6 +22,13 @@ namespace RatHabitat
         // the same reservation so the habitat never renders under the header.
         private const float HeaderHeight = 122f;
         private const float PageTopInset = 126f;
+        // Keep the opaque profile information below the live habitat opening.
+        // At the 540x960 phone reference size this leaves a visible breathing
+        // gap beneath the selected rat instead of letting the panel start
+        // directly against its feet/body.
+        private const float RatProfileInformationTopGap = 44f;
+        private const float RatProfileInformationViewportHeight = 438f;
+        private const float RatProfileInformationMinimumHeight = 300f;
         private const float ModalMaximumWidth = 500f;
         private const int PageBottomSafePadding = 104;
 
@@ -108,7 +115,7 @@ namespace RatHabitat
         private RosterSortField rosterSortField = RosterSortField.Name;
         private bool rosterSortAscending = true;
         private string expandedMyRatsId;
-        private string familyTreeFocusId;
+        private string familyTreeSubjectId;
 
         private enum MainPanel
         {
@@ -117,6 +124,7 @@ namespace RatHabitat
             MyRats,
             Breeding,
             Store,
+            Upgrades,
             FamilyTree,
             Settings,
             DeveloperTools,
@@ -339,7 +347,17 @@ namespace RatHabitat
                 int balance = game.Save == null ? 0 : game.Save.colonyCredits;
                 walletText.text = "Wallet  $" + balance.ToString("N0");
             }
-            if (liveEventText != null) liveEventText.text = game.LiveEventMessage;
+            if (liveEventText != null)
+            {
+                string liveMessage = game.LiveEventMessage;
+                // The habitat itself supplies the large in-world sign. Keep a
+                // compact page indicator in the header whenever no transient
+                // event is being announced, so a swipe is still discoverable
+                // after the Habitat controls collapse.
+                liveEventText.text = string.IsNullOrEmpty(liveMessage)
+                    ? game.HabitatPageLabel
+                    : liveMessage;
+            }
             if (eventLogToggleButton != null)
             {
                 Text eventLabel = eventLogToggleButton.GetComponentInChildren<Text>();
@@ -454,6 +472,7 @@ namespace RatHabitat
             AddTopNavigationButton(navigation, MainPanel.Habitat, "Habitat");
             AddTopNavigationButton(navigation, MainPanel.MyRats, "My Rats");
             AddTopNavigationButton(navigation, MainPanel.Store, "Store");
+            AddTopNavigationButton(navigation, MainPanel.Upgrades, "Upgrades");
             AddTopNavigationButton(navigation, MainPanel.Settings, "Settings");
 
             var speedRow = CreateRect("Simulation Speed Controls", headerContent);
@@ -638,7 +657,7 @@ namespace RatHabitat
         {
             welcomeOverlay = CreateModalOverlay("Welcome Modal", new Color(0.01f, 0.03f, 0.04f, 0.74f), out welcomeCard);
             AddText(welcomeCard, "Welcome to the habitat", 22, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
-            AddText(welcomeCard, "Meet Mabel and Otto in their cozy 3D habitat.", 16, Color.white, TextAnchor.UpperLeft);
+            AddText(welcomeCard, "Meet your randomized starter pair in their cozy 3D habitat.", 16, Color.white, TextAnchor.UpperLeft);
             AddText(welcomeCard, "Tap a rat or habitat object to interact. Breed, care for the colony, and watch each generation grow.", 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
             AddButtonTo(welcomeCard, "Continue", true, CloseWelcome, new Color(0.16f, 0.38f, 0.33f), 46f);
         }
@@ -1065,7 +1084,7 @@ namespace RatHabitat
             bool collapse = activeMainPanel == MainPanel.Habitat;
             if (game != null) game.DeactivateMultipleSelection();
             expandedMyRatsId = null;
-            familyTreeFocusId = null;
+            familyTreeSubjectId = null;
             welcomeOpen = false;
             settingsOpen = false;
             developerToolsOpen = false;
@@ -1130,7 +1149,7 @@ namespace RatHabitat
             // A tab switch owns the page area. Close transient overlays and
             // replace any previous page panel in the same refresh.
             if (panel != MainPanel.MyRats) expandedMyRatsId = null;
-            if (panel != MainPanel.FamilyTree) familyTreeFocusId = null;
+            if (panel != MainPanel.FamilyTree) familyTreeSubjectId = null;
             settingsOpen = false;
             developerToolsOpen = false;
             ratAnimationShowcaseOpen = false;
@@ -1223,7 +1242,7 @@ namespace RatHabitat
         {
             if (game != null) game.PrepareForSettings();
             expandedMyRatsId = null;
-            familyTreeFocusId = null;
+            familyTreeSubjectId = null;
             welcomeOpen = false;
             developerToolsOpen = false;
             ratAnimationShowcaseOpen = false;
@@ -1282,7 +1301,7 @@ namespace RatHabitat
         {
             if (game != null) game.DeactivateMultipleSelection();
             expandedMyRatsId = null;
-            familyTreeFocusId = null;
+            familyTreeSubjectId = null;
             welcomeOpen = false;
             settingsOpen = false;
             developerToolsOpen = false;
@@ -1475,9 +1494,9 @@ namespace RatHabitat
 
             RatData selectedRat = game.SelectedRat;
             HabitatObjectData selectedObject = game.SelectedObject;
-            RatData profileRat = string.IsNullOrEmpty(familyTreeFocusId)
+            RatData profileRat = string.IsNullOrEmpty(familyTreeSubjectId)
                 ? selectedRat
-                : BreedingSystem.FindHistoricalRat(game.Save, familyTreeFocusId);
+                : BreedingSystem.FindHistoricalRat(game.Save, familyTreeSubjectId);
             if (game.BreedingOpen && activeMainPanel == MainPanel.None)
             {
                 activeMainPanel = MainPanel.Breeding;
@@ -1506,6 +1525,9 @@ namespace RatHabitat
                     break;
                 case MainPanel.Store:
                     AddStorePanel(content);
+                    break;
+                case MainPanel.Upgrades:
+                    AddUpgradesPanel(content);
                     break;
                 case MainPanel.FamilyTree:
                     AddFamilyTreePanel(content);
@@ -1583,6 +1605,45 @@ namespace RatHabitat
             {
                 AddStoreListingCard(card, listing);
             }
+        }
+
+        private void AddUpgradesPanel(RectTransform parent)
+        {
+            if (parent == null || game == null || game.Save == null) return;
+
+            var card = CreateCard("Upgrades");
+            AddText(card, "Spend dollars to expand the colony and improve future market listings.", 14,
+                new Color(0.78f, 0.88f, 0.82f), TextAnchor.UpperLeft);
+
+            int currentCapacity = game.ColonyCapacity;
+            int nextCapacity = currentCapacity + GameConfig.ColonyCapacityUpgradeStep;
+            int capacityCost = game.ColonyCapacityUpgradeCost;
+            AddText(card, "Colony capacity: " + CountColonyRats() + " / " + currentCapacity, 16,
+                Color.white, TextAnchor.UpperLeft);
+            AddText(card, "Next upgrade: +" + GameConfig.ColonyCapacityUpgradeStep + " spaces (" + nextCapacity + " total)", 13,
+                new Color(0.76f, 0.86f, 0.80f), TextAnchor.UpperLeft);
+            bool canBuyCapacity = game.Save.colonyCredits >= capacityCost;
+            AddButtonTo(card, canBuyCapacity
+                    ? "Increase Colony Capacity\n$" + capacityCost
+                    : "Increase Colony Capacity\nNeed $" + capacityCost,
+                canBuyCapacity, game.PurchaseColonyCapacityUpgrade,
+                new Color(0.16f, 0.40f, 0.34f), 58f);
+
+            AddText(card, "Store quality cap: " + game.StoreQualityCap, 16,
+                Color.white, TextAnchor.UpperLeft);
+            AddText(card, "New listings only: next cap " + (game.StoreQualityCap + GameConfig.StoreQualityUpgradeStep) +
+                " (existing listings and rats stay unchanged)", 13,
+                new Color(0.76f, 0.86f, 0.80f), TextAnchor.UpperLeft);
+            int qualityCost = game.StoreQualityUpgradeCost;
+            bool canBuyQuality = game.Save.colonyCredits >= qualityCost;
+            AddButtonTo(card, canBuyQuality
+                    ? "Improve Store Quality\n$" + qualityCost
+                    : "Improve Store Quality\nNeed $" + qualityCost,
+                canBuyQuality, game.PurchaseStoreQualityUpgrade,
+                new Color(0.24f, 0.38f, 0.50f), 58f);
+
+            AddText(card, "Wallet: $" + game.Save.colonyCredits.ToString("N0"), 16,
+                new Color(1f, 0.83f, 0.42f), TextAnchor.UpperLeft);
         }
 
         private void SetStoreCategory(StoreCategory category)
@@ -1870,62 +1931,25 @@ namespace RatHabitat
         private void AddEnclosureViewControls(RectTransform parent)
         {
             if (parent == null || game == null) return;
-            var card = CreateCard("Habitat view");
-            string viewLabel;
-            switch (game.CameraView)
-            {
-                case HabitatCameraView.MaleEnclosure:
-                    viewLabel = "Male Cage";
-                    break;
-                case HabitatCameraView.FemaleEnclosure:
-                    viewLabel = "Female Cage";
-                    break;
-                case HabitatCameraView.Nursery:
-                    viewLabel = "Nursery";
-                    break;
-                case HabitatCameraView.Breeding:
-                    viewLabel = "Breeding";
-                    break;
-                case HabitatCameraView.Pairing:
-                    viewLabel = "Pairing Habitat";
-                    break;
-                default:
-                    viewLabel = "Overview";
-                    break;
-            }
-            AddText(card, "Current view: " + viewLabel, 13, new Color(0.78f, 0.9f, 0.82f), TextAnchor.UpperLeft);
+            var card = CreateCard(game.HabitatPageLabel);
+            AddText(card, "Swipe left or right to move between full-size habitats.",
+                13, new Color(0.78f, 0.9f, 0.82f), TextAnchor.UpperLeft);
 
-            var enclosureRow = CreateRect("Enclosure View Buttons", card);
-            var rowLayout = enclosureRow.gameObject.AddComponent<HorizontalLayoutGroup>();
-            rowLayout.spacing = 6f;
-            rowLayout.childAlignment = TextAnchor.MiddleCenter;
-            rowLayout.childControlWidth = true;
-            rowLayout.childControlHeight = true;
-            rowLayout.childForceExpandWidth = true;
-            rowLayout.childForceExpandHeight = false;
-            AddButtonTo(enclosureRow, "View Male Enclosure", true, () => RunHabitatViewAction(game.ViewMaleEnclosure), new Color(0.15f, 0.33f, 0.29f), 42f);
-            AddButtonTo(enclosureRow, "View Female Enclosure", true, () => RunHabitatViewAction(game.ViewFemaleEnclosure), new Color(0.15f, 0.33f, 0.29f), 42f);
+            var pagerRow = CreateRect("Habitat Pager Controls", card);
+            var pagerLayout = pagerRow.gameObject.AddComponent<HorizontalLayoutGroup>();
+            pagerLayout.spacing = 8f;
+            pagerLayout.childAlignment = TextAnchor.MiddleCenter;
+            pagerLayout.childControlWidth = true;
+            pagerLayout.childControlHeight = true;
+            pagerLayout.childForceExpandWidth = true;
+            pagerLayout.childForceExpandHeight = false;
+            bool canGoPrevious = game.HabitatPageIndex > 0;
+            bool canGoNext = game.HabitatPageIndex < game.HabitatPageCount - 1;
+            AddButtonTo(pagerRow, "‹ Previous", canGoPrevious,
+                () => RunHabitatPageAction(-1), new Color(0.14f, 0.30f, 0.31f), 42f);
+            AddButtonTo(pagerRow, "Next ›", canGoNext,
+                () => RunHabitatPageAction(1), new Color(0.14f, 0.30f, 0.31f), 42f);
 
-            var careRow = CreateRect("Care Enclosure View Buttons", card);
-            var careLayout = careRow.gameObject.AddComponent<HorizontalLayoutGroup>();
-            careLayout.spacing = 6f;
-            careLayout.childAlignment = TextAnchor.MiddleCenter;
-            careLayout.childControlWidth = true;
-            careLayout.childControlHeight = true;
-            careLayout.childForceExpandWidth = true;
-            careLayout.childForceExpandHeight = false;
-            AddButtonTo(careRow, "View Nursery", true, () => RunHabitatViewAction(game.ViewNursery), new Color(0.25f, 0.25f, 0.44f), 42f);
-            AddButtonTo(careRow, "View Breeding", true, () => RunHabitatViewAction(game.ViewBreedingEnclosure), new Color(0.40f, 0.20f, 0.34f), 42f);
-
-            var pairingRow = CreateRect("Pairing Habitat View Buttons", card);
-            var pairingLayout = pairingRow.gameObject.AddComponent<HorizontalLayoutGroup>();
-            pairingLayout.spacing = 6f;
-            pairingLayout.childAlignment = TextAnchor.MiddleCenter;
-            pairingLayout.childControlWidth = true;
-            pairingLayout.childControlHeight = true;
-            pairingLayout.childForceExpandWidth = true;
-            pairingLayout.childForceExpandHeight = false;
-            AddButtonTo(pairingRow, "View Pairing Habitat", true, () => RunHabitatViewAction(game.ViewPairingHabitat), new Color(0.25f, 0.38f, 0.24f), 42f);
             if (game.PairingMoveAllConfirmationPending)
             {
                 AddText(card, "Move every rat out of Pairing Habitat? Pregnant and nursing families will be routed to Nursery.",
@@ -1941,14 +1965,18 @@ namespace RatHabitat
                     new Color(0.35f, 0.28f, 0.18f), 44f);
             }
 
-            var overviewRow = CreateRect("Overview View Button Row", card);
-            var overviewLayout = overviewRow.gameObject.AddComponent<HorizontalLayoutGroup>();
-            overviewLayout.childAlignment = TextAnchor.MiddleCenter;
-            overviewLayout.childControlWidth = true;
-            overviewLayout.childControlHeight = true;
-            overviewLayout.childForceExpandWidth = true;
-            overviewLayout.childForceExpandHeight = false;
-            AddButtonTo(overviewRow, "Overview", true, () => RunHabitatViewAction(game.ViewHabitatOverview), new Color(0.14f, 0.25f, 0.28f), 38f);
+        }
+
+        private void RunHabitatPageAction(int direction)
+        {
+            if (game != null) game.TryNavigateHabitatSwipe(direction);
+            if (activeMainPanel != MainPanel.Habitat) return;
+
+            // Keep the existing compact-habitat workflow: once a destination
+            // is chosen with the desktop buttons, the world is unobstructed.
+            activeMainPanel = MainPanel.None;
+            Refresh(true);
+            RefreshTopNavigationState();
         }
 
         private void RunHabitatViewAction(Action viewAction)
@@ -1979,6 +2007,16 @@ namespace RatHabitat
             }
             AddRatPortrait(card, rat);
 
+            // This spacer is intentional: the selected rat is the real live
+            // habitat object shown through the transparent portrait opening.
+            // Keeping the information surface lower gives rats near the top,
+            // middle, and bottom of an enclosure room to remain visible while
+            // the page/profile ScrollRects provide access to all lower content.
+            var profileGap = CreateRect("Rat Profile Lower Information Gap", card);
+            var profileGapLayout = profileGap.gameObject.AddComponent<LayoutElement>();
+            profileGapLayout.minHeight = RatProfileInformationTopGap;
+            profileGapLayout.preferredHeight = RatProfileInformationTopGap;
+
             // Keep the live habitat view fixed above the information area.
             // Only this lower region scrolls, so reading a long profile cannot
             // pan the world camera or move the selected rat behind the UI.
@@ -1987,12 +2025,13 @@ namespace RatHabitat
             detailsScrollImage.color = new Color(0.01f, 0.03f, 0.04f, 0.03f);
             detailsScrollImage.raycastTarget = true;
             var detailsScrollElement = detailsScrollRoot.gameObject.AddComponent<LayoutElement>();
-            // The old 360px viewport ended in the middle of the profile
-            // actions on a 540x960 phone. Give the information area enough
-            // room to show the complete card, while retaining its own
-            // ScrollRect for unusually long pregnancy/history details.
-            detailsScrollElement.preferredHeight = 500f;
-            detailsScrollElement.minHeight = 360f;
+            // The lower placement reduces the available viewport slightly, so
+            // keep the panel phone-safe and let its own ScrollRect expose the
+            // complete activity/history/action content. The outer page
+            // ScrollRect remains available if the device has an unusually
+            // short safe area.
+            detailsScrollElement.preferredHeight = RatProfileInformationViewportHeight;
+            detailsScrollElement.minHeight = RatProfileInformationMinimumHeight;
             var detailsScroll = detailsScrollRoot.gameObject.AddComponent<ScrollRect>();
             detailsScroll.horizontal = false;
             detailsScroll.vertical = true;
@@ -2057,7 +2096,11 @@ namespace RatHabitat
                 AddText(details, historicalStatus, 13,
                     new Color(0.85f, 0.86f, 0.84f), TextAnchor.UpperLeft);
             }
+            Text activityText = AddText(details, string.Empty, 14,
+                new Color(1f, 0.82f, 0.38f), TextAnchor.UpperLeft);
+            BindLiveText(activityText, () => "Current activity: " + game.CurrentRatActivityLabel(rat));
             AddDetailedRatInformation(details, rat, 14);
+            AddRatActivityHistory(details, rat);
 
             AddButtonTo(details, "Family Tree", true, () => OpenFamilyTree(rat.id),
                 new Color(0.22f, 0.34f, 0.43f), 42f);
@@ -2164,7 +2207,7 @@ namespace RatHabitat
         private void OpenFamilyTree(string ratId)
         {
             if (game == null || BreedingSystem.FindHistoricalRat(game.Save, ratId) == null) return;
-            familyTreeFocusId = ratId;
+            familyTreeSubjectId = ratId;
             activeMainPanel = MainPanel.FamilyTree;
             Refresh(true);
             SetOverlayVisibility();
@@ -2179,24 +2222,24 @@ namespace RatHabitat
             RefreshTopNavigationState();
         }
 
-        private void FocusFamilyTreeRat(string ratId)
+        private void SelectFamilyTreeSubject(string ratId)
         {
             RatData rat = game == null ? null : BreedingSystem.FindHistoricalRat(game.Save, ratId);
             if (rat == null) return;
-            familyTreeFocusId = ratId;
+            familyTreeSubjectId = ratId;
             // Family-tree navigation is informational. Do not change the
             // habitat selection or camera while the player is exploring
-            // ancestors and descendants; the selected tree card itself is the
-            // focus and the profile uses familyTreeFocusId when reopened.
+            // ancestors and descendants; the selected tree card is the
+            // active family-tree subject.
             Refresh(true);
         }
 
         private void AddFamilyTreePanel(RectTransform parent)
         {
-            RatData focus = game == null || game.Save == null
+            RatData subject = game == null || game.Save == null
                 ? null
-                : BreedingSystem.FindHistoricalRat(game.Save, familyTreeFocusId);
-            if (focus == null)
+                : BreedingSystem.FindHistoricalRat(game.Save, familyTreeSubjectId);
+            if (subject == null)
             {
                 var missing = CreateCard("Family Tree");
                 AddText(missing, "No family history is available for this rat.", 14,
@@ -2207,11 +2250,11 @@ namespace RatHabitat
             }
 
             var card = CreateCard("Family Tree");
-            AddText(card, "Centered on " + focus.name + ". Tap any known family member to re-center.", 13,
+            AddText(card, "Selected rat: " + subject.name + ". Tap any family member to select them.", 13,
                 new Color(0.78f, 0.90f, 0.82f), TextAnchor.UpperLeft);
             AddText(card, "Drag to pan • Mouse wheel or pinch to zoom", 12,
                 new Color(0.70f, 0.82f, 0.76f), TextAnchor.UpperLeft);
-            AddButtonTo(card, "Back to " + focus.name + " Profile", true, ReturnToFamilyTreeProfile,
+            AddButtonTo(card, "Back to " + subject.name + " Profile", true, ReturnToFamilyTreeProfile,
                 new Color(0.14f, 0.30f, 0.30f), 42f);
 
             var scrollRoot = CreateRect("Family Tree Scroll", card);
@@ -2242,8 +2285,8 @@ namespace RatHabitat
             scroll.viewport = viewport;
 
             const float nodeWidth = 210f;
-            const float nodeHeight = 112f;
-            const float levelSpacing = 142f;
+            const float nodeHeight = 154f;
+            const float levelSpacing = 184f;
             const float treeMargin = 32f;
             var treeContent = CreateRect("Family Tree Content", viewport);
             familyTreeContent = treeContent;
@@ -2255,8 +2298,8 @@ namespace RatHabitat
             scroll.content = treeContent;
 
             var entries = new List<FamilyTreeEntry>();
-            BuildFamilyTreeAncestors(focus, 0, "root", null, entries);
-            BuildFamilyTreeDescendants(focus, 0, "root", entries, new HashSet<string> { focus.id });
+            BuildFamilyTreeAncestors(subject, 0, "root", null, entries);
+            BuildFamilyTreeDescendants(subject, 0, "root", entries, new HashSet<string> { subject.id });
 
             var entriesByLevel = new Dictionary<int, List<FamilyTreeEntry>>();
             int minimumLevel = 0;
@@ -2429,15 +2472,15 @@ namespace RatHabitat
             node.sizeDelta = new Vector2(width, height);
             var image = node.gameObject.AddComponent<Image>();
             bool historical = IsHistoricalRat(entry.rat);
-            bool focused = entry.path == "root";
+            bool selectedSubject = entry.path == "root";
             UiStyle.ApplyRounded(image, entry.rat == null
                 ? new Color(0.10f, 0.13f, 0.14f, 0.94f)
                 : (historical ? new Color(0.23f, 0.25f, 0.25f, 0.96f)
-                    : (focused ? new Color(0.18f, 0.32f, 0.20f, 0.98f)
+                    : (selectedSubject ? new Color(0.18f, 0.32f, 0.20f, 0.98f)
                         : new Color(0.08f, 0.18f, 0.17f, 0.96f))), true);
             image.raycastTarget = entry.rat != null;
             var layout = node.gameObject.AddComponent<VerticalLayoutGroup>();
-            layout.spacing = 1f;
+            layout.spacing = 2f;
             layout.padding = new RectOffset(7, 7, 5, 5);
             layout.childControlWidth = true;
             layout.childControlHeight = true;
@@ -2451,18 +2494,46 @@ namespace RatHabitat
                 return;
             }
 
+            // Use the same cached rotating portrait renderer as My Rats,
+            // Store, and breeding. This is presentation-only: it reuses the
+            // actual RatData phenotype without adding a selectable world rat.
+            var portraitRow = CreateRect("Family Tree Rat Portrait Row", node);
+            var portraitRowLayout = portraitRow.gameObject.AddComponent<HorizontalLayoutGroup>();
+            portraitRowLayout.spacing = 6f;
+            portraitRowLayout.childAlignment = TextAnchor.MiddleCenter;
+            portraitRowLayout.childControlWidth = false;
+            portraitRowLayout.childControlHeight = true;
+            portraitRowLayout.childForceExpandWidth = false;
+            portraitRowLayout.childForceExpandHeight = false;
+            var portraitRowElement = portraitRow.gameObject.AddComponent<LayoutElement>();
+            portraitRowElement.preferredHeight = 48f;
+            portraitRowElement.minHeight = 48f;
+
+            var portraitRoot = CreateRect("Family Tree Rat Portrait", portraitRow);
+            var portraitLayout = portraitRoot.gameObject.AddComponent<LayoutElement>();
+            portraitLayout.preferredWidth = 48f;
+            portraitLayout.minWidth = 48f;
+            portraitLayout.preferredHeight = 48f;
+            portraitLayout.minHeight = 48f;
+            var portrait = portraitRoot.gameObject.AddComponent<RawImage>();
+            portrait.texture = portraitPreview == null ? null : portraitPreview.GetPortrait(entry.rat);
+            portrait.color = historical ? new Color(0.62f, 0.64f, 0.63f, 1f) : Color.white;
+            portrait.uvRect = new Rect(0f, 0f, 1f, 1f);
+            portrait.raycastTarget = false;
+            ValidatePortraitSlot(portraitRoot, "family tree " + entry.rat.id);
+
             string ratId = entry.rat.id;
             var button = node.gameObject.AddComponent<Button>();
             button.targetGraphic = image;
             button.navigation = new Navigation { mode = Navigation.Mode.None };
             var relay = node.gameObject.AddComponent<DirectUiClickRelay>();
-            relay.Configure(button, () => FocusFamilyTreeRat(ratId));
+            relay.Configure(button, () => SelectFamilyTreeSubject(ratId));
 
             string coat = entry.rat.phenotype == null || !entry.rat.phenotype.furRevealed
                 ? "Hidden" : entry.rat.phenotype.coatColorLabel;
             string markings = entry.rat.phenotype == null || !entry.rat.phenotype.furRevealed
                 ? "Hidden" : entry.rat.phenotype.markingsLabel;
-            AddText(node, (focused ? "FOCUS • " : "") + entry.rat.name, 12,
+            AddText(node, entry.rat.name, 12,
                 historical ? new Color(0.92f, 0.94f, 0.92f) : Color.white,
                 TextAnchor.MiddleCenter).fontStyle = FontStyle.Bold;
             AddText(node, SexLabel(entry.rat.sex) + " • " + GrowthSystem.StageLabel(entry.rat.stage), 10,
@@ -2899,6 +2970,46 @@ namespace RatHabitat
             BindLiveText(reproductiveStateText, () => "Reproductive state: " + ReproductiveStateLabel(rat));
         }
 
+        private void AddRatActivityHistory(RectTransform parent, RatData rat)
+        {
+            if (parent == null || rat == null) return;
+
+            AddText(parent, "Recent activity", 13,
+                new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft);
+            var historyPanel = CreateRect("Rat Activity History", parent);
+            var historyImage = historyPanel.gameObject.AddComponent<Image>();
+            UiStyle.ApplyRounded(historyImage, new Color(0.02f, 0.06f, 0.07f, 0.78f), false);
+            historyImage.raycastTarget = false;
+            var historyLayout = historyPanel.gameObject.AddComponent<VerticalLayoutGroup>();
+            historyLayout.spacing = 1f;
+            historyLayout.padding = new RectOffset(8, 8, 6, 6);
+            historyLayout.childControlWidth = true;
+            historyLayout.childControlHeight = true;
+            historyLayout.childForceExpandWidth = true;
+            historyLayout.childForceExpandHeight = false;
+            var historyElement = historyPanel.gameObject.AddComponent<LayoutElement>();
+            historyElement.minHeight = 28f;
+            historyElement.preferredHeight = 28f + Mathf.Min(
+                RatActivitySystem.MaximumHistoryEntries,
+                rat.activity == null || rat.activity.history == null ? 0 : rat.activity.history.Count) * 19f;
+
+            if (rat.activity == null || rat.activity.history == null || rat.activity.history.Count == 0)
+            {
+                AddText(historyPanel, "No recent activity recorded.", 11,
+                    new Color(0.70f, 0.78f, 0.74f), TextAnchor.UpperLeft);
+                return;
+            }
+
+            int count = Mathf.Min(RatActivitySystem.MaximumHistoryEntries, rat.activity.history.Count);
+            for (int index = 0; index < count; index++)
+            {
+                RatActivityEntryData entry = rat.activity.history[index];
+                if (entry == null) continue;
+                AddText(historyPanel, game.FormatRatActivityEntry(entry), 11,
+                    new Color(0.80f, 0.87f, 0.83f), TextAnchor.UpperLeft);
+            }
+        }
+
         private static string KnownGeneSummary(RatData rat)
         {
             if (rat == null || rat.genotype == null) return "Unavailable";
@@ -2911,7 +3022,7 @@ namespace RatHabitat
         private void ToggleExpandedMyRat(string ratId)
         {
             if (game == null || game.MultipleSelectionMode) return;
-            familyTreeFocusId = null;
+            familyTreeSubjectId = null;
             if (expandedMyRatsId == ratId)
             {
                 expandedMyRatsId = null;
@@ -3047,7 +3158,7 @@ namespace RatHabitat
                         "Dedicated breeding session active — " + FormatRemainingTime(Math.Max(0L, live.endsAt - game.GameTime));
                 });
                 AddText(card, "The selected pair is occupied until the session ends. Success chance: " +
-                    Mathf.RoundToInt(activeSession.successChance * 100f) + "%.", 13,
+                    BreedingSystem.FormatChancePercent(activeSession.successChance) + ".", 13,
                     new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
             }
 
@@ -3560,6 +3671,7 @@ namespace RatHabitat
 
             AddText(developerToolsCard, "Developer Tools", 22, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
             AddText(developerToolsCard, "Developer-only controls. Test rats use real saved genotype and phenotype data; regular growth and inheritance rules are unchanged.", 13, new Color(0.7f, 0.78f, 0.74f), TextAnchor.UpperLeft);
+            AddText(developerToolsCard, "Movement diagnostic: " + game.MovementDiagnostics, 12, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
             AddText(developerToolsCard, "Spawn adult test rats", 17, Color.white, TextAnchor.UpperLeft);
             AddButton(developerToolsCard, "Solid Black  •  B/B C/C D/D s/s", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.SolidBlack));
             AddButton(developerToolsCard, "Solid Brown  •  b/b C/C D/D s/s", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.SolidBrown));

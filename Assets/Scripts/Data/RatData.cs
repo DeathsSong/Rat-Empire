@@ -83,6 +83,24 @@ namespace RatHabitat
     }
 
     [Serializable]
+    public class RatActivityEntryData
+    {
+        public long gameTimeMs;
+        public string activityKey;
+        public string activityLabel;
+        public string message;
+    }
+
+    [Serializable]
+    public class RatActivityData
+    {
+        public string currentActivityKey;
+        public string currentActivityLabel;
+        public long currentActivityAt;
+        public List<RatActivityEntryData> history = new List<RatActivityEntryData>();
+    }
+
+    [Serializable]
     public class LocusData
     {
         public string locus;
@@ -210,6 +228,14 @@ namespace RatHabitat
         public ReproductiveState reproductiveState = ReproductiveState.Immature;
         public float baseHealth;
         public float baseFertility;
+        // Marks the two randomized founders created for a genuinely new game.
+        // This is persisted so biology refreshes can preserve their absolute
+        // beginner-stat cap without affecting bred offspring or developer rats.
+        public bool isStarterRat;
+        // Activity is owned by the rat record rather than the display name so
+        // duplicate names remain independent and the history survives sale,
+        // euthanasia, natural death, and browser save/load.
+        public RatActivityData activity = new RatActivityData();
         // Retired records remain available for historical parent/litter views
         // but are no longer active in the habitat simulation.
         public RatRemovalDisposition removalDisposition = RatRemovalDisposition.None;
@@ -321,6 +347,10 @@ namespace RatHabitat
         public int lifetimeSaleCredits;
         public bool currencyInitialized;
         public bool storeInventoryInitialized;
+        // Purchased colony upgrades. Missing fields in older JSON deserialize
+        // to zero and are migrated safely by UpgradeSystem.
+        public int colonyCapacityUpgradeLevel;
+        public int storeQualityUpgradeLevel;
         public List<StoreRatListingData> storeRatListings = new List<StoreRatListingData>();
         // In-game timestamp for the next market refresh. This is deliberately
         // separate from real time so changing UI pages cannot reroll stock.

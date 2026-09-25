@@ -70,10 +70,18 @@ namespace RatHabitat
 
             CreateEnclosureLayout();
             NestPosition = EnclosureSystem.NurseryNestPosition;
-            CreateDecorativeTunnel(femaleCageRoot, "Mint Tunnel", new Vector3(1.55f, 0.78f, 5.15f), 3.2f, 0.58f, new Color(0.23f, 0.68f, 0.64f));
-            CreateDecorativeTunnel(femaleCageRoot, "Peach Tunnel", new Vector3(1.9f, 0.62f, 2.1f), 2.45f, 0.46f, new Color(0.97f, 0.60f, 0.42f));
-            CreateDecorativeTunnel(nurseryRoot, "Nursery Tunnel", new Vector3(-1.85f, 0.56f, -12.25f), 2.0f, 0.40f, new Color(0.58f, 0.45f, 0.78f));
-            CreateDecorativeTunnel(breedingCageRoot, "Breeding Tunnel", new Vector3(4.05f, 0.56f, -12.15f), 2.0f, 0.40f, new Color(0.86f, 0.45f, 0.62f));
+            CreateDecorativeTunnel(femaleCageRoot, "Mint Tunnel",
+                EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, -1.45f, 4.05f, 0.78f),
+                3.2f, 0.58f, new Color(0.23f, 0.68f, 0.64f));
+            CreateDecorativeTunnel(femaleCageRoot, "Peach Tunnel",
+                EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, -1.10f, 1.00f, 0.62f),
+                2.45f, 0.46f, new Color(0.97f, 0.60f, 0.42f));
+            CreateDecorativeTunnel(nurseryRoot, "Nursery Tunnel",
+                EnclosureSystem.PointInEnclosure(RatEnclosure.Nursery, 1.15f, -1.60f, 0.56f),
+                2.0f, 0.40f, new Color(0.58f, 0.45f, 0.78f));
+            CreateDecorativeTunnel(breedingCageRoot, "Breeding Tunnel",
+                EnclosureSystem.PointInEnclosure(RatEnclosure.Breeding, 1.05f, -1.50f, 0.56f),
+                2.0f, 0.40f, new Color(0.86f, 0.45f, 0.62f));
             CreatePairingNest();
 
             if (save == null || save.habitatObjects == null) return;
@@ -313,9 +321,10 @@ namespace RatHabitat
                 definition.enclosure == RatEnclosure.Nursery ? "Nursery" : "Breeding";
             if (definition.enclosure == RatEnclosure.Pairing) signText = "Pairing Habitat";
             float signHeight = 1.82f;
-            // All four signs intentionally use the Male Cage plaque as their
-            // master: same board dimensions, font, color, and text scale.
-            float signWidth = definition.enclosure == RatEnclosure.Pairing ? 4.15f : 2.673f;
+            // All five signs use the same plaque dimensions as the Pairing
+            // Habitat so every full-size enclosure reads as an equal page in
+            // the horizontal carousel.
+            float signWidth = 4.15f;
             const float signHeightSize = 0.551f;
             const float signDepth = 0.1296f;
             // Place the plaque on the inside face of the back wall. The
@@ -362,7 +371,7 @@ namespace RatHabitat
             text.alignment = TextAlignment.Center;
             // Keep the lettering comfortably inside the enlarged plaque,
             // including the longer Females/Nursery/Breeding labels.
-            text.characterSize = definition.enclosure == RatEnclosure.Pairing ? 0.075f : 0.10f;
+            text.characterSize = 0.075f;
             text.fontSize = 64;
             text.fontStyle = FontStyle.Bold;
             text.color = new Color(1f, 0.91f, 0.63f);
@@ -386,7 +395,11 @@ namespace RatHabitat
 
         private GameObject CreateExerciseWheel()
         {
-            var wheel = CreateVisualPrimitive(femaleCageRoot == null ? geometryRoot : femaleCageRoot, PrimitiveType.Cylinder, "Exercise Wheel", new Vector3(3.95f, 1.45f, 1.15f), new Vector3(1.35f, 0.12f, 1.35f), new Vector3(90f, 0f, 0f), new Color(0.98f, 0.53f, 0.36f), true);
+            var wheel = CreateVisualPrimitive(femaleCageRoot == null ? geometryRoot : femaleCageRoot,
+                PrimitiveType.Cylinder, "Exercise Wheel",
+                EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, 0.95f, 0.05f, 1.45f),
+                new Vector3(1.35f, 0.12f, 1.35f), new Vector3(90f, 0f, 0f),
+                new Color(0.98f, 0.53f, 0.36f), true);
             CreateVisualPrimitive(wheel.transform, PrimitiveType.Cylinder, "Exercise Wheel Hub", new Vector3(0f, 0f, -0.18f), new Vector3(0.25f, 0.16f, 0.25f), Vector3.zero, new Color(0.99f, 0.84f, 0.48f), false);
             CreateVisualPrimitive(wheel.transform, PrimitiveType.Cylinder, "Exercise Wheel Inner", new Vector3(0f, 0f, -0.05f), new Vector3(0.92f, 0.14f, 0.92f), Vector3.zero, new Color(0.99f, 0.78f, 0.48f), false);
             return wheel;
@@ -413,13 +426,13 @@ namespace RatHabitat
             switch (data.type)
             {
                 case HabitatObjectType.Food:
-                    position = new Vector3(-3.8f, 0.38f, 3.05f);
+                    position = EnclosureSystem.PointInEnclosure(RatEnclosure.MaleColony, -1.40f, -4.30f, 0.38f);
                     scale = new Vector3(1.3f, 0.28f, 1.3f);
                     primitive = PrimitiveType.Cylinder;
                     color = new Color(0.94f, 0.43f, 0.38f);
                     break;
                 case HabitatObjectType.Water:
-                    position = new Vector3(3.7f, 1.15f, 2.55f);
+                    position = EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, 0.70f, 1.45f, 1.15f);
                     scale = new Vector3(0.72f, 0.9f, 0.72f);
                     primitive = PrimitiveType.Cylinder;
                     color = new Color(0.22f, 0.62f, 0.94f);
@@ -431,7 +444,7 @@ namespace RatHabitat
                     color = new Color(0.78f, 0.52f, 0.25f);
                     break;
                 default:
-                    position = new Vector3(-1.65f, 0.67f, -8.35f);
+                    position = EnclosureSystem.PointInEnclosure(RatEnclosure.Nursery, 1.35f, 2.30f, 0.67f);
                     scale = new Vector3(2.4f, 1.2f, 2.0f);
                     primitive = PrimitiveType.Cube;
                     color = new Color(0.64f, 0.39f, 0.24f);

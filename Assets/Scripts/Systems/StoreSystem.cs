@@ -24,6 +24,7 @@ namespace RatHabitat
         {
             if (save == null) return;
             save.EnsureLists();
+            UpgradeSystem.EnsureState(save);
             if (!save.currencyInitialized)
             {
                 // Older saves used the same serialized integer for the
@@ -75,6 +76,55 @@ namespace RatHabitat
             CreateInventory(save, seed, save.storeRestockCycle);
             save.storeInventoryInitialized = true;
             save.storeNextRestockGameTime = gameTime + GameConfig.StoreRestockIntervalGameMs;
+        }
+
+        /// <summary>
+        /// Generates the randomized male/female founders for a new colony.
+        /// It deliberately uses the same name, genotype, coat-variation, and
+        /// marking pipeline as market listings, but supplies the separate
+        /// absolute 0-15 beginner-stat range and an adult starting age.
+        /// </summary>
+        public static void CreateStarterPair(long gameTime, int seed, out RatData female, out RatData male)
+        {
+            var random = new Random(seed);
+            float sharedBaseline = NextTrait(random,
+                GameConfig.StarterBeginnerTraitMinimum,
+                GameConfig.StarterBeginnerTraitMaximum);
+            string maleFamily = PickMarkingFamily(random);
+            string femaleFamily = random.NextDouble() < GameConfig.StoreSharedMarkingFamilyChance
+                ? maleFamily
+                : PickMarkingFamily(random);
+
+            string maleId = "starter_male_" + Math.Abs(seed).ToString("X8");
+            string femaleId = "starter_female_" + Math.Abs(seed).ToString("X8");
+            male = CreateGeneratedAdultRat(maleId, RatSex.Male,
+                MaleNames[random.Next(MaleNames.Length)], maleFamily, random, sharedBaseline,
+                gameTime, GameConfig.StarterMaleMinimumAgeDays, GameConfig.StarterMaleMaximumAgeDays,
+                true);
+            female = CreateGeneratedAdultRat(femaleId, RatSex.Female,
+                FemaleNames[random.Next(FemaleNames.Length)], femaleFamily, random, sharedBaseline,
+                gameTime, GameConfig.StarterFemaleMinimumAgeDays, GameConfig.StarterFemaleMaximumAgeDays,
+                true);
+
+            // Extremely unlikely identical draws should still produce a pair
+            // that is not a stat-for-stat clone while remaining within 0-15.
+            if (Math.Abs(male.traits.size - female.traits.size) < 0.001f &&
+                Math.Abs(male.traits.health - female.traits.health) < 0.001f &&
+                Math.Abs(male.traits.fertility - female.traits.fertility) < 0.001f)
+            {
+                male.traits.fertility = Math.Min(GameConfig.StarterBeginnerTraitMaximum,
+                    male.traits.fertility + 1f);
+                male.baseFertility = male.traits.fertility;
+            }
+
+            // The randomized starter pair is placed together in the main
+            // Pairing Habitat so the first breeding loop is immediately
+            // playable. This is an explicit player-assigned placement and is
+            // preserved by EnclosureSystem during save/load.
+            male.enclosure = RatEnclosure.Pairing;
+            male.pairingHabitatAssigned = true;
+            female.enclosure = RatEnclosure.Pairing;
+            female.pairingHabitatAssigned = true;
         }
 
         public static string GetRestockLabel(ColonySaveData save, long gameTime)
@@ -136,11 +186,12 @@ namespace RatHabitat
         {
             var random = new Random(seed);
             save.storeRatListings.Clear();
+            int qualityCap = UpgradeSystem.StoreQualityCap(save);
 
             // Generate the pair from one shared low-stat baseline. Each rat
             // gets a small deterministic deviation, so the starter pair feels
             // coordinated without becoming identical clones.
-            float sharedBaseline = NextTrait(random, GameConfig.StoreLowTraitMinimum, GameConfig.StoreLowTraitMaximum);
+            float sharedBaseline = NextTrait(random, GameConfig.StoreLowTraitMinimum, qualityCap);
 
             string maleFamily = PickMarkingFamily(random);
             string femaleFamily = random.NextDouble() < GameConfig.StoreSharedMarkingFamilyChance
@@ -153,14 +204,68 @@ namespace RatHabitat
                 MaleNames[random.Next(MaleNames.Length)],
                 maleFamily,
                 random,
-                sharedBaseline));
+                sharedBaseline,
+                qualityCap));
             save.storeRatListings.Add(CreateListing(
                 "store_adult_female_" + cycle,
                 RatSex.Female,
                 FemaleNames[random.Next(FemaleNames.Length)],
                 femaleFamily,
                 random,
-                sharedBaseline));
+                sharedBaseline,
+                qualityCap));
+        }
+
+        private static RatData CreateGeneratedAdultRat(
+            string id,
+            RatSex sex,
+            string name,
+            string markingFamily,
+            Random random,
+            float sharedBaseline,
+            long gameTime,
+            float minimumAgeDays,
+            float maximumAgeDays,
+            bool starter)
+        {
+            var genotype = CreateGenotype(random, markingFamily);
+            GeneticsSystem.Normalize(genotype);
+            float minimum = starter ? GameConfig.StarterBeginnerTraitMinimum : GameConfig.StoreLowTraitMinimum;
+            float maximum = starter ? GameConfig.StarterBeginnerTraitMaximum : GameConfig.StoreLowTraitMaximum;
+            float ageDays = (float)(minimumAgeDays + random.NextDouble() * (maximumAgeDays - minimumAgeDays));
+            RatData rat = ColonyFactory.CreateRat(
+                id,
+                name,
+                sex,
+                gameTime - (long)(ageDays * GameConfig.GameDayMs),
+                0,
+                genotype,
+                new TraitData(
+                    NearSharedTrait(random, sharedBaseline, minimum, maximum),
+                    NearSharedTrait(random, sharedBaseline, minimum, maximum),
+                    NearSharedTrait(random, sharedBaseline, minimum, maximum)),
+                RatStage.Adult);
+            rat.isStarterRat = starter;
+            // CreateRat initializes the persistent sexual-maturity threshold
+            // from the same stable ID used by the biology system. Keep the
+            // randomized starting age just above that threshold so both
+            // founders are genuinely adult and the early pair is usable.
+            if (starter)
+                ageDays = Math.Min(maximumAgeDays, Math.Max(ageDays, rat.sexualMaturityDays + 1f));
+            rat.birthTimestamp = gameTime - (long)(ageDays * GameConfig.GameDayMs);
+            rat.growthTimestamp = rat.birthTimestamp;
+            rat.estrousCycleAnchorGameTime = rat.birthTimestamp +
+                (long)(rat.sexualMaturityDays * GameConfig.GameDayMs);
+            rat.ageDays = ageDays;
+            rat.baseHealth = rat.traits.health;
+            rat.baseFertility = rat.traits.fertility;
+            rat.coatColorVariant = GeneticsSystem.DefaultCoatColorVariant(id, genotype);
+            rat.coatTone = GeneticsSystem.DefaultCoatTone(id, genotype);
+            rat.phenotype = GeneticsSystem.DerivePhenotype(RatStage.Adult, genotype,
+                rat.coatColorVariant, rat.coatTone);
+            rat.markingFamily = GeneticsSystem.NormalizeMarkingFamily(markingFamily, genotype);
+            GeneticsSystem.ApplyMarkingFamily(rat.phenotype, rat.markingFamily);
+            return rat;
         }
 
         private static StoreRatListingData CreateListing(
@@ -169,12 +274,13 @@ namespace RatHabitat
             string name,
             string markingFamily,
             Random random,
-            float sharedBaseline)
+            float sharedBaseline,
+            int qualityCap)
         {
             var genotype = CreateGenotype(random, markingFamily);
             GeneticsSystem.Normalize(genotype);
             float minimum = GameConfig.StoreLowTraitMinimum;
-            float maximum = GameConfig.StoreLowTraitMaximum;
+            float maximum = qualityCap;
             string coatColorVariant = GeneticsSystem.DefaultCoatColorVariant(id, genotype);
             return new StoreRatListingData
             {

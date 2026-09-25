@@ -11,6 +11,58 @@ namespace RatHabitat
     /// </summary>
     public static class GrowthSystem
     {
+        // Presentation behavior has its own small real-time delta because
+        // movement and animation should be 1x/2x/3x faster, while biological
+        // deadlines continue to use the authoritative simulated game clock
+        // below (1 minute/hour/day per real second). Keeping this value here
+        // prevents individual behaviors from inventing their own speed path.
+        private static float runtimeSimulationSpeed = 1f;
+        private static float lastMovementRealDeltaSeconds;
+        private static float lastMovementSimulationDeltaSeconds;
+
+        public static float RuntimeSimulationSpeed { get { return runtimeSimulationSpeed; } }
+
+        public static float LastMovementRealDeltaSeconds { get { return lastMovementRealDeltaSeconds; } }
+        public static float LastMovementSimulationDeltaSeconds { get { return lastMovementSimulationDeltaSeconds; } }
+
+        public static void SetRuntimeSpeed(float speed)
+        {
+            runtimeSimulationSpeed = NormalizeSpeed(speed);
+        }
+
+        /// <summary>
+        /// Returns the exact simulation-time delta for presentation behavior.
+        /// Do not discard elapsed real time here: dropping a slow WebGL frame
+        /// makes world-space movement lag behind the accelerated game clock.
+        /// MoveTowards callers already clamp their spatial step at the target.
+        /// </summary>
+        public static float SimulationMovementDeltaSeconds(float realDeltaSeconds)
+        {
+            if (realDeltaSeconds <= 0f) return 0f;
+            float simulationDelta = realDeltaSeconds * runtimeSimulationSpeed;
+            lastMovementRealDeltaSeconds = realDeltaSeconds;
+            lastMovementSimulationDeltaSeconds = simulationDelta;
+            return simulationDelta;
+        }
+
+        // Timed behavior and movement share the same clock. Keep the older
+        // name as an alias for biological/presentation timers already using it.
+        public static float SimulationBehaviorDeltaSeconds(float realDeltaSeconds)
+        {
+            return SimulationMovementDeltaSeconds(realDeltaSeconds);
+        }
+
+        /// <summary>
+        /// Converts a rat's authored world-space speed into one frame's
+        /// distance. This is the single path used by every position-writing
+        /// movement step, so 2x and 3x change actual travel time rather than
+        /// only Animator playback.
+        /// </summary>
+        public static float SimulationMovementStep(float baseWorldSpeed, float realDeltaSeconds)
+        {
+            return Mathf.Max(0f, baseWorldSpeed) * SimulationMovementDeltaSeconds(realDeltaSeconds);
+        }
+
         public static bool AdvanceClock(ColonySaveData save, long realNow)
         {
             if (save == null) return false;
@@ -21,11 +73,13 @@ namespace RatHabitat
                 if (save.clock.gameTimeMs <= 0) save.clock.gameTimeMs = GameConfig.StartGameTimeMs;
                 if (save.clock.gameStartTimestamp <= 0) save.clock.gameStartTimestamp = realNow;
                 save.clock.speed = NormalizeSpeed(save.clock.speed);
+                SetRuntimeSpeed(save.clock.speed);
                 return true;
             }
 
             long elapsed = Math.Max(0L, realNow - save.clock.lastRealTimestamp);
             save.clock.speed = NormalizeSpeed(save.clock.speed);
+            SetRuntimeSpeed(save.clock.speed);
             save.clock.gameTimeMs += (long)Math.Round(
                 elapsed * SimulationMillisecondsPerRealMillisecond(save.clock.speed));
             save.clock.lastRealTimestamp = realNow;
@@ -162,7 +216,12 @@ namespace RatHabitat
                 if (string.IsNullOrEmpty(rat.markingFamily)) rat.markingFamily = GeneticsSystem.DefaultMarkingFamily(rat.genotype);
                 GeneticsSystem.ApplyMarkingFamily(rat.phenotype, rat.markingFamily);
                 ApplyAgeDecline(rat);
-                if (oldStage != rat.stage) changed = true;
+                if (oldStage != rat.stage)
+                {
+                    changed = true;
+                    RatActivitySystem.Record(save, rat, "growth", "Growing", gameTime,
+                        "Grew to " + StageLabel(rat.stage));
+                }
             }
 
             foreach (var rat in naturalDeaths)
@@ -171,6 +230,7 @@ namespace RatHabitat
                 rat.removalDisposition = RatRemovalDisposition.NaturalDeath;
                 rat.removedAt = gameTime;
                 rat.reproductiveState = ReproductiveState.Infertile;
+                RatActivitySystem.SetCurrent(save, rat, "deceased", "Deceased", gameTime, "Died");
                 BreedingSystem.CancelPregnanciesForRat(save, rat.id, gameTime);
                 save.retiredRats.Add(rat);
                 changed = true;
@@ -234,6 +294,8 @@ namespace RatHabitat
             GeneticsSystem.ApplyMarkingFamily(rat.phenotype, rat.markingFamily);
             if (rat.stage == RatStage.Adult && rat.reproductiveState == ReproductiveState.Immature)
                 rat.reproductiveState = ReproductiveState.Fertile;
+            RatActivitySystem.Record(null, rat, "growth", "Growing", gameTime,
+                "Grew to " + StageLabel(rat.stage));
             return true;
         }
 
