@@ -58,6 +58,7 @@ namespace RatHabitat
         private ScrollRect ratRosterScroll;
         private ScrollRect storeRatListScroll;
         private ScrollRect familyTreeScroll;
+        private ScrollRect ratProfileScroll;
         private RectTransform familyTreeViewport;
         private RectTransform familyTreeContent;
         private RectTransform familyTreeInputBlocker;
@@ -120,6 +121,9 @@ namespace RatHabitat
         private string familyTreeSubjectId;
         private string profileMoreInformationRatId;
         private bool profileMoreInformationExpanded;
+        private string ratProfileScrollRatId;
+        private float ratProfileScrollNormalized = 1f;
+        private bool profileRefreshDeferred;
 
         private enum MainPanel
         {
@@ -283,6 +287,41 @@ namespace RatHabitat
             }
         }
 
+        /// <summary>
+        /// The profile is a live inspection surface over the habitat. Expose
+        /// its viewport to the manual input path so a vertical drag can never
+        /// be mistaken for a habitat page swipe.
+        /// </summary>
+        public bool IsPointerOverRatProfileScroll(Vector2 screenPoint)
+        {
+            if (ratProfileScroll == null || !ratProfileScroll.isActiveAndEnabled) return false;
+            RectTransform viewport = ratProfileScroll.viewport != null
+                ? ratProfileScroll.viewport
+                : ratProfileScroll.GetComponent<RectTransform>();
+            return viewport != null && RectTransformUtility.RectangleContainsScreenPoint(viewport, screenPoint, null);
+        }
+
+        private bool IsRatProfileScrollMoving()
+        {
+            if (ratProfileScroll == null || !ratProfileScroll.isActiveAndEnabled) return false;
+            if (Mathf.Abs(ratProfileScroll.velocity.y) > 1.5f) return true;
+            if (Input.GetMouseButton(0) && IsPointerOverRatProfileScroll(Input.mousePosition)) return true;
+            for (int index = 0; index < Input.touchCount; index++)
+            {
+                Touch touch = Input.GetTouch(index);
+                if (touch.phase != TouchPhase.Ended && touch.phase != TouchPhase.Canceled &&
+                    IsPointerOverRatProfileScroll(touch.position)) return true;
+            }
+            return false;
+        }
+
+        private void CaptureRatProfileScrollPosition()
+        {
+            if (ratProfileScroll == null || !ratProfileScroll.isActiveAndEnabled) return;
+            if (string.IsNullOrEmpty(ratProfileScrollRatId)) return;
+            ratProfileScrollNormalized = Mathf.Clamp01(ratProfileScroll.verticalNormalizedPosition);
+        }
+
         private bool IsRelayInsideActiveModal(DirectUiClickRelay relay)
         {
             if (relay == null) return false;
@@ -324,6 +363,21 @@ namespace RatHabitat
             string signature = game.UiSignature;
             if (!force && signature == lastSignature) return;
 
+            // Do not destroy the profile ScrollRect while Unity is processing
+            // a drag or its inertial tail. Defer the data refresh until the
+            // gesture settles; otherwise a harmless clock/activity update can
+            // replace the content under the user's finger.
+            bool sameProfile = ratProfileScroll != null &&
+                game.SelectedRat != null &&
+                ratProfileScrollRatId == game.SelectedRat.id;
+            if (sameProfile && IsRatProfileScrollMoving())
+            {
+                profileRefreshDeferred = true;
+                return;
+            }
+
+            profileRefreshDeferred = false;
+            CaptureRatProfileScrollPosition();
             float previousNormalized = string.IsNullOrEmpty(lastSignature) ? 1f : pageScroll.verticalNormalizedPosition;
             float previousMateNormalized = mateListScroll == null ? 1f : mateListScroll.verticalNormalizedPosition;
             float previousRosterNormalized = ratRosterScroll == null ? 1f : ratRosterScroll.verticalNormalizedPosition;
@@ -339,6 +393,8 @@ namespace RatHabitat
             if (mateListScroll != null) mateListScroll.verticalNormalizedPosition = previousMateNormalized;
             if (ratRosterScroll != null) ratRosterScroll.verticalNormalizedPosition = previousRosterNormalized;
             if (storeRatListScroll != null) storeRatListScroll.verticalNormalizedPosition = previousStoreNormalized;
+            if (ratProfileScroll != null && ratProfileScrollRatId == (game.SelectedRat == null ? string.Empty : game.SelectedRat.id))
+                ratProfileScroll.verticalNormalizedPosition = ratProfileScrollNormalized;
             RefreshTopNavigationState();
         }
 
@@ -1354,6 +1410,8 @@ namespace RatHabitat
 
         private void Update()
         {
+            if (profileRefreshDeferred && !IsRatProfileScrollMoving())
+                Refresh(true);
             if (ratAnimationShowcaseOpen) RefreshAnimationShowcasePanel();
             UpdateFamilyTreeZoomInput();
         }
@@ -1492,6 +1550,7 @@ namespace RatHabitat
         private void RebuildContent()
         {
             ratRosterScroll = null;
+            ratProfileScroll = null;
             familyTreeScroll = null;
             familyTreeViewport = null;
             familyTreeContent = null;
@@ -1509,6 +1568,12 @@ namespace RatHabitat
 
             RatData selectedRat = game.SelectedRat;
             HabitatObjectData selectedObject = game.SelectedObject;
+            // A live profile owns vertical gestures while it is open. Disable
+            // the outer page ScrollRect so a profile drag cannot move the
+            // page underneath or compete with the nested information scroll.
+            if (pageScroll != null)
+                pageScroll.vertical = !(activeMainPanel == MainPanel.None &&
+                    (selectedRat != null || selectedObject != null));
             RatData profileRat = string.IsNullOrEmpty(familyTreeSubjectId)
                 ? selectedRat
                 : BreedingSystem.FindHistoricalRat(game.Save, familyTreeSubjectId);
@@ -2013,6 +2078,10 @@ namespace RatHabitat
             {
                 profileMoreInformationRatId = rat.id;
                 profileMoreInformationExpanded = false;
+                // Selecting a different rat or opening a fresh profile is
+                // the only intentional top-of-profile reset.
+                ratProfileScrollRatId = rat.id;
+                ratProfileScrollNormalized = 1f;
             }
 
             var card = CreateCard(string.Empty);
@@ -2078,6 +2147,34 @@ namespace RatHabitat
             detailsViewport.gameObject.AddComponent<RectMask2D>();
             detailsScroll.viewport = detailsViewport;
 
+            // Keep a compact, phone-safe scrollbar attached to the same
+            // profile ScrollRect. It is generated once with the profile and
+            // follows the content position instead of being rebuilt by timer
+            // text updates.
+            var scrollbarRoot = CreateRect("Rat Profile Scrollbar", detailsScrollRoot);
+            scrollbarRoot.anchorMin = new Vector2(1f, 0f);
+            scrollbarRoot.anchorMax = new Vector2(1f, 1f);
+            scrollbarRoot.pivot = new Vector2(1f, 0.5f);
+            scrollbarRoot.offsetMin = new Vector2(-10f, 4f);
+            scrollbarRoot.offsetMax = new Vector2(-3f, -4f);
+            var scrollbarTrack = scrollbarRoot.gameObject.AddComponent<Image>();
+            scrollbarTrack.color = new Color(0.08f, 0.16f, 0.17f, 0.72f);
+            var scrollbarHandle = CreateRect("Rat Profile Scrollbar Handle", scrollbarRoot);
+            scrollbarHandle.anchorMin = new Vector2(0f, 0f);
+            scrollbarHandle.anchorMax = new Vector2(1f, 0.35f);
+            scrollbarHandle.offsetMin = Vector2.zero;
+            scrollbarHandle.offsetMax = Vector2.zero;
+            var scrollbarHandleImage = scrollbarHandle.gameObject.AddComponent<Image>();
+            scrollbarHandleImage.color = new Color(0.42f, 0.68f, 0.48f, 0.95f);
+            var scrollbar = scrollbarRoot.gameObject.AddComponent<Scrollbar>();
+            scrollbar.direction = Scrollbar.Direction.BottomToTop;
+            scrollbar.targetGraphic = scrollbarHandleImage;
+            scrollbar.handleRect = scrollbarHandle;
+            scrollbarRoot.SetAsLastSibling();
+            detailsScroll.verticalScrollbar = scrollbar;
+            detailsScroll.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.AutoHide;
+            detailsScroll.verticalScrollbarSpacing = -2f;
+
             var detailsContent = CreateRect("Rat Profile Information Content", detailsViewport);
             detailsContent.anchorMin = new Vector2(0f, 1f);
             detailsContent.anchorMax = new Vector2(1f, 1f);
@@ -2094,7 +2191,9 @@ namespace RatHabitat
             detailsContentFitter.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
             detailsContentFitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
             detailsScroll.content = detailsContent;
-            detailsScroll.verticalNormalizedPosition = 1f;
+            ratProfileScroll = detailsScroll;
+            ratProfileScrollRatId = rat.id;
+            detailsScroll.verticalNormalizedPosition = ratProfileScrollNormalized;
 
             var details = CreateRect("Rat Profile Details", detailsContent);
             var detailsImage = details.gameObject.AddComponent<Image>();

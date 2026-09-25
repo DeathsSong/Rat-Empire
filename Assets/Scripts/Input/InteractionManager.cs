@@ -31,8 +31,10 @@ namespace RatHabitat
         private Vector2 touchStart;
         private int touchFingerId = -1;
         private bool touchStartedOnUi;
+        private bool touchStartedOnRatProfile;
         private Vector2 mousePressPosition;
         private bool mousePressStartedOnUi;
+        private bool mousePressStartedOnRatProfile;
         private bool mouseDragDetected;
         private bool pinchStartedOnUi;
         private bool pinchZooming;
@@ -45,6 +47,7 @@ namespace RatHabitat
         private const float MaxSelectionDistance = 100f;
         private const float TouchMoveThreshold = 24f;
         private const float MouseMoveThreshold = 8f;
+        private const float HorizontalGestureDominance = 1.25f;
         private const float MinimumRayDirectionMagnitude = 0.0001f;
 
         private bool managerReady;
@@ -169,10 +172,12 @@ namespace RatHabitat
         {
             touchFingerId = -1;
             touchStartedOnUi = false;
+            touchStartedOnRatProfile = false;
             pinchStartedOnUi = false;
             pinchZooming = false;
             lastPinchDistance = 0f;
             mousePressStartedOnUi = true;
+            mousePressStartedOnRatProfile = false;
             mouseDragDetected = false;
         }
 
@@ -236,6 +241,7 @@ namespace RatHabitat
                 {
                     touchFingerId = touch.fingerId;
                     touchStart = touch.position;
+                    touchStartedOnRatProfile = IsPointerOverRatProfile(touch.position);
                     touchStartedOnUi = IsPointerOverInteractiveUi(touch.position, touch.fingerId);
                     if (touchStartedOnUi) pinchStartedOnUi = true;
                 }
@@ -248,6 +254,12 @@ namespace RatHabitat
                     if (pageControlHandled)
                     {
                         RecordNoWorldRay("page UI control handled");
+                    }
+                    else if (touchStartedOnRatProfile)
+                    {
+                        // The profile ScrollRect owns this gesture. Never
+                        // pass its release into the habitat swipe/raycast.
+                        RecordNoWorldRay("rat profile scroll handled");
                     }
                     else if (touchStartedOnUi || overUi)
                     {
@@ -267,6 +279,7 @@ namespace RatHabitat
 
                     touchFingerId = -1;
                     touchStartedOnUi = false;
+                    touchStartedOnRatProfile = false;
                 }
                 else if (touch.phase == TouchPhase.Canceled && touch.fingerId == touchFingerId)
                 {
@@ -274,6 +287,7 @@ namespace RatHabitat
                     RecordNoWorldRay("touch canceled");
                     touchFingerId = -1;
                     touchStartedOnUi = false;
+                    touchStartedOnRatProfile = false;
                 }
             }
         }
@@ -291,6 +305,7 @@ namespace RatHabitat
             {
                 RecordPointerReceived(pointerPosition);
                 mousePressPosition = pointerPosition;
+                mousePressStartedOnRatProfile = IsPointerOverRatProfile(pointerPosition);
                 mousePressStartedOnUi = IsPointerOverInteractiveUi(pointerPosition, -1);
                 mouseDragDetected = false;
                 return;
@@ -315,6 +330,10 @@ namespace RatHabitat
                 {
                     RecordNoWorldRay("page UI control handled");
                 }
+                else if (mousePressStartedOnRatProfile)
+                {
+                    RecordNoWorldRay("rat profile scroll handled");
+                }
                 else if (mousePressStartedOnUi || overUi)
                 {
                     RecordNoWorldRay("UI blocked");
@@ -332,6 +351,7 @@ namespace RatHabitat
                 }
 
                 mousePressStartedOnUi = false;
+                mousePressStartedOnRatProfile = false;
                 mouseDragDetected = false;
                 return;
             }
@@ -346,6 +366,12 @@ namespace RatHabitat
             return pageUi != null && pageUi.TryInvokePageControlAt(screenPosition);
         }
 
+        private bool IsPointerOverRatProfile(Vector2 screenPosition)
+        {
+            if (pageUi == null) pageUi = FindObjectOfType<VerticalSliceUI>();
+            return pageUi != null && pageUi.IsPointerOverRatProfileScroll(screenPosition);
+        }
+
         private bool TryInvokeHabitatSwipe(Vector2 delta)
         {
             // A page change is only a horizontal gesture. Vertical drags are
@@ -354,7 +380,10 @@ namespace RatHabitat
             // never select or move the rat underneath the gesture.
             if (habitatSwipeHandler == null) return false;
             if (delta.magnitude < TouchMoveThreshold) return false;
-            if (Mathf.Abs(delta.x) <= Mathf.Abs(delta.y)) return false;
+            // Only a clearly horizontal gesture belongs to the habitat
+            // carousel. This leaves diagonal and vertical drags to a nested
+            // profile/list ScrollRect instead of firing both systems.
+            if (Mathf.Abs(delta.x) < Mathf.Abs(delta.y) * HorizontalGestureDominance) return false;
             int direction = delta.x < 0f ? 1 : -1;
             return habitatSwipeHandler(direction);
         }

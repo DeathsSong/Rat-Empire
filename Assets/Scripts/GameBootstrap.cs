@@ -54,6 +54,10 @@ namespace RatHabitat
         private VerticalSliceUI ui;
         private float habitatSwipeLockUntil;
         private const float HabitatSwipeDebounceSeconds = 0.24f;
+        private bool habitatPageSettling;
+        private int habitatSettledPageIndex = 4;
+        private float habitatPageSettleUntil;
+        private const float HabitatPageSettleSeconds = 0.48f;
         private float saveTimer;
         private string selectedRatId;
         private string selectedObjectId;
@@ -249,6 +253,8 @@ namespace RatHabitat
         {
             get
             {
+                if (habitatPageSettling)
+                    return Mathf.Clamp(habitatSettledPageIndex, 0, HabitatPages.Length - 1);
                 int index = Array.IndexOf(HabitatPages, NormalizeHabitatView(cameraView));
                 return index < 0 ? 0 : index;
             }
@@ -257,7 +263,8 @@ namespace RatHabitat
         {
             get
             {
-                return CameraViewLabel(NormalizeHabitatView(cameraView)) + "  •  " +
+                HabitatCameraView visibleView = HabitatPages[Mathf.Clamp(HabitatPageIndex, 0, HabitatPages.Length - 1)];
+                return CameraViewLabel(visibleView) + "  •  " +
                     (HabitatPageIndex + 1) + "/" + HabitatPageCount;
             }
         }
@@ -1312,6 +1319,7 @@ namespace RatHabitat
         {
             UpdateWorldViewport();
             UpdateCameraPresentation();
+            UpdateHabitatPageSettling();
             if (Save == null) return;
             GrowthSystem.AdvanceClock(Save, GameConfig.NowMs());
             bool stageChanged = GrowthSystem.RefreshRatStages(Save);
@@ -2059,7 +2067,7 @@ namespace RatHabitat
             // A single touch/mouse gesture can generate several end/move
             // callbacks on mobile. Lock only after a page actually changes,
             // so one gesture can never skip a habitat.
-            if (Time.unscaledTime < habitatSwipeLockUntil) return false;
+            if (habitatPageSettling || Time.unscaledTime < habitatSwipeLockUntil) return false;
             // A profile is an intentional inspection surface. Keep it stable
             // until the player returns to the habitat rather than changing
             // the live camera underneath a profile during a swipe.
@@ -2074,9 +2082,22 @@ namespace RatHabitat
             habitatZoomOffset = 0f;
             cameraMoveVelocity = Vector3.zero;
             cameraZoomVelocity = 0f;
-            habitatSwipeLockUntil = Time.unscaledTime + HabitatSwipeDebounceSeconds;
+            habitatPageSettling = true;
+            habitatSettledPageIndex = current;
+            habitatPageSettleUntil = Time.unscaledTime + HabitatPageSettleSeconds;
+            habitatSwipeLockUntil = Time.unscaledTime +
+                Mathf.Max(HabitatSwipeDebounceSeconds, HabitatPageSettleSeconds);
             if (ui != null) ui.RefreshHeader();
             return true;
+        }
+
+        private void UpdateHabitatPageSettling()
+        {
+            if (!habitatPageSettling || Time.unscaledTime < habitatPageSettleUntil) return;
+            int settled = Array.IndexOf(HabitatPages, NormalizeHabitatView(cameraView));
+            habitatSettledPageIndex = settled < 0 ? habitatSettledPageIndex : settled;
+            habitatPageSettling = false;
+            if (ui != null) ui.RefreshHeader();
         }
 
         public void BuyStoreRat(string listingId)
@@ -2202,6 +2223,10 @@ namespace RatHabitat
         private void SetHabitatCameraView(HabitatCameraView view)
         {
             cameraView = NormalizeHabitatView(view);
+            int settled = Array.IndexOf(HabitatPages, cameraView);
+            habitatSettledPageIndex = settled < 0 ? habitatSettledPageIndex : settled;
+            habitatPageSettling = false;
+            habitatSwipeLockUntil = 0f;
             habitatZoomOffset = 0f;
             selectedRatId = null;
             selectedObjectId = null;
