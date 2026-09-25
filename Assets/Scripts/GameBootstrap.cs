@@ -938,8 +938,10 @@ namespace RatHabitat
                         "Breeding interaction started");
                     RatActivitySystem.SetCurrent(Save, female, "breeding", "Breeding", GameTime,
                         "Breeding interaction started");
-                    StatusMessage = ColonyFactory.DisplayName(female) + " and " +
-                        ColonyFactory.DisplayName(male) + " are breeding.";
+                    // Pairing Habitat breeding is intentionally player-silent.
+                    // Keep the state in each rat's activity history, but do
+                    // not promote the ordinary interaction to the global
+                    // top-right event log/live banner.
                     SaveSystem.Save(Save);
                     return;
                 }
@@ -1012,11 +1014,7 @@ namespace RatHabitat
             pairingApproach = null;
             Save.pairingNextCheckGameTime = GameTime + GameConfig.PairingCheckIntervalMs;
 
-            if (resolved && conceptionSucceeded)
-            {
-                StatusMessage = ColonyFactory.DisplayName(female) + " is pregnant.";
-            }
-            else
+            if (!resolved || !conceptionSucceeded)
             {
                 // Failed conception and cancelled attempts are intentionally
                 // silent. The rats simply return to normal wandering.
