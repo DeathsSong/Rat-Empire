@@ -22,13 +22,13 @@ namespace RatHabitat
         // the same reservation so the habitat never renders under the header.
         private const float HeaderHeight = 122f;
         private const float PageTopInset = 126f;
-        // Keep the opaque profile information below the live habitat opening.
-        // At the 540x960 phone reference size this leaves a visible breathing
-        // gap beneath the selected rat instead of letting the panel start
-        // directly against its feet/body.
-        private const float RatProfileInformationTopGap = 44f;
-        private const float RatProfileInformationViewportHeight = 438f;
-        private const float RatProfileInformationMinimumHeight = 300f;
+        // The profile is a fixed phone-safe frame: the live habitat remains
+        // visible above it, while the opaque information surface is anchored
+        // to the lower edge and grows upward when expanded.
+        private const float RatProfileFrameHeight = 730f;
+        private const float RatProfileCollapsedInformationHeight = 205f;
+        private const float RatProfileExpandedInformationHeight = 406f;
+        private const float RatProfileBottomPadding = 16f;
         private const float ModalMaximumWidth = 500f;
         private const int PageBottomSafePadding = 104;
 
@@ -2016,33 +2016,40 @@ namespace RatHabitat
                 cardImage.color = new Color(0f, 0f, 0f, 0f);
                 cardImage.raycastTarget = false;
             }
+
+            // CreateCard normally sizes itself from a vertical content stack.
+            // A profile is different: it is a fixed phone-safe frame with a
+            // lower-anchored information surface. Disable the generic stack
+            // so the details panel can grow upward without pushing the live
+            // habitat opening or changing the selected rat's camera view.
+            var profileCardLayout = card.GetComponent<VerticalLayoutGroup>();
+            if (profileCardLayout != null) profileCardLayout.enabled = false;
+            var profileCardFitter = card.GetComponent<ContentSizeFitter>();
+            if (profileCardFitter != null) profileCardFitter.enabled = false;
+            var profileFrameElement = card.gameObject.AddComponent<LayoutElement>();
+            profileFrameElement.minHeight = RatProfileFrameHeight;
+            profileFrameElement.preferredHeight = RatProfileFrameHeight;
+            profileFrameElement.flexibleHeight = 0f;
+
             AddRatPortrait(card, rat);
 
-            // This spacer is intentional: the selected rat is the real live
-            // habitat object shown through the transparent portrait opening.
-            // Keeping the information surface lower gives rats near the top,
-            // middle, and bottom of an enclosure room to remain visible while
-            // the page/profile ScrollRects provide access to all lower content.
-            var profileGap = CreateRect("Rat Profile Lower Information Gap", card);
-            var profileGapLayout = profileGap.gameObject.AddComponent<LayoutElement>();
-            profileGapLayout.minHeight = RatProfileInformationTopGap;
-            profileGapLayout.preferredHeight = RatProfileInformationTopGap;
-
-            // Keep the live habitat view fixed above the information area.
-            // Only this lower region scrolls, so reading a long profile cannot
-            // pan the world camera or move the selected rat behind the UI.
+            // The information scroll is bottom-anchored with a bottom-safe
+            // padding. Its height changes with More Information, so the top
+            // edge moves upward while the lower edge stays stable.
             var detailsScrollRoot = CreateRect("Rat Profile Information Scroll", card);
+            detailsScrollRoot.anchorMin = new Vector2(0f, 0f);
+            detailsScrollRoot.anchorMax = new Vector2(1f, 0f);
+            detailsScrollRoot.pivot = new Vector2(0.5f, 0f);
+            detailsScrollRoot.offsetMin = new Vector2(12f, RatProfileBottomPadding);
+            detailsScrollRoot.offsetMax = new Vector2(-12f,
+                RatProfileBottomPadding + (profileMoreInformationExpanded
+                    ? RatProfileExpandedInformationHeight
+                    : RatProfileCollapsedInformationHeight));
             var detailsScrollImage = detailsScrollRoot.gameObject.AddComponent<Image>();
             detailsScrollImage.color = new Color(0.01f, 0.03f, 0.04f, 0.03f);
             detailsScrollImage.raycastTarget = true;
             var detailsScrollElement = detailsScrollRoot.gameObject.AddComponent<LayoutElement>();
-            // The lower placement reduces the available viewport slightly, so
-            // keep the panel phone-safe and let its own ScrollRect expose the
-            // complete activity/history/action content. The outer page
-            // ScrollRect remains available if the device has an unusually
-            // short safe area.
-            detailsScrollElement.preferredHeight = RatProfileInformationViewportHeight;
-            detailsScrollElement.minHeight = RatProfileInformationMinimumHeight;
+            detailsScrollElement.ignoreLayout = true;
             var detailsScroll = detailsScrollRoot.gameObject.AddComponent<ScrollRect>();
             detailsScroll.horizontal = false;
             detailsScroll.vertical = true;
@@ -3589,10 +3596,16 @@ namespace RatHabitat
             const float portraitContainerHeight = 300f;
             const float portraitSize = 270f;
 
-            // Reserve a complete layout row for the image. The card's
-            // VerticalLayoutGroup then places title -> portrait row -> stats
-            // -> actions without allowing text to occupy the image space.
+            // The profile card is manually framed, so pin the live-view
+            // opening to the top of that frame. This is still the actual
+            // habitat camera showing through; no duplicate portrait object is
+            // created.
             var portraitContainer = CreateRect("Rat Portrait Container", parent);
+            portraitContainer.anchorMin = new Vector2(0.5f, 1f);
+            portraitContainer.anchorMax = new Vector2(0.5f, 1f);
+            portraitContainer.pivot = new Vector2(0.5f, 1f);
+            portraitContainer.anchoredPosition = Vector2.zero;
+            portraitContainer.sizeDelta = new Vector2(portraitSize, portraitContainerHeight);
             var portraitContainerLayout = portraitContainer.gameObject.AddComponent<LayoutElement>();
             portraitContainerLayout.preferredWidth = portraitSize;
             portraitContainerLayout.minWidth = portraitSize;

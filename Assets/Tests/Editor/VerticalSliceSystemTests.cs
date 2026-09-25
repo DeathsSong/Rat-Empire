@@ -211,7 +211,7 @@ namespace RatHabitat.Tests
             Assert.IsFalse(BreedingSystem.IsBreedEligible(save, female, outsideWindowTime, out reason));
             StringAssert.StartsWith("Next fertile window:",
                 BreedingSystem.ReproductiveStateLabel(save, female, outsideWindowTime));
-            StringAssert.StartsWith("Outside the fertile window", reason);
+            StringAssert.Contains("Outside the fertile window", reason);
 
             save.pregnancies.Add(new PregnancyData
             {
@@ -233,6 +233,68 @@ namespace RatHabitat.Tests
             Assert.IsFalse(BreedingSystem.IsBreedEligible(save, female, outsideWindowTime, out reason));
             Assert.AreEqual("Past breeding age", BreedingSystem.ReproductiveStateLabel(save, female, outsideWindowTime));
             Assert.AreEqual("Past breeding age.", reason);
+        }
+
+        [Test]
+        public void PairingResolutionUsesLiveWindowAndCommittedInteractionCanFinish()
+        {
+            const long gameTime = 700000000L;
+            var outsideSave = CreatePairingTestSave(gameTime, 100f);
+            RatData outsideFemale = outsideSave.rats[0];
+            RatData outsideMale = outsideSave.rats[1];
+            long outsideWindow = gameTime +
+                (long)(GameConfig.EstrousFertileWindowDays * GameConfig.GameDayMs) + 1L;
+
+            bool conceived;
+            string reason;
+            Assert.IsFalse(PairingHabitatSystem.ResolvePair(
+                outsideSave, outsideFemale, outsideMale, outsideWindow, 1f,
+                out conceived, out reason));
+            Assert.IsFalse(conceived);
+            Assert.IsNull(BreedingSystem.FindPendingPregnancyForMother(outsideSave, outsideFemale.id));
+            StringAssert.Contains("Outside the fertile window", reason);
+
+            var committedSave = CreatePairingTestSave(gameTime, 100f);
+            RatData committedFemale = committedSave.rats[0];
+            RatData committedMale = committedSave.rats[1];
+            Assert.IsTrue(PairingHabitatSystem.ResolvePair(
+                committedSave, committedFemale, committedMale, outsideWindow, 1f, true,
+                out conceived, out reason), reason);
+            Assert.IsTrue(conceived);
+            Assert.IsNotNull(BreedingSystem.FindPendingPregnancyForMother(
+                committedSave, committedFemale.id));
+        }
+
+        [Test]
+        public void DedicatedSessionCompletesAfterWindowCloses()
+        {
+            const long gameTime = 710000000L;
+            var save = CreatePairingTestSave(gameTime, 100f);
+            RatData female = save.rats[0];
+            RatData male = save.rats[1];
+            DedicatedBreedingSessionData session;
+            string reason;
+
+            Assert.IsTrue(BreedingSystem.StartDedicatedBreedingSession(
+                save, female, male, gameTime, out session, out reason), reason);
+            long completionTime = session.endsAt;
+            long fertileWindowMs = (long)(GameConfig.EstrousFertileWindowDays * GameConfig.GameDayMs);
+            long sessionDurationMs = completionTime - gameTime;
+            // Start near the end of the live window so this committed
+            // two-hour session crosses it before resolution.
+            female.estrousCycleAnchorGameTime = gameTime -
+                (fertileWindowMs - (sessionDurationMs / 2L));
+            Assert.IsTrue(BreedingSystem.IsInFertileWindow(female, gameTime));
+            Assert.IsFalse(BreedingSystem.IsInFertileWindow(female, completionTime));
+
+            List<DedicatedBreedingSessionData> resolved;
+            Assert.AreEqual(1, BreedingSystem.ResolveDueDedicatedBreedingSessions(
+                save, completionTime, out resolved));
+            Assert.AreEqual("finished", session.status);
+            Assert.AreEqual(1, resolved.Count);
+            // Conception remains stochastic; the important regression guard is
+            // that the committed session resolves after the window closes
+            // instead of being rejected as a new outside-window attempt.
         }
 
         [Test]
@@ -329,7 +391,11 @@ namespace RatHabitat.Tests
         [Test]
         public void BreedingCreatesPinkiesWithHiddenFurAndLineage()
         {
-            var save = ColonyFactory.CreateNew(1000000L);
+            // The new-game founders are intentionally randomized and may be
+            // outside the live fertile window. Use the explicit Pairing test
+            // fixture here so this test exercises litter creation rather than
+            // depending on a particular starter cycle phase.
+            var save = CreatePairingTestSave(2000000L, 10f);
             PregnancyData pregnancy;
             string reason;
             Assert.IsTrue(BreedingSystem.StartBreeding(save, save.rats[0], save.rats[1], 2000000L, out pregnancy, out reason), reason);
@@ -446,6 +512,12 @@ namespace RatHabitat.Tests
         private static ColonySaveData CreatePairingTestSave(long gameTime, float fertility)
         {
             var save = ColonyFactory.CreateNew(gameTime);
+            // CreateNew intentionally includes the randomized starter pair.
+            // This fixture replaces those founders so index 0/1 are the
+            // explicitly configured Pairing Habitat participants used by the
+            // tests below.
+            save.rats.Clear();
+            save.ratIds.Clear();
             var genotype = GeneticsSystem.CreateFounder("B", "b", "C", "C", "D", "D", "S", "s");
             var female = ColonyFactory.CreateRat(
                 "pairing-female", "Olive", RatSex.Female,
@@ -478,6 +550,7 @@ namespace RatHabitat.Tests
             var save = ColonyFactory.CreateNew(1000000L);
             RatData mother = save.rats[0];
             RatData father = save.rats[1];
+            PrepareStarterPairForBreeding(save, 2000000L, false);
             Assert.AreEqual(RatEnclosure.FemaleColony, mother.enclosure);
             Assert.AreEqual(RatEnclosure.MaleColony, father.enclosure);
 
@@ -520,6 +593,7 @@ namespace RatHabitat.Tests
             var save = ColonyFactory.CreateNew(1000000L);
             RatData mother = save.rats[0];
             RatData father = save.rats[1];
+            PrepareStarterPairForBreeding(save, 2000000L, false);
             PregnancyData pregnancy;
             string reason;
             Assert.IsTrue(BreedingSystem.StartBreeding(save, mother, father, 2000000L, out pregnancy, out reason), reason);
@@ -536,6 +610,31 @@ namespace RatHabitat.Tests
             }
             Assert.IsFalse(mother.nursing);
             Assert.AreEqual(RatEnclosure.FemaleColony, mother.enclosure);
+        }
+
+        private static void PrepareStarterPairForBreeding(ColonySaveData save, long gameTime, bool keepPairingAssignment)
+        {
+            if (save == null || save.rats == null || save.rats.Count < 2) return;
+            for (int i = 0; i < 2; i++)
+            {
+                var rat = save.rats[i];
+                if (rat == null) continue;
+                rat.stage = RatStage.Adult;
+                rat.ageDays = rat.sex == RatSex.Female ? 100f : 86f;
+                rat.sexualMaturityDays = rat.sex == RatSex.Female
+                    ? GameConfig.FemaleSexualMaturityDays
+                    : GameConfig.MaleSexualMaturityDays;
+                rat.breedingEndAgeDays = GameConfig.MaximumBreedingEndDays;
+                rat.estrousCycleAnchorGameTime = gameTime;
+                rat.breedingCooldownUntil = 0L;
+                rat.pregnancyId = null;
+                rat.nursing = false;
+                rat.reproductiveState = ReproductiveState.Fertile;
+                rat.pairingHabitatAssigned = keepPairingAssignment;
+                rat.enclosure = keepPairingAssignment
+                    ? RatEnclosure.Pairing
+                    : (rat.sex == RatSex.Female ? RatEnclosure.FemaleColony : RatEnclosure.MaleColony);
+            }
         }
 
         [Test]

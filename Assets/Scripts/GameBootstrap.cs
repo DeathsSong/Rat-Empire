@@ -860,11 +860,10 @@ namespace RatHabitat
             pairingRouteRetryCount = 0;
             pairingFailedMaleTarget = Vector3.zero;
             pairingFailedFemaleTarget = Vector3.zero;
-            RatActivitySystem.SetCurrent(Save, male, "breeding", "Breeding", GameTime);
-            RatActivitySystem.SetCurrent(Save, female, "breeding", "Breeding", GameTime);
-            // Do not announce the attempt yet. A Pairing Habitat check can
-            // still be blocked or fail its conception roll; only a successful
-            // breeding result should produce a player-facing notification.
+            // Do not mark the rats as actively breeding until they have
+            // reached the face-to-face interaction point. The approach is a
+            // route, not a breeding attempt, so activity timestamps and
+            // cancellation history reflect the real interaction start.
             StatusMessage = string.Empty;
             if (ui != null) ui.Refresh(false);
             return true;
@@ -888,12 +887,9 @@ namespace RatHabitat
                 return;
             }
 
-            string reason = string.Empty;
-            if (male.enclosure != RatEnclosure.Pairing || female.enclosure != RatEnclosure.Pairing ||
-                !BreedingSystem.IsBreedEligible(Save, male, GameTime, out reason) ||
-                !BreedingSystem.IsBreedEligible(Save, female, GameTime, out reason))
+            if (male.enclosure != RatEnclosure.Pairing || female.enclosure != RatEnclosure.Pairing)
             {
-                CancelPairingApproach(reason);
+                CancelPairingApproach("one of the rats left the Pairing Habitat");
                 return;
             }
 
@@ -905,12 +901,46 @@ namespace RatHabitat
             pairingApproach.phaseTimeout -= deltaTime;
             if (pairingApproach.phase == PairingApproachPhase.Walking)
             {
+                string reason = string.Empty;
+                if (!BreedingSystem.IsBreedEligible(Save, male, GameTime, out reason))
+                {
+                    CancelPairingApproach(FormatPairingEligibilityCancellation(reason));
+                    return;
+                }
+                if (!BreedingSystem.IsBreedEligible(Save, female, GameTime, out reason))
+                {
+                    CancelPairingApproach(FormatPairingEligibilityCancellation(reason));
+                    return;
+                }
+
                 if (maleBehavior.PairingApproachAtTarget && femaleBehavior.PairingApproachAtTarget)
                 {
+                    // Revalidate at the exact transition into the physical
+                    // interaction. A fertile window may have ended while the
+                    // rats were walking; that attempt must be cancelled
+                    // before sniffing/breeding begins.
+                    if (!BreedingSystem.IsBreedEligible(Save, female, GameTime, out reason))
+                    {
+                        CancelPairingApproach(FormatPairingEligibilityCancellation(reason));
+                        return;
+                    }
+                    if (!BreedingSystem.IsBreedEligible(Save, male, GameTime, out reason))
+                    {
+                        CancelPairingApproach(FormatPairingEligibilityCancellation(reason));
+                        return;
+                    }
+
                     pairingApproach.phase = PairingApproachPhase.Sniffing;
                     pairingApproach.phaseTimeout = PairingInteractionSeconds + 1.5f;
                     maleBehavior.BeginPairingInteraction(femaleRoot.position, PairingInteractionSeconds);
                     femaleBehavior.BeginPairingInteraction(maleRoot.position, PairingInteractionSeconds);
+                    RatActivitySystem.SetCurrent(Save, male, "breeding", "Breeding", GameTime,
+                        "Breeding interaction started");
+                    RatActivitySystem.SetCurrent(Save, female, "breeding", "Breeding", GameTime,
+                        "Breeding interaction started");
+                    StatusMessage = ColonyFactory.DisplayName(female) + " and " +
+                        ColonyFactory.DisplayName(male) + " are breeding.";
+                    SaveSystem.Save(Save);
                     return;
                 }
 
@@ -973,6 +1003,7 @@ namespace RatHabitat
                 male,
                 GameTime,
                 GameConfig.PairingPregnancyChance,
+                true,
                 out conceptionSucceeded,
                 out reason);
 
@@ -983,12 +1014,14 @@ namespace RatHabitat
 
             if (resolved && conceptionSucceeded)
             {
-                StatusMessage = ColonyFactory.DisplayName(female) + " and " + ColonyFactory.DisplayName(male) + " are breeding.";
+                StatusMessage = ColonyFactory.DisplayName(female) + " is pregnant.";
             }
             else
             {
                 // Failed conception and cancelled attempts are intentionally
                 // silent. The rats simply return to normal wandering.
+                RatActivitySystem.SetCurrent(Save, male, "exploring", "Exploring", GameTime);
+                RatActivitySystem.SetCurrent(Save, female, "exploring", "Exploring", GameTime);
                 StatusMessage = string.Empty;
             }
 
@@ -1004,8 +1037,25 @@ namespace RatHabitat
             PairingApproachRuntime failedApproach = pairingApproach;
             string failureText = string.IsNullOrEmpty(reason) ? "route blocked" : reason;
             string failureLower = failureText.ToLowerInvariant();
+            bool fertileWindowEnded = failureLower.Contains("fertile window") &&
+                (failureLower.Contains("ended") || failureLower.Contains("outside"));
             bool routeFailure = failureLower.Contains("blocked") ||
                 failureLower.Contains("timed out") || failureLower.Contains("route");
+
+            RatData cancelledMale = BreedingSystem.FindRat(Save, failedApproach.maleId);
+            RatData cancelledFemale = BreedingSystem.FindRat(Save, failedApproach.femaleId);
+            if (fertileWindowEnded)
+            {
+                const string cancellationMessage = "Breeding cancelled — fertile window ended";
+                RatActivitySystem.Record(Save, cancelledFemale, "breeding-cancelled", "Breeding cancelled",
+                    GameTime, cancellationMessage);
+                RatActivitySystem.Record(Save, cancelledMale, "breeding-cancelled", "Breeding cancelled",
+                    GameTime, cancellationMessage);
+            }
+            if (cancelledFemale != null && RatActivitySystem.CurrentKey(Save, cancelledFemale, GameTime) == "breeding")
+                RatActivitySystem.SetCurrent(Save, cancelledFemale, "exploring", "Exploring", GameTime);
+            if (cancelledMale != null && RatActivitySystem.CurrentKey(Save, cancelledMale, GameTime) == "breeding")
+                RatActivitySystem.SetCurrent(Save, cancelledMale, "exploring", "Exploring", GameTime);
 
             RatHabitatBehavior maleBehavior;
             RatHabitatBehavior femaleBehavior;
@@ -1027,8 +1077,8 @@ namespace RatHabitat
                 pairingRouteRetryCount++;
                 pairingFailedMaleTarget = failedApproach.maleTarget;
                 pairingFailedFemaleTarget = failedApproach.femaleTarget;
-                RatData failedMale = BreedingSystem.FindRat(Save, failedApproach.maleId);
-                RatData failedFemale = BreedingSystem.FindRat(Save, failedApproach.femaleId);
+                RatData failedMale = cancelledMale;
+                RatData failedFemale = cancelledFemale;
                 string diagnosticRat = failedFemale != null ? ColonyFactory.DisplayName(failedFemale) :
                     (failedMale != null ? ColonyFactory.DisplayName(failedMale) : failedApproach.femaleId);
                 Debug.Log("[Rat Habitat] " + diagnosticRat + " route recovery: " + failureText);
@@ -1054,6 +1104,14 @@ namespace RatHabitat
             }
             RefreshWorldAndUi(false);
             SaveSystem.Save(Save);
+        }
+
+        private static string FormatPairingEligibilityCancellation(string reason)
+        {
+            if (!string.IsNullOrEmpty(reason) &&
+                reason.ToLowerInvariant().Contains("outside the fertile window"))
+                return "fertile window ended before interaction";
+            return reason;
         }
 
         private bool TryGetPairingParticipant(string ratId, out Transform root, out RatHabitatBehavior behavior)

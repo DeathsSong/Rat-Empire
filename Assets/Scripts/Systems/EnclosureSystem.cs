@@ -317,13 +317,25 @@ namespace RatHabitat
             if (save == null) return false;
             save.EnsureLists();
             bool changed = false;
+            long gameTime = save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs;
             foreach (var rat in save.rats)
             {
                 if (rat == null) continue;
 
                 bool hasDependentPinkies = rat.sex == RatSex.Female && HasDependentPinkies(save, rat.id);
-                bool nursingState = rat.sex == RatSex.Female &&
-                    (hasDependentPinkies || rat.reproductiveState == ReproductiveState.Nursing);
+                // Live dependent-pinkie records are authoritative. Do not let
+                // a stale serialized Nursing enum keep a mother nursing after
+                // the last pinkie has grown, been moved, or been removed.
+                if (rat.sex == RatSex.Female && !hasDependentPinkies &&
+                    (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing))
+                {
+                    rat.nursing = false;
+                    rat.recoveryUntil = Math.Max(rat.recoveryUntil,
+                        gameTime + (long)(GameConfig.RecoveryDays * GameConfig.GameDayMs));
+                    rat.reproductiveState = ReproductiveState.Recovery;
+                    changed = true;
+                }
+                bool nursingState = rat.sex == RatSex.Female && hasDependentPinkies;
                 RatEnclosure desired = DesiredEnclosure(save, rat, hasDependentPinkies);
                 if (rat.nursing != nursingState)
                 {

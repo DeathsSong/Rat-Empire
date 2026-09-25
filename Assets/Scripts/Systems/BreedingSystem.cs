@@ -249,6 +249,8 @@ namespace RatHabitat
         {
             if (rat == null || rat.sex != RatSex.Female) return true;
             GrowthSystem.EnsureBiologyDefaults(rat);
+            if (rat.stage == RatStage.Pinkie || rat.stage == RatStage.YoungRat ||
+                rat.ageDays < rat.sexualMaturityDays) return false;
             long cycleMs = Math.Max(1L, (long)(GameConfig.EstrousCycleDays * GameConfig.GameDayMs));
             long windowMs = Math.Max(1L, (long)(GameConfig.EstrousFertileWindowDays * GameConfig.GameDayMs));
             long elapsed = gameTime - rat.estrousCycleAnchorGameTime;
@@ -458,7 +460,7 @@ namespace RatHabitat
             return true;
         }
 
-        private static PregnancyData CreatePregnancy(ColonySaveData save, RatData parentA, RatData parentB, long gameTime)
+        internal static PregnancyData CreatePregnancy(ColonySaveData save, RatData parentA, RatData parentB, long gameTime)
         {
             var mother = parentA.sex == RatSex.Female ? parentA : parentB;
             var father = parentA.sex == RatSex.Male ? parentA : parentB;
@@ -787,6 +789,29 @@ namespace RatHabitat
             out bool conceptionSucceeded,
             out string reason)
         {
+            return ResolvePair(save, female, male, gameTime, pregnancyChance, false,
+                out conceptionSucceeded, out reason);
+        }
+
+        /// <summary>
+        /// Resolves a pairing after the physical interaction has begun. The
+        /// ordinary overload requires the female to be fertile at the exact
+        /// resolution time. A committed interaction may pass
+        /// allowFertilityWindowElapsed when the female was validated at the
+        /// moment the interaction started; an estrous window ending during
+        /// that same interaction must not turn it into a second attempt.
+        /// All other biological and habitat checks remain live.
+        /// </summary>
+        public static bool ResolvePair(
+            ColonySaveData save,
+            RatData female,
+            RatData male,
+            long gameTime,
+            float pregnancyChance,
+            bool allowFertilityWindowElapsed,
+            out bool conceptionSucceeded,
+            out string reason)
+        {
             conceptionSucceeded = false;
             reason = string.Empty;
             if (save == null || female == null || male == null)
@@ -794,15 +819,20 @@ namespace RatHabitat
                 reason = "The pairing rats are no longer available.";
                 return false;
             }
+            if (female.enclosure != RatEnclosure.Pairing || male.enclosure != RatEnclosure.Pairing)
+            {
+                reason = "Both rats must be in the Pairing Habitat.";
+                return false;
+            }
 
             string femaleReason;
             string maleReason;
-            if (!BreedingSystem.IsBreedEligible(save, female, gameTime, out femaleReason))
+            if (!CanResolveParticipant(save, female, gameTime, allowFertilityWindowElapsed, out femaleReason))
             {
                 reason = ColonyFactory.DisplayName(female) + ": " + femaleReason;
                 return false;
             }
-            if (!BreedingSystem.IsBreedEligible(save, male, gameTime, out maleReason))
+            if (!CanResolveParticipant(save, male, gameTime, false, out maleReason))
             {
                 reason = ColonyFactory.DisplayName(male) + ": " + maleReason;
                 return false;
@@ -824,18 +854,43 @@ namespace RatHabitat
                 return true;
             }
 
-            PregnancyData pregnancy;
-            if (!BreedingSystem.StartBreeding(save, female, male, gameTime, out pregnancy, out reason))
-            {
-                ApplyPairingAttemptCooldown(female, male, gameTime);
-                return false;
-            }
+            // CanResolveParticipant performed the complete live validation.
+            // Create the pregnancy directly here so a committed interaction
+            // can finish after the female's fertile window closes without
+            // re-running the pre-interaction window gate.
+            PregnancyData pregnancy = BreedingSystem.CreatePregnancy(save, female, male, gameTime);
+            reason = string.Empty;
             // Apply this immediately rather than waiting until birth. The
             // pregnancy state blocks the mother; the cooldown also prevents
             // the same pair from being staged again during the current cycle.
             ApplyPairingAttemptCooldown(female, male, gameTime);
             conceptionSucceeded = true;
             return true;
+        }
+
+        private static bool CanResolveParticipant(
+            ColonySaveData save,
+            RatData rat,
+            long gameTime,
+            bool allowFertilityWindowElapsed,
+            out string reason)
+        {
+            if (BreedingSystem.IsBreedEligible(save, rat, gameTime, out reason)) return true;
+            if (!allowFertilityWindowElapsed || rat == null || rat.sex != RatSex.Female) return false;
+
+            // GetReproductiveStatus remains authoritative here. The only
+            // unavailable result that a committed interaction may carry past
+            // its start is the female's live fertile window having elapsed.
+            BreedingSystem.ReproductiveStatus status = BreedingSystem.GetReproductiveStatus(save, rat, gameTime);
+            if (status.state == ReproductiveState.Fertile &&
+                !string.IsNullOrEmpty(status.eligibilityReason) &&
+                status.eligibilityReason.StartsWith("Outside the fertile window", StringComparison.Ordinal))
+            {
+                reason = string.Empty;
+                return true;
+            }
+            reason = status.eligibilityReason;
+            return false;
         }
 
         public static void ApplyPairingAttemptCooldown(RatData female, RatData male, long gameTime)
