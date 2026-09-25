@@ -137,6 +137,7 @@ namespace RatHabitat
             }
 
             save.EnsureLists();
+            EventLogPolicy.Prune(save);
             ColonyFactory.MigrateLegacyStarterStats(save);
             StoreSystem.EnsureStoreState(save);
             LitterNameSystem.EnsureLitterNames(save);
@@ -187,6 +188,7 @@ namespace RatHabitat
             try
             {
                 save.EnsureLists();
+                EventLogPolicy.Prune(save);
                 RatActivitySystem.EnsureSaveState(save, save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
                 save.schemaVersion = GameConfig.SaveVersion;
                 save.updatedAt = GameConfig.NowMs();
@@ -252,6 +254,7 @@ namespace RatHabitat
         {
             if (save == null) return string.Empty;
             save.EnsureLists();
+            EventLogPolicy.Prune(save);
             RatActivitySystem.EnsureSaveState(save, save.clock.gameTimeMs);
             return JsonUtility.ToJson(save, true);
         }
@@ -264,6 +267,7 @@ namespace RatHabitat
                 var save = JsonUtility.FromJson<ColonySaveData>(json);
                 if (save == null) return null;
                 save.EnsureLists();
+                EventLogPolicy.Prune(save);
                 RatActivitySystem.EnsureSaveState(save,
                     save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
                 ColonyFactory.MigrateLegacyStarterStats(save);
@@ -389,6 +393,59 @@ namespace RatHabitat
 #if UNITY_WEBGL && !UNITY_EDITOR
             RatHabitatBrowserFlush(key);
 #endif
+        }
+    }
+
+    /// <summary>
+    /// Defines the deliberately small set of colony-wide events that may be
+    /// shown in the header banner/history. RatActivitySystem remains the
+    /// source for detailed per-rat behavior such as breeding, exploring,
+    /// sleeping, recovery, and cooldowns.
+    /// </summary>
+    public static class EventLogPolicy
+    {
+        public static bool IsAllowed(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message)) return false;
+            string lower = message.Trim().ToLowerInvariant();
+
+            // These are the only global event categories. Match stable event
+            // wording rather than a broad keyword so UI guidance, breeding
+            // activity, movement, and diagnostics cannot leak into the
+            // top-right banner or persistent history.
+            return lower.Contains("restocked") ||
+                lower.Contains(" died") || lower.StartsWith("died") ||
+                lower.Contains(" was sold") ||
+                lower.Contains(" became pregnant") ||
+                lower.StartsWith("birth:") || lower.Contains(" gave birth");
+        }
+
+        /// <summary>
+        /// Removes legacy/non-whitelisted entries when an existing browser or
+        /// file save is loaded. This keeps old event history from reappearing
+        /// after a WebGL refresh while preserving the newest allowed events.
+        /// </summary>
+        public static bool Prune(ColonySaveData save)
+        {
+            if (save == null) return false;
+            save.EnsureLists();
+            bool changed = false;
+            for (int index = save.eventLog.Count - 1; index >= 0; index--)
+            {
+                ColonyEventData entry = save.eventLog[index];
+                if (entry == null || !IsAllowed(entry.message))
+                {
+                    save.eventLog.RemoveAt(index);
+                    changed = true;
+                }
+            }
+
+            while (save.eventLog.Count > 10)
+            {
+                save.eventLog.RemoveAt(save.eventLog.Count - 1);
+                changed = true;
+            }
+            return changed;
         }
     }
 }

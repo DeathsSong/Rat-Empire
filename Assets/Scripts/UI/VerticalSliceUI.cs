@@ -70,6 +70,7 @@ namespace RatHabitat
         private string lastSignature;
         private bool ready;
         private static Font builtInUiFont;
+        private const string BundledUiFontResourcePath = "UI/NotoSansJP-Regular";
         private int layoutScreenWidth = -1;
         private int layoutScreenHeight = -1;
         // World interaction must be available as soon as the scene renders.
@@ -3887,14 +3888,17 @@ namespace RatHabitat
             var objectRoot = new GameObject("Text");
             objectRoot.transform.SetParent(parent, false);
             var text = objectRoot.AddComponent<Text>();
-            // Unity 2022.3 no longer exposes Arial.ttf as a valid built-in
-            // runtime resource. Using it throws during GameBootstrap.Awake,
-            // leaving the UI half-built and making the later input symptoms
-            // misleading. LegacyRuntime.ttf is the supported built-in font
-            // for this dependency-free runtime UI.
+            // Use the bundled Unicode font first. LegacyRuntime.ttf does not
+            // reliably contain the male/female symbols in WebGL, and browser
+            // fallback fonts are not dependable for Unity UI Text. Keeping
+            // one font on every generated label also makes the shared
+            // ColonyFactory.DisplayName formatter render consistently across
+            // profiles, lists, family history, and event messages.
             if (builtInUiFont == null)
             {
-                builtInUiFont = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+                builtInUiFont = Resources.Load<Font>(BundledUiFontResourcePath);
+                if (builtInUiFont == null)
+                    builtInUiFont = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
             }
             text.font = builtInUiFont;
             text.text = value;

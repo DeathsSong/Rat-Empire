@@ -422,31 +422,7 @@ namespace RatHabitat
         {
             if (Save == null || string.IsNullOrWhiteSpace(value)) return false;
             string compact = CompactEventMessage(value);
-            string lower = compact.ToLowerInvariant();
-
-            // StatusMessage is also used for transient guidance and internal
-            // state. Only meaningful colony events belong in the persistent
-            // player-facing history.
-            if (lower.Contains("ready") || lower.Contains("simulation speed") ||
-                lower.Contains("no conception") || lower.Contains("unsuccess") ||
-                lower.Contains("cancelled") || lower.Contains("canceled") ||
-                lower.StartsWith("select ") || lower.StartsWith("choose ") ||
-                lower.StartsWith("choosing ") || lower.StartsWith("not enough") ||
-                lower.StartsWith("the selected") || lower.StartsWith("that ") ||
-                lower.StartsWith("this ") || lower.Contains("unavailable") ||
-                lower.Contains("must remain") || lower.Contains("cannot") ||
-                lower.Contains("could not")) return false;
-
-            bool meaningful = lower.Contains("breeding") || lower.Contains("pregnan") ||
-                lower.Contains("birth") || lower.Contains("moved") ||
-                lower.Contains("joined") || lower.Contains("removed from") ||
-                lower.Contains("sold") || lower.Contains("euthanized") ||
-                lower.Contains("restocked") || lower.Contains("evacuat") ||
-                lower.Contains("spawned") || lower.Contains("deleted") ||
-                lower.Contains("reset") || lower.Contains("advanced") ||
-                lower.Contains("died") || lower.Contains("warning") ||
-                lower.Contains("error");
-            if (!meaningful) return false;
+            if (!EventLogPolicy.IsAllowed(compact)) return false;
 
             Save.EnsureLists();
             Save.eventLog.Insert(0, new ColonyEventData
@@ -1022,6 +998,17 @@ namespace RatHabitat
                 RatActivitySystem.SetCurrent(Save, female, "exploring", "Exploring", GameTime);
                 StatusMessage = string.Empty;
             }
+            else
+            {
+                // Pregnancy is a permitted colony-wide event; the ordinary
+                // Pairing Habitat breeding approach/interaction remains
+                // silent. Save the actual pregnancy before surfacing the
+                // announcement so the message can never outlive its state.
+                if (SaveSystem.Save(Save))
+                {
+                    StatusMessage = ColonyFactory.DisplayName(female) + " became pregnant.";
+                }
+            }
 
             EnclosureSystem.RecalculateAssignments(Save);
             RefreshWorldAndUi(resolved && conceptionSucceeded);
@@ -1342,13 +1329,17 @@ namespace RatHabitat
                 bool resolvedStateSaved = SaveSystem.Save(Save);
                 if (resolvedStateSaved)
                 {
+                    // Dedicated-session start/success/failure details stay
+                    // out of the global log. A real pregnancy is still an
+                    // allowed colony-wide event, so announce only successful
+                    // sessions after the pregnancy state was saved.
                     foreach (var completedSession in completedSessions)
                     {
-                        if (completedSession == null) continue;
-                        StatusMessage = BuildDedicatedSessionResultMessage(completedSession);
+                        if (completedSession == null || !completedSession.conceptionSucceeded) continue;
+                        var mother = BreedingSystem.FindRat(Save, completedSession.motherId);
+                        if (mother != null)
+                            StatusMessage = ColonyFactory.DisplayName(mother) + " became pregnant.";
                     }
-                    // Persist the event-log entries as part of the same
-                    // completed-session state so a reload cannot replay them.
                     SaveSystem.Save(Save);
                 }
                 else
@@ -2410,26 +2401,11 @@ namespace RatHabitat
             parentAId = null;
             parentBId = null;
             breedingSelectionSlot = BreedingParentSlot.None;
-            StatusMessage = ColonyFactory.DisplayName(mother) + " and " + ColonyFactory.DisplayName(father) + " are breeding.";
             SaveSystem.Save(Save);
             // Pregnancy begins nursery care immediately. Reuse the stable
             // presenter roots so the mother relocates without creating a
             // second visual or changing selection identity.
             RefreshWorldAndUi(true);
-        }
-
-        private string BuildDedicatedSessionResultMessage(DedicatedBreedingSessionData session)
-        {
-            if (session == null) return string.Empty;
-            var mother = BreedingSystem.FindRat(Save, session.motherId);
-            var father = BreedingSystem.FindRat(Save, session.fatherId);
-            string motherName = mother == null ? "Female" : ColonyFactory.DisplayName(mother);
-            string fatherName = father == null ? "Male" : ColonyFactory.DisplayName(father);
-            bool pregnancyStarted = mother != null &&
-                BreedingSystem.FindPendingPregnancy(Save, mother.id) != null;
-            return pregnancyStarted
-                ? motherName + " and " + fatherName + " breeding succeeded — pregnancy started."
-                : motherName + " and " + fatherName + " breeding failed.";
         }
 
         public void FinishPregnancyTesting()
