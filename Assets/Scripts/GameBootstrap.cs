@@ -452,7 +452,7 @@ namespace RatHabitat
         {
             if (rat == null) return "Unknown";
             string key = RatActivitySystem.CurrentKey(Save, rat, GameTime);
-            if (IsAuthoritativeActivityKey(key))
+            if (IsAuthoritativeActivityKey(key, rat))
                 return RatActivitySystem.CurrentLabel(Save, rat, GameTime);
             RatActivityData persistedActivity = RatActivitySystem.Ensure(rat, GameTime);
             if (key == "movement" && persistedActivity.currentActivityAt == GameTime)
@@ -463,8 +463,10 @@ namespace RatHabitat
             return RatActivitySystem.CurrentLabel(Save, rat, GameTime);
         }
 
-        private static bool IsAuthoritativeActivityKey(string key)
+        private static bool IsAuthoritativeActivityKey(string key, RatData rat)
         {
+            if (key == "growing")
+                return rat != null && rat.removalDisposition == RatRemovalDisposition.None && rat.stage == RatStage.Pinkie;
             return key == "sold" || key == "euthanized" || key == "deceased" ||
                 key == "breeding" || key == "pregnant" || key == "nursing" || key == "recovery";
         }
@@ -477,7 +479,7 @@ namespace RatHabitat
             {
                 if (rat == null || rat.removalDisposition != RatRemovalDisposition.None) continue;
                 string authoritativeKey = RatActivitySystem.CurrentKey(Save, rat, GameTime);
-                if (IsAuthoritativeActivityKey(authoritativeKey)) continue;
+                if (IsAuthoritativeActivityKey(authoritativeKey, rat)) continue;
 
                 RatHabitatBehavior behavior;
                 if (rats != null && rats.TryGetRatBehavior(rat.id, out behavior) && behavior != null)

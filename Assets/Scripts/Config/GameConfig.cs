@@ -17,7 +17,13 @@ namespace RatHabitat
         // visual growth transition cannot accidentally unlock a sale.
         public const float PupSaleMinimumAgeDays = 42f;
         public const float NursingInteractionCooldownHours = 6f;
+        // These are presentation durations. NursingSystem owns the catalog
+        // and can add more interactions without changing the rat behavior
+        // state machine.
         public const float NursingInteractionDurationSeconds = 2.5f;
+        public const float NursingGroomingInteractionDurationSeconds = 1.9f;
+        public const float NursingSniffInteractionWeight = 0.68f;
+        public const float NursingGroomingInteractionWeight = 0.32f;
         public const float MaleSexualMaturityDays = 56f;
         public const float FemaleSexualMaturityDays = 70f;
         public const float MatureStartDays = 365f;

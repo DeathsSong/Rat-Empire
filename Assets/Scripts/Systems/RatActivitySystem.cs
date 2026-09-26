@@ -129,6 +129,11 @@ namespace RatHabitat
                 case RatRemovalDisposition.NaturalDeath: return "Deceased";
             }
 
+            // Pinkies always present as growing in the primary activity summary.
+            // Their detailed nursing, nest, and caregiving activities remain in
+            // the history and continue to drive the underlying behavior.
+            if (rat.stage == RatStage.Pinkie) return "Growing";
+
             if (save != null)
             {
                 DedicatedBreedingSessionData session = BreedingSystem.FindActiveDedicatedSession(save, rat.id);
@@ -145,6 +150,11 @@ namespace RatHabitat
             }
             if (rat.reproductiveState == ReproductiveState.Recovery) return "Recovering";
             RatActivityData activity = Ensure(rat, gameTimeMs);
+            // A prior Pinkie-only summary must not remain authoritative after
+            // the rat reaches Young Rat. The normal habitat behavior will
+            // replace it on the next activity refresh.
+            if (string.Equals(activity.currentActivityKey, "growing", StringComparison.Ordinal))
+                return DefaultLabel;
             return string.IsNullOrEmpty(activity.currentActivityLabel) ? DefaultLabel : activity.currentActivityLabel;
         }
 
@@ -157,6 +167,7 @@ namespace RatHabitat
                 case RatRemovalDisposition.Euthanized: return "euthanized";
                 case RatRemovalDisposition.NaturalDeath: return "deceased";
             }
+            if (rat.stage == RatStage.Pinkie) return "growing";
             if (save != null)
             {
                 if (BreedingSystem.FindActiveDedicatedSession(save, rat.id) != null) return "breeding";

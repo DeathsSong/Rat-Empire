@@ -126,6 +126,7 @@ namespace RatHabitat
             }
 
             RemoveMissingRats(liveIds);
+            RestoreSavedNursingInteractions(save);
         }
 
         private void LateUpdate()
@@ -206,13 +207,38 @@ namespace RatHabitat
             return true;
         }
 
-        public bool BeginNursingInteraction(string motherId, string pupId, float durationSeconds)
+        public bool BeginNursingInteraction(string motherId, string pupId, string interactionId,
+            float durationSeconds)
         {
             RatHabitatBehavior behavior;
             Transform pupRoot;
             if (!TryGetRatBehavior(motherId, out behavior) || !TryGetRatRoot(pupId, out pupRoot) ||
                 pupRoot == null) return false;
-            return behavior.BeginNursingInteraction(pupRoot.position, durationSeconds);
+            return behavior.BeginNursingInteraction(pupRoot.position, interactionId, durationSeconds);
+        }
+
+        private void RestoreSavedNursingInteractions(ColonySaveData save)
+        {
+            if (save == null || save.rats == null || save.clock == null) return;
+            long gameTime = save.clock.gameTimeMs;
+            for (int index = 0; index < save.rats.Count; index++)
+            {
+                RatData mother = save.rats[index];
+                if (mother == null || string.IsNullOrEmpty(mother.id) || !mother.nursing ||
+                    string.IsNullOrEmpty(mother.nursingPupId) ||
+                    mother.nursingInteractionUntil <= gameTime) continue;
+
+                RatHabitatBehavior behavior;
+                Transform pupRoot;
+                if (!TryGetRatBehavior(mother.id, out behavior) || behavior == null ||
+                    behavior.NursingInteractionActive || !TryGetRatRoot(mother.nursingPupId, out pupRoot) ||
+                    pupRoot == null) continue;
+
+                string interactionId = NursingSystem.NormalizeInteractionId(mother.nursingInteractionType);
+                float remainingSeconds = NursingSystem.BehaviorSecondsFromGameMilliseconds(
+                    mother.nursingInteractionUntil - gameTime);
+                behavior.ResumeNursingInteraction(pupRoot.position, interactionId, remainingSeconds);
+            }
         }
 
         /// <summary>

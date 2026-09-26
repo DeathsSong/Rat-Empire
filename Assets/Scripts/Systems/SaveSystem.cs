@@ -168,6 +168,9 @@ namespace RatHabitat
                 // per-pup rotation timestamps.
                 if (rat.lastNursedAt < 0L) rat.lastNursedAt = 0L;
                 if (rat.nursingInteractionUntil < 0L) rat.nursingInteractionUntil = 0L;
+                if (rat.nursingRetryAt < 0L) rat.nursingRetryAt = 0L;
+                if (rat.nursingInteractionUntil > 0L)
+                    rat.nursingInteractionType = NursingSystem.NormalizeInteractionId(rat.nursingInteractionType);
                 GrowthSystem.EnsureBiologyDefaults(rat);
                 GeneticsSystem.Normalize(rat.genotype);
                 GeneticsSystem.EnsureCoatAppearance(rat);

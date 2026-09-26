@@ -584,6 +584,7 @@ namespace RatHabitat
                         rat.nursing = false;
                         rat.nursingPupId = null;
                         rat.nursingInteractionUntil = 0L;
+                        rat.nursingInteractionType = null;
                         rat.recoveryUntil = Math.Max(rat.recoveryUntil,
                             gameTime + (long)(GameConfig.RecoveryDays * GameConfig.GameDayMs));
                         rat.reproductiveState = ReproductiveState.Recovery;

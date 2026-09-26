@@ -11,8 +11,105 @@ namespace RatHabitat
     /// </summary>
     public static class NursingSystem
     {
+        private sealed class InteractionDefinition
+        {
+            public readonly string id;
+            public readonly string animationState;
+            public readonly string animationFallback;
+            public readonly float durationSeconds;
+            public readonly float weight;
+
+            public InteractionDefinition(string id, string animationState,
+                string animationFallback, float durationSeconds, float weight)
+            {
+                this.id = id;
+                this.animationState = animationState;
+                this.animationFallback = animationFallback;
+                this.durationSeconds = durationSeconds;
+                this.weight = Mathf.Max(0f, weight);
+            }
+        }
+
+        // Data-driven presentation choices. The rat behavior only receives an
+        // animation state from this catalog; it never interprets "Attack" as
+        // combat. Additional care animations can be added here later without
+        // changing the nursing route, cooldown, or biological systems.
+        private static readonly InteractionDefinition[] InteractionDefinitions =
+        {
+            new InteractionDefinition("sniffing", "HandPaintedRat_Sniffing", "Sniffing",
+                GameConfig.NursingInteractionDurationSeconds, GameConfig.NursingSniffInteractionWeight),
+            new InteractionDefinition("grooming", "HandPaintedRat_Attack", "Attack",
+                GameConfig.NursingGroomingInteractionDurationSeconds, GameConfig.NursingGroomingInteractionWeight),
+        };
+
+        public const string DefaultInteractionId = "sniffing";
+
         private static readonly long NursingCooldownMs =
             (long)(GameConfig.NursingInteractionCooldownHours * 60f * 60f * 1000f);
+        private static readonly long NursingRetryCooldownMs = 30L * 1000L;
+
+        public static string NormalizeInteractionId(string interactionId)
+        {
+            if (FindDefinition(interactionId) != null) return interactionId;
+            return DefaultInteractionId;
+        }
+
+        public static string AnimationStateFor(string interactionId)
+        {
+            InteractionDefinition definition = FindDefinition(NormalizeInteractionId(interactionId));
+            return definition == null ? "HandPaintedRat_Sniffing" : definition.animationState;
+        }
+
+        public static string AnimationFallbackFor(string interactionId)
+        {
+            InteractionDefinition definition = FindDefinition(NormalizeInteractionId(interactionId));
+            return definition == null ? "Sniffing" : definition.animationFallback;
+        }
+
+        public static float DurationSecondsFor(string interactionId)
+        {
+            InteractionDefinition definition = FindDefinition(NormalizeInteractionId(interactionId));
+            return definition == null ? GameConfig.NursingInteractionDurationSeconds : definition.durationSeconds;
+        }
+
+        /// <summary>
+        /// Chooses one care animation from stable mother/pup/time inputs. The
+        /// choice is saved immediately by the caller, so a browser reload can
+        /// resume the same interaction instead of rerolling its visual.
+        /// </summary>
+        public static string ChooseInteractionId(string motherId, string pupId, long gameTime)
+        {
+            int seed = StableSeed((motherId ?? string.Empty) + "|" +
+                (pupId ?? string.Empty) + "|" +
+                (gameTime / Math.Max(1L, NursingCooldownMs)));
+            double roll = (seed % 100000) / 99999d;
+            float totalWeight = 0f;
+            for (int index = 0; index < InteractionDefinitions.Length; index++)
+                totalWeight += InteractionDefinitions[index].weight;
+
+            if (totalWeight <= 0f) return DefaultInteractionId;
+            float cursor = (float)(roll * totalWeight);
+            for (int index = 0; index < InteractionDefinitions.Length; index++)
+            {
+                cursor -= InteractionDefinitions[index].weight;
+                if (cursor <= 0f) return InteractionDefinitions[index].id;
+            }
+            return InteractionDefinitions[InteractionDefinitions.Length - 1].id;
+        }
+
+        /// <summary>
+        /// Converts the persisted simulated deadline back to the behavior
+        /// timer's scaled seconds. This lets an active care animation resume
+        /// at the same simulation-time point after a reload or render refresh.
+        /// </summary>
+        public static float BehaviorSecondsFromGameMilliseconds(long gameMilliseconds)
+        {
+            if (gameMilliseconds <= 0L) return 0.75f;
+            float speed = Mathf.Max(1f, GrowthSystem.RuntimeSimulationSpeed);
+            double gameMillisecondsPerBehaviorSecond =
+                GrowthSystem.SimulationMillisecondsPerRealMillisecond(speed) * 1000d / speed;
+            return Mathf.Max(0.75f, (float)(gameMilliseconds / gameMillisecondsPerBehaviorSecond));
+        }
 
         /// <summary>
         /// Returns the next simulation timestamp at which a nursing pass can
@@ -31,6 +128,11 @@ namespace RatHabitat
                 if (mother.nursingInteractionUntil > gameTime)
                 {
                     next = Math.Min(next, mother.nursingInteractionUntil);
+                    continue;
+                }
+                if (mother.nursingRetryAt > gameTime)
+                {
+                    next = Math.Min(next, mother.nursingRetryAt);
                     continue;
                 }
 
@@ -73,21 +175,40 @@ namespace RatHabitat
                 {
                     mother.nursingInteractionUntil = 0L;
                     mother.nursingPupId = null;
+                    mother.nursingInteractionType = null;
+                    changed = true;
+                }
+                if (mother.nursingRetryAt > 0L && gameTime >= mother.nursingRetryAt)
+                {
+                    mother.nursingRetryAt = 0L;
                     changed = true;
                 }
 
-                if (mother.nursingInteractionUntil > gameTime) continue;
+                if (mother.nursingInteractionUntil > gameTime || mother.nursingRetryAt > gameTime)
+                    continue;
 
                 RatData pup = ChooseNextPup(save, mother, gameTime);
                 if (pup == null) continue;
+                string interactionId = ChooseInteractionId(mother.id, pup.id, gameTime);
+                float durationSeconds = DurationSecondsFor(interactionId);
                 if (!presenter.BeginNursingInteraction(mother.id, pup.id,
-                    GameConfig.NursingInteractionDurationSeconds)) continue;
+                    interactionId, durationSeconds))
+                {
+                    // A presenter can be temporarily unavailable during a
+                    // habitat rebuild. Back off in simulation time instead
+                    // of waking the full colony maintenance pass every frame.
+                    mother.nursingRetryAt = gameTime + NursingRetryCooldownMs;
+                    changed = true;
+                    continue;
+                }
 
                 pup.lastNursedAt = gameTime;
                 mother.nursingPupId = pup.id;
+                mother.nursingRetryAt = 0L;
+                mother.nursingInteractionType = NormalizeInteractionId(interactionId);
                 mother.nursingInteractionUntil = gameTime +
-                    BehaviorSecondsToGameMilliseconds(GameConfig.NursingInteractionDurationSeconds);
-                RatActivitySystem.SetCurrent(save, mother, "caring_for_pinkies",
+                    BehaviorSecondsToGameMilliseconds(durationSeconds);
+                RatActivitySystem.SetCurrent(save, mother, "nursing",
                     "Caring for pinkies", gameTime, "Caring for pinkies");
                 // Keep the pinkie's current nest activity stable while still
                 // recording the meaningful nursing event in its ID-bound
@@ -153,6 +274,27 @@ namespace RatHabitat
             double gameMillisecondsPerBehaviorSecond =
                 gameMillisecondsPerRealMillisecond * 1000d / speed;
             return Math.Max(1L, (long)Math.Round(behaviorSeconds * gameMillisecondsPerBehaviorSecond));
+        }
+
+        private static InteractionDefinition FindDefinition(string interactionId)
+        {
+            if (string.IsNullOrEmpty(interactionId)) return null;
+            for (int index = 0; index < InteractionDefinitions.Length; index++)
+            {
+                if (string.Equals(InteractionDefinitions[index].id, interactionId,
+                    StringComparison.Ordinal)) return InteractionDefinitions[index];
+            }
+            return null;
+        }
+
+        private static int StableSeed(string value)
+        {
+            unchecked
+            {
+                int hash = 17;
+                for (int index = 0; index < value.Length; index++) hash = hash * 31 + value[index];
+                return hash & 0x7fffffff;
+            }
         }
     }
 }

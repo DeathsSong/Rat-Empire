@@ -227,6 +227,12 @@ namespace RatHabitat
         // interaction and must not be confused with it.
         public string nursingPupId;
         public long nursingInteractionUntil;
+        public long nursingRetryAt;
+        // Stable ID of the presentation-only caregiving interaction currently
+        // playing. This is intentionally separate from combat and has no
+        // gameplay damage semantics. Older saves leave it empty and default
+        // to the safe sniffing interaction during migration/resume.
+        public string nursingInteractionType;
         // Authoritative life/reproduction state. These values are persisted so
         // a reload cannot silently reroll a rat's lifespan or fertile window.
         public float expectedLifespanDays;
