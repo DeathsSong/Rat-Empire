@@ -13,12 +13,8 @@ namespace RatHabitat
     {
         private readonly Dictionary<string, GameObject> ratRoots = new Dictionary<string, GameObject>();
         private readonly Dictionary<string, RatVisualController> visualControllers = new Dictionary<string, RatVisualController>();
-        private readonly Dictionary<string, GameObject> selectionRings = new Dictionary<string, GameObject>();
-        private readonly Dictionary<string, RatStage> ringStages = new Dictionary<string, RatStage>();
         private readonly Dictionary<string, RatHabitatBehavior> behaviors = new Dictionary<string, RatHabitatBehavior>();
         private readonly Dictionary<string, RatData> liveRats = new Dictionary<string, RatData>();
-        private readonly HashSet<string> selectedIds = new HashSet<string>();
-        private string selectedId;
         private RatVisualFactory visualFactory;
         private HabitatBuilder habitat;
 
@@ -110,13 +106,7 @@ namespace RatHabitat
                     }
                     root.name = rat.name + " Rat";
                     ConfigureRatCollider(root, rat.stage);
-                    RatStage ringStage;
-                    if (selectionRings.ContainsKey(rat.id) && (!ringStages.TryGetValue(rat.id, out ringStage) || ringStage != rat.stage))
-                    {
-                        UpdateSelectionRing(selectionRings[rat.id], rat.stage);
-                        ringStages[rat.id] = rat.stage;
-                    }
-                    PositionSelectionRing(selectionRings[rat.id], rat);
+                    RemoveLegacySelectionMarker(root);
                 }
 
                 controller.Configure(EnsureVisualFactory());
@@ -136,7 +126,6 @@ namespace RatHabitat
             }
 
             RemoveMissingRats(liveIds);
-            RefreshSelectionRings();
         }
 
         private void LateUpdate()
@@ -161,9 +150,6 @@ namespace RatHabitat
                     // bounds/grounding work so the live model grows smoothly
                     // and its selection surface follows the same scale.
                     controller.ApplyAgeScale(rat);
-                    GameObject ring;
-                    if (selectionRings.TryGetValue(item.Key, out ring))
-                        PositionSelectionRing(ring, rat);
                 }
 
                 Bounds bounds;
@@ -184,32 +170,15 @@ namespace RatHabitat
 
         public void SetSelected(string id)
         {
-            selectedId = id;
-            selectedIds.Clear();
-            if (!string.IsNullOrEmpty(id)) selectedIds.Add(id);
-            RefreshSelectionRings();
+            // Selection is intentionally data-only. Keep this compatibility
+            // entry point because GameBootstrap uses it to synchronize the
+            // selected rat, but never create or show a world marker.
         }
 
         public void SetSelectedGroup(IEnumerable<string> ids)
         {
-            selectedId = null;
-            selectedIds.Clear();
-            if (ids != null)
-            {
-                foreach (var id in ids)
-                {
-                    if (!string.IsNullOrEmpty(id)) selectedIds.Add(id);
-                }
-            }
-            RefreshSelectionRings();
-        }
-
-        private void RefreshSelectionRings()
-        {
-            foreach (var item in selectionRings)
-            {
-                if (item.Value != null) item.Value.SetActive(selectedIds.Contains(item.Key));
-            }
+            // Multi-select uses the UI list/checkmarks and stable IDs. It does
+            // not add a persistent visual effect to the habitat rats.
         }
 
         public RatVisualFactory GetVisualFactory()
@@ -272,19 +241,9 @@ namespace RatHabitat
 
             controller = root.AddComponent<RatVisualController>();
             controller.Configure(EnsureVisualFactory());
-            // Keep one adult-sized ring mesh and scale it uniformly with the
-            // actual age curve. Rebuilding a stage-sized mesh would make the
-            // ring jump when a rat crosses the seven-day boundary.
-            var ring = CreateSelectionRing(root.transform,
-                SelectionRingOuterRadius(RatStage.Adult),
-                SelectionRingInnerRadius(RatStage.Adult));
-            ring.SetActive(false);
-            PositionSelectionRing(ring, rat);
 
             ratRoots[rat.id] = root;
             visualControllers[rat.id] = controller;
-            selectionRings[rat.id] = ring;
-            ringStages[rat.id] = rat.stage;
         }
 
         private void EnsureBehaviorForStage(GameObject root, RatData rat)
@@ -395,6 +354,19 @@ namespace RatHabitat
             collider.enabled = true;
         }
 
+        private static void RemoveLegacySelectionMarker(GameObject root)
+        {
+            if (root == null) return;
+            Transform legacyRing = root.transform.Find("Selection Ring");
+            if (legacyRing != null)
+            {
+                // Remove markers left behind by an older running assembly or
+                // scene snapshot. Selection is now data-only and must never
+                // add a persistent renderer beneath a rat.
+                UnityEngine.Object.Destroy(legacyRing.gameObject);
+            }
+        }
+
         private void RemoveMissingRats(HashSet<string> liveIds)
         {
             var removed = new List<string>();
@@ -411,8 +383,6 @@ namespace RatHabitat
                 visualControllers.Remove(id);
                 behaviors.Remove(id);
                 liveRats.Remove(id);
-                selectionRings.Remove(id);
-                ringStages.Remove(id);
             }
         }
 
@@ -426,8 +396,6 @@ namespace RatHabitat
             visualControllers.Clear();
             behaviors.Clear();
             liveRats.Clear();
-            selectionRings.Clear();
-            ringStages.Clear();
         }
 
         private static Dictionary<string, int> BuildPinkieSlotMap(List<RatData> rats)
@@ -586,108 +554,6 @@ namespace RatHabitat
                 hash &= 0x7fffffff;
                 return (hash % 100000) / 99999f;
             }
-        }
-
-        private static GameObject CreateSelectionRing(Transform parent, float outerRadius, float innerRadius)
-        {
-            var ring = new GameObject("Selection Ring");
-            ring.transform.SetParent(parent, false);
-            ring.transform.localPosition = Vector3.zero;
-            var filter = ring.AddComponent<MeshFilter>();
-            filter.sharedMesh = CreateRingMesh(outerRadius, innerRadius, 0.018f);
-            var renderer = ring.AddComponent<MeshRenderer>();
-            // Keep the selected surface readable while allowing the habitat
-            // floor and shadows to show through it.
-            MaterialFactory.ApplyTransparent(renderer, new Color(1f, 0.78f, 0.16f), 0.52f);
-            return ring;
-        }
-
-        private static void PositionSelectionRing(GameObject ring, RatData rat)
-        {
-            if (ring == null || rat == null) return;
-
-            // The stable rat root is deliberately higher in the Pairing
-            // Habitat. Match the ring to the same visual ground plane without
-            // changing the rat root, movement, or selection colliders.
-            float visualOffset = rat.stage == RatStage.Pinkie
-                ? GameConfig.PinkieVisualVerticalOffset
-                : rat.enclosure == RatEnclosure.Pairing
-                    ? GameConfig.PairingAdultVisualVerticalOffset
-                    : 0f;
-            ring.transform.localPosition = new Vector3(0f, visualOffset + 0.01f, 0f);
-            float ringScale = GrowthSystem.VisualScaleForAge(rat) /
-                Mathf.Max(0.0001f, GameConfig.AdultVisualScale);
-            ring.transform.localScale = Vector3.one * Mathf.Max(0.01f, ringScale);
-        }
-
-        private static void UpdateSelectionRing(GameObject ring, RatStage stage)
-        {
-            if (ring == null) return;
-            var filter = ring.GetComponent<MeshFilter>();
-            if (filter == null) return;
-            Mesh oldMesh = filter.sharedMesh;
-            filter.sharedMesh = CreateRingMesh(
-                SelectionRingOuterRadius(RatStage.Adult),
-                SelectionRingInnerRadius(RatStage.Adult),
-                0.055f);
-            if (oldMesh != null) UnityEngine.Object.Destroy(oldMesh);
-        }
-
-        private static float SelectionRingOuterRadius(RatStage stage)
-        {
-            if (stage == RatStage.Pinkie) return 0.7f;
-            float importedStageRatio = stage == RatStage.YoungRat
-                ? GameConfig.YoungVisualScale / Mathf.Max(0.0001f, GameConfig.AdultVisualScale)
-                : 1f;
-            return 1.45f * importedStageRatio;
-        }
-
-        private static float SelectionRingInnerRadius(RatStage stage)
-        {
-            if (stage == RatStage.Pinkie) return 0.5f;
-            float importedStageRatio = stage == RatStage.YoungRat
-                ? GameConfig.YoungVisualScale / Mathf.Max(0.0001f, GameConfig.AdultVisualScale)
-                : 1f;
-            return 1.05f * importedStageRatio;
-        }
-
-        private static Mesh CreateRingMesh(float outerRadius, float innerRadius, float height)
-        {
-            const int segments = 32;
-            var vertices = new Vector3[segments * 4];
-            var triangles = new int[segments * 24];
-            for (int i = 0; i < segments; i++)
-            {
-                int next = (i + 1) % segments;
-                float angle = i * Mathf.PI * 2f / segments;
-                int index = i * 4;
-                vertices[index] = new Vector3(Mathf.Cos(angle) * outerRadius, 0f, Mathf.Sin(angle) * outerRadius);
-                vertices[index + 1] = new Vector3(Mathf.Cos(angle) * innerRadius, 0f, Mathf.Sin(angle) * innerRadius);
-                vertices[index + 2] = new Vector3(Mathf.Cos(angle) * outerRadius, height, Mathf.Sin(angle) * outerRadius);
-                vertices[index + 3] = new Vector3(Mathf.Cos(angle) * innerRadius, height, Mathf.Sin(angle) * innerRadius);
-                int nextIndex = next * 4;
-                int t = i * 24;
-                AddTriangle(triangles, t, index + 2, nextIndex + 2, nextIndex + 3);
-                AddTriangle(triangles, t + 3, index + 2, nextIndex + 3, index + 3);
-                AddTriangle(triangles, t + 6, index, nextIndex + 1, nextIndex);
-                AddTriangle(triangles, t + 9, index, index + 1, nextIndex + 1);
-                AddTriangle(triangles, t + 12, index, nextIndex, nextIndex + 2);
-                AddTriangle(triangles, t + 15, index, nextIndex + 2, index + 2);
-                AddTriangle(triangles, t + 18, index + 1, index + 3, nextIndex + 3);
-                AddTriangle(triangles, t + 21, index + 1, nextIndex + 3, nextIndex + 1);
-            }
-            var mesh = new Mesh { name = "Low Poly Selection Ring" };
-            mesh.vertices = vertices;
-            mesh.triangles = triangles;
-            mesh.RecalculateNormals();
-            return mesh;
-        }
-
-        private static void AddTriangle(int[] triangles, int index, int a, int b, int c)
-        {
-            triangles[index] = a;
-            triangles[index + 1] = b;
-            triangles[index + 2] = c;
         }
     }
 }

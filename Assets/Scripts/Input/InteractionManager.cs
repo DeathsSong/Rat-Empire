@@ -68,17 +68,6 @@ namespace RatHabitat
         private string caseLabel = "A. No pointer input received yet.";
         private int raycastHitCount;
 
-        private readonly List<HighlightRecord> highlightRecords = new List<HighlightRecord>();
-        private SelectableEntity hoveredEntity;
-
-        private struct HighlightRecord
-        {
-            public Renderer renderer;
-            public Color color;
-            public bool useBaseColor;
-            public bool useLegacyColor;
-        }
-
         private void Awake()
         {
             if (activeManager != null && activeManager != this)
@@ -94,7 +83,6 @@ namespace RatHabitat
 
         private void OnDestroy()
         {
-            ClearHighlight();
             if (activeManager == this) activeManager = null;
         }
 
@@ -157,7 +145,6 @@ namespace RatHabitat
             if (IsModalOverlayOpen())
             {
                 CancelWorldPointerState();
-                ClearHoverPreview();
                 HandleDesktopCamera();
                 return;
             }
@@ -364,8 +351,6 @@ namespace RatHabitat
                 return;
             }
 
-            if (!IsPointerOverInteractiveUi(pointerPosition, -1)) UpdateHover(pointerPosition);
-            else ClearHoverPreview();
         }
 
         private bool TryInvokePageControl(Vector2 screenPosition)
@@ -394,47 +379,6 @@ namespace RatHabitat
             if (Mathf.Abs(delta.x) < Mathf.Abs(delta.y) * HorizontalGestureDominance) return false;
             int direction = delta.x < 0f ? 1 : -1;
             return habitatSwipeHandler(direction);
-        }
-
-        private void UpdateHover(Vector2 screenPosition)
-        {
-            if (IsModalOverlayOpen())
-            {
-                ClearHoverPreview();
-                return;
-            }
-
-            Ray ray;
-            string failure;
-            if (!TryCreatePointerRay(screenPosition, out ray, out failure))
-            {
-                ClearHoverPreview();
-                return;
-            }
-
-            EnsureInteractablesAndColliders();
-            Physics.SyncTransforms();
-            RaycastHit[] hits = Physics.RaycastAll(ray, MaxSelectionDistance, clickableLayerMask, QueryTriggerInteraction.Ignore);
-            SelectableEntity entity;
-            Collider ignoredCollider;
-            Collider ignoredAnyCollider;
-            bool ignoredMarker;
-            if (!TryResolveNearestEntity(hits, out entity, out ignoredCollider, out ignoredAnyCollider, out ignoredMarker))
-            {
-                ClearHoverPreview();
-                return;
-            }
-
-            if (hoveredEntity == entity) return;
-            hoveredEntity = entity;
-            ApplyHighlight(entity);
-        }
-
-        private void ClearHoverPreview()
-        {
-            if (hoveredEntity == null) return;
-            hoveredEntity = null;
-            ClearHighlight();
         }
 
         private static bool IsPointerOverInteractiveUi(Vector2 screenPoint, int pointerId)
@@ -566,8 +510,6 @@ namespace RatHabitat
                     bool callbackSucceeded = selectionHandler(nearestEntity);
                     selectionCallback = callbackSucceeded ? "SUCCESS" : "FAILURE";
                     selectedObject = nearestEntity.displayName;
-                    ApplyHighlight(nearestEntity);
-                    hoveredEntity = nearestEntity;
                     informationPanel = panelVisibilityHandler != null && panelVisibilityHandler() ? "OPEN" : "CLOSED";
                 }
                 catch (Exception exception)
@@ -583,8 +525,6 @@ namespace RatHabitat
             }
             else
             {
-                hoveredEntity = null;
-                ClearHighlight();
                 Vector3 worldPoint;
                 if (!TryGetNearestWorldPoint(hits, out worldPoint))
                 {
@@ -1008,46 +948,6 @@ namespace RatHabitat
             return found && localBounds.size.sqrMagnitude > 0.0001f;
         }
 
-        private void ApplyHighlight(SelectableEntity entity)
-        {
-            ClearHighlight();
-            if (entity == null) return;
-
-            var renderers = entity.GetComponentsInChildren<Renderer>(true);
-            foreach (var renderer in renderers)
-            {
-                if (renderer == null || renderer.material == null) continue;
-                Material material = renderer.material;
-                bool useBaseColor = material.HasProperty("_BaseColor");
-                bool useLegacyColor = material.HasProperty("_Color");
-                if (!useBaseColor && !useLegacyColor) continue;
-
-                highlightRecords.Add(new HighlightRecord
-                {
-                    renderer = renderer,
-                    color = useBaseColor ? material.GetColor("_BaseColor") : material.GetColor("_Color"),
-                    useBaseColor = useBaseColor,
-                    useLegacyColor = useLegacyColor,
-                });
-
-                Color highlight = Color.Lerp(highlightRecords[highlightRecords.Count - 1].color, Color.white, 0.55f);
-                if (useBaseColor) material.SetColor("_BaseColor", highlight);
-                if (useLegacyColor) material.SetColor("_Color", highlight);
-            }
-        }
-
-        private void ClearHighlight()
-        {
-            foreach (var record in highlightRecords)
-            {
-                if (record.renderer == null || record.renderer.material == null) continue;
-                Material material = record.renderer.material;
-                if (record.useBaseColor) material.SetColor("_BaseColor", record.color);
-                if (record.useLegacyColor) material.SetColor("_Color", record.color);
-            }
-            highlightRecords.Clear();
-        }
-
         private string BuildDiagnosticMessage()
         {
             string managerState = managerReady ? "READY" : "ERROR — " + startupError;
@@ -1089,7 +989,6 @@ namespace RatHabitat
 
             if (IsModalOverlayOpen())
             {
-                ClearHoverPreview();
                 if (Input.GetKeyDown(KeyCode.Escape) && escapeHandler != null) escapeHandler();
                 return;
             }
