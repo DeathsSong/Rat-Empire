@@ -314,7 +314,9 @@ namespace RatHabitat
         public bool BeginPairingApproach(Vector3 target, Vector3 facePoint, float speedMultiplier,
             IList<Vector3> routeWaypoints)
         {
-            if (!configured || rat == null || rat.stage != RatStage.Adult || rat.enclosure != RatEnclosure.Pairing) return false;
+            if (!configured || rat == null ||
+                (rat.stage != RatStage.Adult && rat.stage != RatStage.Mature) ||
+                rat.enclosure != RatEnclosure.Pairing) return false;
 
             pairingApproachActive = true;
             pairingApproachArrived = false;
@@ -943,7 +945,9 @@ namespace RatHabitat
         {
             if (rat == null || rat.stage == RatStage.Pinkie) return;
             if (pairingApproachActive) return;
-            float minimum = rat.stage == RatStage.Adult ? MinimumRatSpacing : MinimumRatSpacing * 0.78f;
+            bool adultSized = rat.stage == RatStage.Adult || rat.stage == RatStage.Mature ||
+                rat.stage == RatStage.Elderly;
+            float minimum = adultSized ? MinimumRatSpacing : MinimumRatSpacing * 0.78f;
             foreach (var other in activeBehaviors)
             {
                 if (other == null || other == this || other.rat == null || other.rat.stage == RatStage.Pinkie) continue;

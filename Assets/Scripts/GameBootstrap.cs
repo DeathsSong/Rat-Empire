@@ -1858,7 +1858,7 @@ namespace RatHabitat
                 return;
             }
 
-            if (rat.stage == RatStage.Adult && rat.sex == RatSex.Female &&
+            if ((rat.stage == RatStage.Adult || rat.stage == RatStage.Mature) && rat.sex == RatSex.Female &&
                 (EnclosureSystem.IsPregnant(Save, rat) || EnclosureSystem.HasDependentPinkies(Save, rat.id)))
             {
                 StatusMessage = ColonyFactory.DisplayName(rat) + " must remain in the Pairing Habitat until her pregnancy and dependent litter are complete.";
@@ -2747,9 +2747,12 @@ namespace RatHabitat
 
         public int SellValue(RatData rat)
         {
-            if (rat == null || rat.traits == null) return GameConfig.SellCreditBase;
-            float quality = (rat.traits.health + rat.traits.fertility) * 0.5f;
-            return Mathf.Max(1, Mathf.RoundToInt(GameConfig.SellCreditBase + quality * GameConfig.SellCreditTraitMultiplier));
+            return StoreSystem.CalculateSaleValue(rat);
+        }
+
+        public bool CanSellRat(RatData rat)
+        {
+            return StoreSystem.CanSellRat(rat);
         }
 
         public string SaleWarningsFor(RatData rat)
@@ -2827,6 +2830,12 @@ namespace RatHabitat
                 if (ui != null) ui.Refresh(false);
                 return;
             }
+            if (!CanSellRat(rat))
+            {
+                StatusMessage = "Elderly rats cannot be sold.";
+                if (ui != null) ui.Refresh(true);
+                return;
+            }
             sellConfirmationRatId = rat.id;
             euthanizeConfirmationRatId = null;
             StatusMessage = string.Empty;
@@ -2847,6 +2856,13 @@ namespace RatHabitat
             {
                 sellConfirmationRatId = null;
                 StatusMessage = "The selected rat changed; sale cancelled.";
+                if (ui != null) ui.Refresh(true);
+                return;
+            }
+            if (!CanSellRat(rat))
+            {
+                sellConfirmationRatId = null;
+                StatusMessage = "Elderly rats cannot be sold.";
                 if (ui != null) ui.Refresh(true);
                 return;
             }
@@ -2906,6 +2922,13 @@ namespace RatHabitat
 
         private bool RetireActiveRat(RatData rat, RatRemovalDisposition disposition, bool awardCredits)
         {
+            if (disposition == RatRemovalDisposition.Sold && !CanSellRat(rat))
+            {
+                StatusMessage = "Elderly rats cannot be sold.";
+                sellConfirmationRatId = null;
+                if (ui != null) ui.Refresh(true);
+                return false;
+            }
             if (Save == null || rat == null || !Save.rats.Remove(rat)) return false;
             int saleDollars = awardCredits ? SellValue(rat) : 0;
             BreedingSystem.CancelPregnanciesForRat(Save, rat.id, GameTime);

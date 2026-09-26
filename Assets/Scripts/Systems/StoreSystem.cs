@@ -1,4 +1,6 @@
 using System;
+using UnityEngine;
+using Random = System.Random;
 
 namespace RatHabitat
 {
@@ -174,7 +176,7 @@ namespace RatHabitat
             rat.birthTimestamp = gameTime - (long)(adultPreviewAge * GameConfig.GameDayMs);
             rat.growthTimestamp = rat.birthTimestamp;
             rat.ageDays = adultPreviewAge;
-            rat.stage = GrowthSystem.StageForAge(rat.ageDays, rat.sex);
+            rat.stage = GrowthSystem.StageForAge(rat);
             if (!string.IsNullOrEmpty(listing.coatColorVariant)) rat.coatColorVariant = listing.coatColorVariant;
             if (listing.coatTone > 0f) rat.coatTone = listing.coatTone;
             rat.phenotype = GeneticsSystem.DerivePhenotype(RatStage.Adult, rat.genotype,
@@ -191,6 +193,35 @@ namespace RatHabitat
             rat.id = ColonyFactory.NewId("store_rat");
             rat.enclosure = rat.sex == RatSex.Male ? RatEnclosure.MaleColony : RatEnclosure.FemaleColony;
             return rat;
+        }
+
+        /// <summary>
+        /// Returns whether an active rat may be sold. This is intentionally
+        /// based on age and the persisted individual breeding cutoff rather
+        /// than on a possibly stale UI stage or low genetic fertility.
+        /// </summary>
+        public static bool CanSellRat(RatData rat)
+        {
+            return rat != null && !GrowthSystem.IsElderly(rat);
+        }
+
+        /// <summary>
+        /// Preserves the established health/fertility sale formula, then
+        /// applies the breeding system's same smooth age-effectiveness factor
+        /// once decline begins. Elderly rats intentionally have no price.
+        /// </summary>
+        public static int CalculateSaleValue(RatData rat)
+        {
+            if (rat == null) return GameConfig.SellCreditBase;
+            if (!CanSellRat(rat)) return 0;
+
+            TraitData traits = rat.traits;
+            if (traits == null) return GameConfig.SellCreditBase;
+            float quality = (traits.health + traits.fertility) * 0.5f;
+            float baseValue = GameConfig.SellCreditBase + quality * GameConfig.SellCreditTraitMultiplier;
+            float ageMultiplier = Mathf.Lerp(GameConfig.MatureSaleValueMinimumMultiplier, 1f,
+                BreedingSystem.AgeBreedingEffectiveness(rat));
+            return Mathf.Max(1, Mathf.RoundToInt(baseValue * ageMultiplier));
         }
 
         private static void CreateInventory(ColonySaveData save, int seed, int cycle)

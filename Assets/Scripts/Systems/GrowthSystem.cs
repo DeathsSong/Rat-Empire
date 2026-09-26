@@ -190,6 +190,8 @@ namespace RatHabitat
             if (rat.sex == RatSex.Female && !string.IsNullOrEmpty(rat.pregnancyId))
                 rat.reproductiveState = ReproductiveState.Pregnant;
             else if (rat.nursing) rat.reproductiveState = ReproductiveState.Nursing;
+            else if (rat.ageDays >= rat.breedingEndAgeDays)
+                rat.reproductiveState = ReproductiveState.Infertile;
             else if (rat.stage == RatStage.Pinkie || rat.stage == RatStage.YoungRat ||
                 rat.ageDays < rat.sexualMaturityDays)
                 rat.reproductiveState = ReproductiveState.Immature;
@@ -229,7 +231,7 @@ namespace RatHabitat
                     continue;
                 }
 
-                rat.stage = StageForAge(rat.ageDays, rat.sex);
+                rat.stage = StageForAge(rat);
                 GeneticsSystem.EnsureCoatAppearance(rat);
                 rat.phenotype = GeneticsSystem.DerivePhenotype(rat.stage, rat.genotype,
                     rat.coatColorVariant, rat.coatTone);
@@ -283,8 +285,37 @@ namespace RatHabitat
             if (ageDays < GameConfig.PinkieStageDays) return RatStage.Pinkie;
             float maturity = sex == RatSex.Female ? GameConfig.FemaleSexualMaturityDays : GameConfig.MaleSexualMaturityDays;
             if (ageDays < maturity) return RatStage.YoungRat;
-            if (ageDays < GameConfig.SeniorStartDays) return RatStage.Adult;
-            return RatStage.Senior;
+            if (ageDays < GameConfig.MatureStartDays) return RatStage.Adult;
+            return RatStage.Mature;
+        }
+
+        /// <summary>
+        /// Calculates the complete life stage for a persisted rat. The
+        /// Elderly transition is individualized, so callers that have a rat
+        /// record must use this overload instead of the age/sex-only helper.
+        /// </summary>
+        public static RatStage StageForAge(float ageDays, RatSex sex, float breedingEndAgeDays)
+        {
+            if (ageDays < GameConfig.PinkieStageDays) return RatStage.Pinkie;
+            float maturity = sex == RatSex.Female ? GameConfig.FemaleSexualMaturityDays : GameConfig.MaleSexualMaturityDays;
+            if (ageDays < maturity) return RatStage.YoungRat;
+            if (ageDays < GameConfig.MatureStartDays) return RatStage.Adult;
+            if (breedingEndAgeDays > 0f && ageDays >= breedingEndAgeDays) return RatStage.Elderly;
+            return RatStage.Mature;
+        }
+
+        public static RatStage StageForAge(RatData rat)
+        {
+            if (rat == null) return RatStage.Adult;
+            EnsureBiologyDefaults(rat);
+            return StageForAge(rat.ageDays, rat.sex, rat.breedingEndAgeDays);
+        }
+
+        public static bool IsElderly(RatData rat)
+        {
+            if (rat == null) return false;
+            EnsureBiologyDefaults(rat);
+            return rat.ageDays >= rat.breedingEndAgeDays;
         }
 
         public static float MinimumAgeForStage(RatStage stage)
@@ -298,7 +329,8 @@ namespace RatHabitat
             {
                 case RatStage.YoungRat: return GameConfig.PinkieStageDays;
                 case RatStage.Adult: return sex == RatSex.Female ? GameConfig.FemaleSexualMaturityDays : GameConfig.MaleSexualMaturityDays;
-                case RatStage.Senior: return GameConfig.SeniorStartDays;
+                case RatStage.Mature: return GameConfig.MatureStartDays;
+                case RatStage.Elderly: return GameConfig.MatureStartDays;
                 default: return 0f;
             }
         }
@@ -371,7 +403,8 @@ namespace RatHabitat
 
         public static bool AdvanceRatToNextStage(RatData rat, long gameTime)
         {
-            if (rat == null || rat.stage == RatStage.Adult || rat.stage == RatStage.Senior) return false;
+            if (rat == null || rat.stage == RatStage.Adult || rat.stage == RatStage.Mature ||
+                rat.stage == RatStage.Elderly) return false;
             RatStage next = rat.stage == RatStage.Pinkie ? RatStage.YoungRat : RatStage.Adult;
             EnsureBiologyDefaults(rat);
             rat.developerGrowthOverride = true;
@@ -423,7 +456,8 @@ namespace RatHabitat
             {
                 case RatStage.Pinkie: return "Pinkie";
                 case RatStage.YoungRat: return "Young Rat";
-                case RatStage.Senior: return "Senior";
+                case RatStage.Mature: return "Mature";
+                case RatStage.Elderly: return "Elderly";
                 default: return "Adult";
             }
         }

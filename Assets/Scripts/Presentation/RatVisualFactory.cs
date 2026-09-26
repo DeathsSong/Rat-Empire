@@ -203,6 +203,10 @@ namespace RatHabitat
                         material.SetFloat("_SpotSeed", SpotSeed01(string.IsNullOrEmpty(rat.id) ? rat.name : rat.id));
                         material.SetColor("_SpotColor", Color.white);
                         material.SetFloat("_SpotStrength", spotted ? 1f : 0f);
+                        if (material.HasProperty("_AccentColor"))
+                            material.SetColor("_AccentColor", ParseColor(rat.phenotype.accentHex, coat));
+                        if (material.HasProperty("_MarkingFamily"))
+                            material.SetFloat("_MarkingFamily", MarkingFamilyStyle(rat.markingFamily));
                         if (material.HasProperty("_PinkEyeMode"))
                         {
                             string variant = rat.coatColorVariant ?? string.Empty;
@@ -225,6 +229,8 @@ namespace RatHabitat
             string auditSignature = (string.IsNullOrEmpty(rat.id) ? rat.name : rat.id) + "|" +
                 GenotypeSummary(rat.genotype) + "|" + rat.phenotype.coatColorId + "|" +
                 rat.phenotype.coatColorHex + "|" + rat.phenotype.accentHex + "|" + spotted + "|" + materialAudit;
+            auditSignature += "|markingFamily=" + (rat.markingFamily ?? string.Empty) +
+                "|markingLabel=" + (rat.phenotype.markingsLabel ?? string.Empty);
             if (auditSignature != lastPhenotypeAuditSignature)
             {
                 lastPhenotypeAuditSignature = auditSignature;
@@ -236,6 +242,43 @@ namespace RatHabitat
                     " spotted=" + rat.phenotype.spotted +
                     " selectedTexture=" + (coatTexture == null ? "<null>" : coatTexture.name) +
                     " selectedMaterial=" + materialAudit);
+            }
+        }
+
+        /// <summary>
+        /// Gives the shader a stable, inspectable family code without storing
+        /// another genetic value on RatData. The organic UV mask remains the
+        /// actual marking shape; this code lets the shader tune edge softness
+        /// consistently for the named family in every presentation context.
+        /// </summary>
+        private static float MarkingFamilyStyle(string family)
+        {
+            string normalized = GeneticsSystem.NormalizeMarkingFamily(family, null);
+            switch (normalized)
+            {
+                case "Hooded": return 1f;
+                case "Broken hooded": return 2f;
+                case "Berkshire": return 3f;
+                case "Bareback": return 4f;
+                case "Capped": return 5f;
+                case "Mask": return 6f;
+                case "Patch": return 7f;
+                case "Black-eye white": return 8f;
+                case "Variegated": return 9f;
+                case "Variberk": return 10f;
+                case "Irish": return 11f;
+                case "Blaze": return 12f;
+                case "Lightning blaze Siamese": return 13f;
+                case "Badger blaze Siamese": return 14f;
+                case "Dalmatian-style": return 15f;
+                case "Dominant white spotted": return 16f;
+                case "White side": return 17f;
+                case "Merle": return 18f;
+                case "Tabby/Marble": return 19f;
+                case "Mismarked hooded": return 20f;
+                case "Self":
+                case "Solid":
+                default: return 0f;
             }
         }
 

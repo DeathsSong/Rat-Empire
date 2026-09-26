@@ -1,8 +1,10 @@
 #if UNITY_EDITOR
+using System;
 using System.Collections.Generic;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEngine;
+using Object = UnityEngine.Object;
 
 namespace RatHabitat.Tests
 {
@@ -75,6 +77,71 @@ namespace RatHabitat.Tests
             Assert.AreEqual(RatEnclosure.Pairing, male.enclosure);
             Assert.IsTrue(female.pairingHabitatAssigned);
             Assert.IsTrue(male.pairingHabitatAssigned);
+        }
+
+        [Test]
+        public void MatureAndElderlyStagesFollowAgeDeclineAndIndividualCutoff()
+        {
+            RatData rat = CreateAgeBoundaryRat(364f, 700f, 60f);
+
+            Assert.AreEqual(RatStage.Adult, GrowthSystem.StageForAge(rat));
+            Assert.IsTrue(StoreSystem.CanSellRat(rat));
+            int normalValue = StoreSystem.CalculateSaleValue(rat);
+
+            rat.ageDays = 365f;
+            Assert.AreEqual(RatStage.Mature, GrowthSystem.StageForAge(rat));
+            Assert.IsTrue(StoreSystem.CanSellRat(rat));
+            Assert.AreEqual(normalValue, StoreSystem.CalculateSaleValue(rat),
+                "The price is unchanged at the exact decline boundary and begins decreasing after it.");
+
+            rat.ageDays = 532f;
+            Assert.AreEqual(RatStage.Mature, GrowthSystem.StageForAge(rat));
+            Assert.Less(BreedingSystem.AgeBreedingEffectiveness(rat), 1f);
+            Assert.Less(StoreSystem.CalculateSaleValue(rat), normalValue);
+
+            rat.ageDays = 699f;
+            Assert.AreEqual(RatStage.Mature, GrowthSystem.StageForAge(rat));
+            Assert.IsTrue(StoreSystem.CanSellRat(rat));
+            Assert.Greater(BreedingSystem.AgeBreedingEffectiveness(rat), 0f);
+
+            rat.ageDays = 700f;
+            Assert.AreEqual(RatStage.Elderly, GrowthSystem.StageForAge(rat));
+            Assert.IsFalse(StoreSystem.CanSellRat(rat));
+            Assert.AreEqual(0, StoreSystem.CalculateSaleValue(rat));
+
+            rat.ageDays = 701f;
+            Assert.AreEqual(RatStage.Elderly, GrowthSystem.StageForAge(rat));
+            Assert.IsFalse(StoreSystem.CanSellRat(rat));
+        }
+
+        [Test]
+        public void NaturallyLowFertilityAdultIsNotElderlyOrSaleBlocked()
+        {
+            RatData rat = CreateAgeBoundaryRat(120f, 700f, 0f);
+            rat.traits.fertility = 0f;
+            rat.baseFertility = 0f;
+
+            Assert.AreEqual(RatStage.Adult, GrowthSystem.StageForAge(rat));
+            Assert.IsTrue(StoreSystem.CanSellRat(rat));
+            Assert.Greater(StoreSystem.CalculateSaleValue(rat), 0);
+        }
+
+        [Test]
+        public void MatureElderlyStageAndSaleRestrictionSurviveJsonReload()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            RatData rat = save.rats[0];
+            rat.birthTimestamp = save.clock.gameTimeMs - (long)(700f * GameConfig.GameDayMs);
+            rat.ageDays = 700f;
+            rat.breedingEndAgeDays = 700f;
+            rat.stage = RatStage.Mature;
+
+            ColonySaveData loaded = SaveSystem.FromJson(SaveSystem.ToJson(save));
+            RatData loadedRat = loaded.rats.Find(candidate => candidate.id == rat.id);
+            Assert.IsNotNull(loadedRat);
+            Assert.AreEqual(RatStage.Elderly, loadedRat.stage);
+            Assert.IsFalse(StoreSystem.CanSellRat(loadedRat));
+            Assert.AreEqual(0, StoreSystem.CalculateSaleValue(loadedRat));
         }
 
         [Test]
@@ -722,6 +789,110 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void PregnancySortUsesAuthoritativeRecordsAndDueDateOrder()
+        {
+            const long gameTime = 700000000L;
+            var save = ColonyFactory.CreateNew(gameTime);
+            save.rats.Clear();
+            save.ratIds.Clear();
+            save.pregnancies.Clear();
+
+            RatData dueSoon = CreatePregnancySortRat(save, "pregnant-soon", ReproductiveState.Pregnant, gameTime);
+            RatData dueLater = CreatePregnancySortRat(save, "pregnant-later", ReproductiveState.Pregnant, gameTime);
+            RatData fertile = CreatePregnancySortRat(save, "fertile", ReproductiveState.Fertile, gameTime);
+            RatData recovering = CreatePregnancySortRat(save, "recovering", ReproductiveState.Recovery, gameTime);
+            RatData nursing = CreatePregnancySortRat(save, "nursing", ReproductiveState.Nursing, gameTime);
+            RatData immature = CreatePregnancySortRat(save, "immature", ReproductiveState.Immature, gameTime);
+            RatData infertile = CreatePregnancySortRat(save, "infertile", ReproductiveState.Infertile, gameTime);
+
+            fertile.reproductiveState = ReproductiveState.Pregnant;
+            fertile.pregnancyId = "stale-pregnancy-id";
+            fertile.ageDays = fertile.sexualMaturityDays;
+            // The stale state/ID must not make a rat sort as pregnant without
+            // a matching pending pregnancy record.
+
+            dueSoon.pregnancyId = "pregnancy-soon";
+            dueLater.pregnancyId = "pregnancy-later";
+            save.pregnancies.Add(new PregnancyData
+            {
+                id = dueSoon.pregnancyId,
+                motherId = dueSoon.id,
+                fatherId = "unused-father-soon",
+                startedAt = gameTime,
+                dueAt = gameTime + 2L * GameConfig.GameDayMs,
+                status = "pending",
+            });
+            save.pregnancies.Add(new PregnancyData
+            {
+                id = dueLater.pregnancyId,
+                motherId = dueLater.id,
+                fatherId = "unused-father-later",
+                startedAt = gameTime,
+                dueAt = gameTime + 5L * GameConfig.GameDayMs,
+                status = "pending",
+            });
+            RatData nursingPup = ColonyFactory.CreateRat(
+                "nursing-pup", "Nursing Pup", RatSex.Male,
+                gameTime, 0,
+                GeneticsSystem.CreateFounder("B", "b", "C", "C", "D", "D", "s", "s"),
+                new TraitData(2f, 2f, 2f), RatStage.Pinkie);
+            nursingPup.motherId = nursing.id;
+            save.rats.Add(nursingPup);
+            save.ratIds.Add(nursingPup.id);
+
+            Assert.AreEqual(ReproductiveState.Pregnant,
+                BreedingSystem.GetReproductiveStatus(save, dueSoon, gameTime).state);
+            Assert.AreEqual(ReproductiveState.Fertile,
+                BreedingSystem.GetReproductiveStatus(save, fertile, gameTime).state,
+                "A stale saved label/ID without a matching record is not pregnancy data.");
+
+            var ascending = new List<RatData>
+            {
+                fertile, infertile, nursing, dueLater, immature, recovering, dueSoon,
+            };
+            ascending.Sort((first, second) => BreedingSystem.ComparePregnancySort(
+                save, first, second, gameTime, true));
+            Assert.AreEqual(dueSoon.id, ascending[0].id);
+            Assert.AreEqual(dueLater.id, ascending[1].id);
+            Assert.Less(
+                Array.IndexOf(ascending.ToArray(), nursing),
+                Array.IndexOf(ascending.ToArray(), recovering));
+            Assert.Less(
+                Array.IndexOf(ascending.ToArray(), recovering),
+                Array.IndexOf(ascending.ToArray(), fertile));
+            Assert.Less(
+                Array.IndexOf(ascending.ToArray(), fertile),
+                Array.IndexOf(ascending.ToArray(), immature));
+            Assert.Less(
+                Array.IndexOf(ascending.ToArray(), immature),
+                Array.IndexOf(ascending.ToArray(), infertile));
+
+            var descending = new List<RatData>
+            {
+                fertile, infertile, nursing, dueLater, immature, recovering, dueSoon,
+            };
+            descending.Sort((first, second) => BreedingSystem.ComparePregnancySort(
+                save, first, second, gameTime, false));
+            Assert.AreEqual(infertile.id, descending[0].id);
+            Assert.AreEqual(dueLater.id, descending[5].id);
+            Assert.AreEqual(dueSoon.id, descending[6].id);
+            Assert.Less(
+                Array.IndexOf(descending.ToArray(), dueLater),
+                Array.IndexOf(descending.ToArray(), dueSoon));
+
+            ColonySaveData restored = SaveSystem.FromJson(SaveSystem.ToJson(save));
+            RatData restoredSoon = BreedingSystem.FindRat(restored, dueSoon.id);
+            RatData restoredLater = BreedingSystem.FindRat(restored, dueLater.id);
+            Assert.AreEqual(dueSoon.pregnancyId, restoredSoon.pregnancyId);
+            Assert.AreEqual(ReproductiveState.Pregnant,
+                BreedingSystem.GetReproductiveStatus(restored, restoredSoon, gameTime).state);
+            Assert.Less(
+                BreedingSystem.ComparePregnancySort(restored, restoredSoon, restoredLater, gameTime, true),
+                0,
+                "Sooner due dates must remain ahead after save/load.");
+        }
+
+        [Test]
         public void GeneratedRatNamesUseFriendlyPoolsAndMigrateNumericSuffixes()
         {
             string maleName = ColonyFactory.GeneratedName("same-rat-id", RatSex.Male);
@@ -797,6 +968,38 @@ namespace RatHabitat.Tests
                 save.ratIds.Add(rat.id);
             }
             return save;
+        }
+
+        private static RatData CreatePregnancySortRat(
+            ColonySaveData save,
+            string id,
+            ReproductiveState state,
+            long gameTime)
+        {
+            var genotype = GeneticsSystem.CreateFounder("B", "b", "C", "C", "D", "D", "s", "s");
+            RatData rat = ColonyFactory.CreateRat(
+                id,
+                id,
+                RatSex.Female,
+                gameTime - (100L * GameConfig.GameDayMs),
+                0,
+                genotype,
+                new TraitData(10f, 10f, 10f),
+                RatStage.Adult);
+            rat.enclosure = RatEnclosure.FemaleColony;
+            rat.ageDays = 100f;
+            rat.sexualMaturityDays = 70f;
+            rat.breedingEndAgeDays = 700f;
+            rat.estrousCycleAnchorGameTime = gameTime;
+            rat.reproductiveState = state;
+            rat.nursing = state == ReproductiveState.Nursing;
+            rat.nursingUntil = gameTime + GameConfig.GameDayMs;
+            rat.recoveryUntil = gameTime + GameConfig.GameDayMs;
+            if (state == ReproductiveState.Immature) rat.ageDays = 10f;
+            if (state == ReproductiveState.Infertile) rat.ageDays = rat.breedingEndAgeDays;
+            save.rats.Add(rat);
+            save.ratIds.Add(rat.id);
+            return rat;
         }
 
         [Test]
@@ -961,6 +1164,137 @@ namespace RatHabitat.Tests
                 Object.DestroyImmediate(visualParent.gameObject);
                 Object.DestroyImmediate(factoryHost);
             }
+        }
+
+        [Test]
+        public void DeveloperPhenotypeVisualSetCoversEveryCoatVariantAndMarkingFamily()
+        {
+            var factoryHost = new GameObject("Developer Phenotype Coverage Factory");
+            var visualParent = new GameObject("Developer Phenotype Coverage Parent").transform;
+            var factory = factoryHost.AddComponent<RatVisualFactory>();
+            factory.handPaintedRatPrefab = AssetDatabase.LoadAssetAtPath<GameObject>("Assets/Prefabs/HandPaintedRat/HandPaintedRat.prefab");
+            Assert.IsNotNull(factory.handPaintedRatPrefab);
+
+            string[] coatVariants =
+            {
+                "black", "agouti", "mink", "russian blue", "blue agouti", "beige",
+                "champagne", "fawn", "silver fawn", "cinnamon", "russian cinnamon",
+                "american blue", "black marten", "tonkinese", "burmese", "roan",
+                "agouti marten", "aussie mink", "coffee", "chocolate", "blue marten",
+                "pink-eye platinum", "russian dove", "pink-eye white", "albino"
+            };
+            string[] markingFamilies = GeneticsSystem.MarkingFamilies;
+            GenotypeData ordinaryGenotype = GeneticsSystem.CreateFounder(
+                "B", "B", "C", "C", "D", "D", "S", "S");
+            var renderedCoatColors = new HashSet<string>();
+
+            try
+            {
+                for (int index = 0; index < coatVariants.Length; index++)
+                {
+                    string variant = coatVariants[index];
+                    GenotypeData genotype = variant == "albino"
+                        ? GeneticsSystem.CreateFounder("B", "B", "c", "c", "D", "D", "S", "S")
+                        : ordinaryGenotype.Clone();
+                    RatData rat = ColonyFactory.CreateRat(
+                        "visual-coat-" + index, "Visual Coat " + index, RatSex.Female, 0L, 0,
+                        genotype, new TraitData(50f, 50f, 50f), RatStage.Adult);
+                    rat.coatColorVariant = variant;
+                    rat.coatTone = 1f;
+                    rat.phenotype = GeneticsSystem.DerivePhenotype(
+                        RatStage.Adult, rat.genotype, rat.coatColorVariant, rat.coatTone);
+                    rat.markingFamily = "Self";
+                    GeneticsSystem.ApplyMarkingFamily(rat.phenotype, rat.markingFamily);
+
+                    GameObject visual = factory.CreateStageVisual(visualParent, rat);
+                    try
+                    {
+                        var renderer = visual == null ? null : visual.GetComponentInChildren<SkinnedMeshRenderer>(true);
+                        Assert.IsNotNull(renderer, variant + " imported renderer");
+                        Material material = renderer.sharedMaterials[0];
+                        Assert.AreEqual("Rat Habitat/Hand Painted Rat Coat", material.shader.name,
+                            variant + " must use the shared phenotype shader");
+                        Assert.IsTrue(material.HasProperty("_AccentColor"), variant + " accent color property");
+                        Assert.IsTrue(material.HasProperty("_MarkingFamily"), variant + " marking-family property");
+                        renderedCoatColors.Add(ColorUtility.ToHtmlStringRGB(material.GetColor("_Color")));
+                        Assert.IsFalse(string.IsNullOrEmpty(rat.phenotype.coatColorLabel), variant + " label");
+                        Assert.AreNotEqual("Unknown", rat.phenotype.coatColorLabel, variant + " resolved label");
+                        Assert.AreEqual(0f, material.GetFloat("_SpotStrength"), 0.001f,
+                            variant + " self coat should not receive a white marking overlay");
+                        if (variant == "albino")
+                            Assert.AreEqual(1f, material.GetFloat("_AlbinoMode"), 0.001f);
+                    }
+                    finally
+                    {
+                        if (visual != null) Object.DestroyImmediate(visual);
+                    }
+                }
+
+                Assert.GreaterOrEqual(renderedCoatColors.Count, 12,
+                    "The supported coat variants should resolve to visibly distinct material colors.");
+
+                for (int index = 0; index < markingFamilies.Length; index++)
+                {
+                    string family = markingFamilies[index];
+                    RatData rat = ColonyFactory.CreateRat(
+                        "visual-marking-" + index, "Visual Marking " + index, RatSex.Male, 0L, 0,
+                        ordinaryGenotype.Clone(), new TraitData(50f, 50f, 50f), RatStage.Adult);
+                    rat.coatColorVariant = "black";
+                    rat.coatTone = 1f;
+                    rat.phenotype = GeneticsSystem.DerivePhenotype(
+                        RatStage.Adult, rat.genotype, rat.coatColorVariant, rat.coatTone);
+                    rat.markingFamily = family;
+                    GeneticsSystem.ApplyMarkingFamily(rat.phenotype, rat.markingFamily);
+
+                    GameObject visual = factory.CreateStageVisual(visualParent, rat);
+                    try
+                    {
+                        var renderer = visual == null ? null : visual.GetComponentInChildren<SkinnedMeshRenderer>(true);
+                        Assert.IsNotNull(renderer, family + " imported renderer");
+                        Material material = renderer.sharedMaterials[0];
+                        Assert.AreEqual("Rat Habitat/Hand Painted Rat Coat", material.shader.name,
+                            family + " must use the shared phenotype shader");
+                        Assert.IsTrue(material.GetFloat("_MarkingFamily") >= 0f,
+                            family + " must receive a deterministic family code");
+                        Assert.AreEqual(family == "Solid" || family == "Self" ? 0f : 1f,
+                            material.GetFloat("_SpotStrength"), 0.001f,
+                            family + " marking strength must match the recorded family");
+                        Assert.AreEqual(GeneticsSystem.NormalizeMarkingFamily(family, rat.genotype),
+                            rat.phenotype.markingFamily, family + " recorded family");
+                    }
+                    finally
+                    {
+                        if (visual != null) Object.DestroyImmediate(visual);
+                    }
+                }
+            }
+            finally
+            {
+                Object.DestroyImmediate(visualParent.gameObject);
+                Object.DestroyImmediate(factoryHost);
+            }
+        }
+
+        private static RatData CreateAgeBoundaryRat(float ageDays, float breedingEndAgeDays, float fertility)
+        {
+            RatData rat = ColonyFactory.CreateRat(
+                "age-boundary-" + ageDays.ToString("0"),
+                "Boundary",
+                RatSex.Female,
+                1000000L,
+                0,
+                GeneticsSystem.CreateFounder("B", "b", "C", "C", "D", "D", "s", "s"),
+                new TraitData(50f, 50f, fertility),
+                RatStage.Adult);
+            rat.ageDays = ageDays;
+            rat.breedingEndAgeDays = breedingEndAgeDays;
+            rat.sexualMaturityDays = GameConfig.FemaleSexualMaturityDays;
+            rat.baseHealth = 50f;
+            rat.baseFertility = fertility;
+            rat.baseHealthInitialized = true;
+            rat.baseFertilityInitialized = true;
+            rat.stage = GrowthSystem.StageForAge(ageDays, rat.sex, breedingEndAgeDays);
+            return rat;
         }
 
         private static void AssertDeveloperCoat(

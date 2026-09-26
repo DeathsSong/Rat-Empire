@@ -14,7 +14,10 @@ namespace RatHabitat
         public const float WeaningDays = 21f;
         public const float MaleSexualMaturityDays = 56f;
         public const float FemaleSexualMaturityDays = 70f;
-        public const float SeniorStartDays = 365f;
+        public const float MatureStartDays = 365f;
+        // Kept as a source-compatibility alias for older callers. New code
+        // should use MatureStartDays and the individualized breeding cutoff.
+        public const float SeniorStartDays = MatureStartDays;
         public const float MinimumLifespanDays = 540f;
         public const float MaximumLifespanDays = 1080f;
         // Breeding-end ages were previously randomized from 270-365 days.
@@ -23,11 +26,17 @@ namespace RatHabitat
         public const float BreedingEndAgeMigrationDays = 365f;
         public const float MinimumBreedingEndDays = 635f;
         public const float MaximumBreedingEndDays = 730f;
+        // Age-related sale value declines use the same smooth effectiveness
+        // factor as breeding. Elderly rats cannot be sold, so this floor only
+        // applies to still-sellable Mature rats approaching their cutoff.
+        public const float MatureSaleValueMinimumMultiplier = 0.35f;
         public const float EstrousCycleDays = 4.5f;
         public const float EstrousFertileWindowDays = 1f;
         public const float RecoveryDays = 60f;
         public const float HealthDeclineStartDays = 365f;
-        public const float FertilityDeclineStartDays = 270f;
+        // Keep raw fertility decline aligned with the reproductive decline
+        // boundary. A naturally low fertility trait is not an age stage.
+        public const float FertilityDeclineStartDays = BreedingAgeDeclineStartDays;
         public const float HealthDeclinePerDay = 0.035f;
         public const float FertilityDeclinePerDay = 0.06f;
         public const long BreedingCooldownMs = 30L * 1000L;

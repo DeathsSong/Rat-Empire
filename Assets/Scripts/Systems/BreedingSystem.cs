@@ -67,6 +67,34 @@ namespace RatHabitat
             return null;
         }
 
+        /// <summary>
+        /// Returns the active pregnancy that belongs to this female. The
+        /// persisted pregnancyId is preferred and must point at a pending
+        /// record for the same mother. The motherId fallback keeps older saves
+        /// loadable when they predate pregnancyId being written; the save
+        /// migration/refresh path repairs that missing link immediately.
+        /// </summary>
+        public static PregnancyData FindActivePregnancyForMother(ColonySaveData save, RatData rat)
+        {
+            if (save == null || rat == null || rat.sex != RatSex.Female) return null;
+            save.EnsureLists();
+
+            if (!string.IsNullOrEmpty(rat.pregnancyId))
+            {
+                foreach (var pregnancy in save.pregnancies)
+                {
+                    if (pregnancy != null && pregnancy.status == "pending" &&
+                        pregnancy.id == rat.pregnancyId && pregnancy.motherId == rat.id)
+                        return pregnancy;
+                }
+            }
+
+            // Legacy saves can contain the correct pending mother record but
+            // no active ID on the RatData object yet. This remains record-based
+            // rather than trusting a stale ReproductiveState/display label.
+            return FindPendingPregnancyForMother(save, rat.id);
+        }
+
         public static PregnancyData FindPregnancyForLitter(ColonySaveData save, string litterId)
         {
             if (save == null || string.IsNullOrEmpty(litterId)) return null;
@@ -173,13 +201,11 @@ namespace RatHabitat
                 return Unavailable(ReproductiveState.Fertile, label, "Occupied by a dedicated breeding session.", session.endsAt);
             }
 
-            PregnancyData pregnancy = FindPendingPregnancyForMother(save, rat.id);
-            if (pregnancy != null || (rat.sex == RatSex.Female && !string.IsNullOrEmpty(rat.pregnancyId)))
+            PregnancyData pregnancy = FindActivePregnancyForMother(save, rat);
+            if (pregnancy != null)
             {
-                string label = pregnancy == null
-                    ? "Pregnant"
-                    : "Pregnant — birth in " + FormatDuration(Math.Max(0L, pregnancy.dueAt - gameTime));
-                return Unavailable(ReproductiveState.Pregnant, label, "Currently pregnant.", pregnancy == null ? 0L : pregnancy.dueAt);
+                string label = "Pregnant — birth in " + FormatDuration(Math.Max(0L, pregnancy.dueAt - gameTime));
+                return Unavailable(ReproductiveState.Pregnant, label, "Currently pregnant.", pregnancy.dueAt);
             }
 
             if (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing)
@@ -195,7 +221,7 @@ namespace RatHabitat
                 return Unavailable(ReproductiveState.Recovery, label, label + ".", rat.recoveryUntil);
             }
 
-            // Senior stage begins at one year, but senior rats can still
+            // Mature stage begins at one year, but mature rats can still
             // breed during the individualized decline period. Only the
             // persisted breeding-end age is the past-breeding cutoff.
             if (rat.ageDays >= rat.breedingEndAgeDays)
@@ -428,6 +454,65 @@ namespace RatHabitat
             return "Breeding unavailable — past breeding age";
         }
 
+        /// <summary>
+        /// Compares two My Rats entries for the Pregnancy sort. Ascending puts
+        /// active pregnancies first and orders them by soonest due date. The
+        /// remaining rats use the authoritative reproductive state order so
+        /// they remain grouped consistently instead of being classified from
+        /// a display string or stale saved label.
+        /// </summary>
+        public static int ComparePregnancySort(
+            ColonySaveData save,
+            RatData first,
+            RatData second,
+            long gameTime,
+            bool ascending)
+        {
+            bool firstPregnant = FindActivePregnancyForMother(save, first) != null;
+            bool secondPregnant = FindActivePregnancyForMother(save, second) != null;
+            int result;
+
+            if (firstPregnant != secondPregnant)
+            {
+                // Ascending means pregnant rats have priority at the top.
+                result = firstPregnant ? -1 : 1;
+            }
+            else if (firstPregnant)
+            {
+                long firstDue = PregnancyDueSortValue(FindActivePregnancyForMother(save, first));
+                long secondDue = PregnancyDueSortValue(FindActivePregnancyForMother(save, second));
+                result = firstDue.CompareTo(secondDue);
+            }
+            else
+            {
+                ReproductiveState firstState = GetReproductiveStatus(save, first, gameTime).state;
+                ReproductiveState secondState = GetReproductiveStatus(save, second, gameTime).state;
+                result = PregnancyStateSortRank(firstState).CompareTo(PregnancyStateSortRank(secondState));
+            }
+
+            if (!ascending) result = -result;
+            return result;
+        }
+
+        private static long PregnancyDueSortValue(PregnancyData pregnancy)
+        {
+            return pregnancy == null || pregnancy.dueAt <= 0L ? long.MaxValue : pregnancy.dueAt;
+        }
+
+        private static int PregnancyStateSortRank(ReproductiveState state)
+        {
+            switch (state)
+            {
+                case ReproductiveState.Pregnant: return 0;
+                case ReproductiveState.Nursing: return 1;
+                case ReproductiveState.Recovery: return 2;
+                case ReproductiveState.Fertile: return 3;
+                case ReproductiveState.Immature: return 4;
+                case ReproductiveState.Infertile: return 5;
+                default: return 6;
+            }
+        }
+
         private static string FormatDuration(long milliseconds)
         {
             long hoursTotal = Math.Max(0L, milliseconds) / (60L * 60L * 1000L);
@@ -447,7 +532,22 @@ namespace RatHabitat
                 if (ClearLegacyMalePregnancyState(save, rat)) changed = true;
                 GrowthSystem.EnsureBiologyDefaults(rat);
                 ReproductiveState oldState = rat.reproductiveState;
-                PregnancyData pending = FindPendingPregnancyForMother(save, rat.id);
+                PregnancyData pending = FindActivePregnancyForMother(save, rat);
+                if (rat.sex == RatSex.Female)
+                {
+                    if (pending != null && rat.pregnancyId != pending.id)
+                    {
+                        rat.pregnancyId = pending.id;
+                        changed = true;
+                    }
+                    else if (pending == null && !string.IsNullOrEmpty(rat.pregnancyId))
+                    {
+                        // A stale ID must not keep a female visibly pregnant
+                        // after its record was completed or removed.
+                        rat.pregnancyId = null;
+                        changed = true;
+                    }
+                }
                 if (rat.stage == RatStage.Pinkie || rat.stage == RatStage.YoungRat ||
                     rat.ageDays < rat.sexualMaturityDays)
                 {
@@ -858,7 +958,7 @@ namespace RatHabitat
             var females = new List<RatData>();
             foreach (var rat in save.rats)
             {
-                if (rat == null || (rat.stage != RatStage.Adult && rat.stage != RatStage.Senior) ||
+                if (rat == null || (rat.stage != RatStage.Adult && rat.stage != RatStage.Mature) ||
                     rat.enclosure != RatEnclosure.Pairing) continue;
 
                 string reason;

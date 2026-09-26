@@ -4,6 +4,7 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
     {
         _MainTex ("Hand-Painted Coat", 2D) = "white" {}
         _Color ("Coat Color", Color) = (1, 1, 1, 1)
+        _AccentColor ("Coat Accent", Color) = (1, 1, 1, 1)
         _SpotMask ("Body Spot UV Mask", 2D) = "black" {}
         _SpotPattern ("Organic Spot Pattern", 2D) = "black" {}
         _SpotColor ("Spot Color", Color) = (1, 1, 1, 1)
@@ -12,6 +13,7 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
         _AlbinoMode ("Albino Neutralization", Range(0, 1)) = 0
         _AlbinoBodyColor ("Albino Body Color", Color) = (0.98, 0.965, 0.92, 1)
         _PinkEyeMode ("Pink Eye Phenotype", Range(0, 1)) = 0
+        _MarkingFamily ("Marking Family", Float) = 0
     }
 
     SubShader
@@ -27,12 +29,14 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
         sampler2D _SpotMask;
         sampler2D _SpotPattern;
         fixed4 _Color;
+        fixed4 _AccentColor;
         fixed4 _SpotColor;
         float _SpotSeed;
         float _SpotStrength;
         float _AlbinoMode;
         fixed4 _AlbinoBodyColor;
         float _PinkEyeMode;
+        float _MarkingFamily;
 
         struct Input
         {
@@ -41,15 +45,42 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
 
         void surf(Input input, inout SurfaceOutputStandard output)
         {
-            fixed4 painted = tex2D(_MainTex, input.uv_MainTex) * _Color;
+            fixed4 source = tex2D(_MainTex, input.uv_MainTex);
+            float sourceLuminance = saturate(dot(source.rgb, float3(0.299, 0.587, 0.114)));
             // A very low-amplitude, UV-stable variation breaks up flat
             // plastic-looking blocks without introducing animated noise or
             // changing the saved phenotype. The per-rat seed keeps two rats
             // with the same coat family from looking like exact clones.
             float furNoise = sin(dot(input.uv_MainTex, float2(83.17, 47.31)) + _SpotSeed * 6.2831853);
             furNoise = 0.975 + 0.05 * (furNoise * 0.5 + 0.5);
-            painted.rgb *= furNoise;
-            float paintedLuminance = dot(painted.rgb, float3(0.299, 0.587, 0.114));
+            // The recorded phenotype is the color authority. Use the
+            // authored map's luminance for fur shading and retain only a
+            // restrained amount of its source hue, so a Russian blue, fawn,
+            // mink, or champagne rat cannot render as the same grey/brown
+            // texture simply because it shares a source UV map.
+            float furValue = (0.82 + sourceLuminance * 0.30) * furNoise;
+            fixed3 fur = _Color.rgb * furValue;
+            float accentWave = sin(dot(input.uv_MainTex, float2(17.13, 31.71)) + _SpotSeed * 3.17);
+            float accentAmount = saturate(0.08 + (accentWave * 0.5 + 0.5) * 0.16);
+            fur = lerp(fur, _AccentColor.rgb * (0.88 + sourceLuminance * 0.20), accentAmount);
+
+            // Keep a small amount of the hand-painted source around feature
+            // boundaries. This preserves natural ear/nose/tail shading on
+            // the single-mesh import without allowing its old coat hue to
+            // override the recorded phenotype.
+            fixed4 painted = fixed4(lerp(fur, source.rgb, 0.16), source.a);
+            // The imported rat currently carries some eyes, mouth edges,
+            // whisker roots, and tail segmentation in the same UV texture as
+            // the fur. Preserve a restrained amount of those dark source
+            // pixels for ordinary coats too; otherwise a strongly tinted
+            // phenotype can wash the features out. The later albino branch
+            // uses the same signal with a stronger, neutralized treatment.
+            float visibleFeatureSignal = 1.0 - smoothstep(0.08, 0.28, sourceLuminance);
+            painted.rgb = lerp(painted.rgb, source.rgb, visibleFeatureSignal * 0.34);
+            // Keep the source luminance as the detail signal. Using the
+            // phenotype-tinted sample here would make a dark coat turn every
+            // dark fur pixel into a false eye/mouth feature on albinos.
+            float paintedLuminance = sourceLuminance;
             // Albino remains recognizably hand-painted through luminance
             // variation, but the source beige/brown hue is removed. The
             // original map is intentionally retained: on the imported rat it
@@ -73,8 +104,8 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // Preserve pink/red accent pixels from the supplied hand-painted
             // texture (ears, nose, paws, and eye accents) without allowing
             // the source beige/tan coat to leak back into the albino body.
-            float pinkSignal = saturate((painted.r - painted.g) * 5.0) *
-                saturate(1.0 - abs(painted.g - painted.b) * 8.0);
+            float pinkSignal = saturate((source.r - source.g) * 5.0) *
+                saturate(1.0 - abs(source.g - source.b) * 8.0);
             fixed3 pinkAccent = fixed3(1.0, 0.58, 0.62) * (0.82 + saturate(painted.r) * 0.16);
             albinoPainted = lerp(albinoPainted, pinkAccent, pinkSignal * 0.78);
             painted.rgb = lerp(painted.rgb, albinoPainted, _AlbinoMode);
@@ -84,11 +115,13 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // single lookup avoids stamping identical procedural circles or
             // running random/noise work every rendered frame.
             float spots = tex2D(_SpotPattern, input.uv_MainTex).r;
+            float familyEdge = lerp(0.08, 0.16, saturate(_MarkingFamily / 20.0));
+            float softenedSpots = smoothstep(familyEdge, 1.0 - familyEdge, spots);
 
-            float whiteBlend = saturate(bodyMask * spots * _SpotStrength);
+            float whiteBlend = saturate(bodyMask * softenedSpots * _SpotStrength);
             output.Albedo = lerp(painted.rgb, _SpotColor.rgb, whiteBlend);
             output.Metallic = 0.0;
-            output.Smoothness = 0.0;
+            output.Smoothness = 0.08;
             output.Alpha = painted.a;
         }
         ENDCG

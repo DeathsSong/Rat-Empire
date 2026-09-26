@@ -2071,22 +2071,26 @@ namespace RatHabitat
             {
                 if (rat == null) continue;
                 string ratId = rat.id;
+                bool canSell = euthanize || game.CanSellRat(rat);
                 string action = euthanize
                     ? "EUTHANIZE\n$" + GameConfig.EuthanasiaCostDollars
-                    : "SELL\n$" + game.SellValue(rat);
+                    : canSell ? "SELL\n$" + game.SellValue(rat) : "SELL\nUnavailable";
                 AddStoreRatCard(listContent, rat, action,
-                    euthanize ? new Color(0.55f, 0.16f, 0.13f) : new Color(0.22f, 0.42f, 0.28f),
+                    euthanize ? new Color(0.55f, 0.16f, 0.13f) :
+                        canSell ? new Color(0.22f, 0.42f, 0.28f) : new Color(0.25f, 0.29f, 0.29f),
                     () =>
                     {
                         if (euthanize) OpenStoreForRatManagement(ratId, true);
                         else game.RequestSellRat(ratId);
                     },
-                    !euthanize && game.IsSellConfirmationFor(ratId));
+                    !euthanize && canSell && game.IsSellConfirmationFor(ratId),
+                    canSell);
             }
         }
 
         private void AddStoreRatCard(Transform parent, RatData rat, string actionLabel, Color actionColor,
-            UnityEngine.Events.UnityAction action, bool inlineSaleConfirmation = false)
+            UnityEngine.Events.UnityAction action, bool inlineSaleConfirmation = false,
+            bool actionInteractable = true)
         {
             if (parent == null || rat == null) return;
 
@@ -2141,6 +2145,11 @@ namespace RatHabitat
             AddText(info, "Coat: " + coat + "  •  " + markings, 12, new Color(1f, 0.84f, 0.52f), TextAnchor.UpperLeft);
             AddText(info, "Size " + traits.size.ToString("0") + "  •  Health " + traits.health.ToString("0") + "  •  Fertility " + traits.fertility.ToString("0"),
                 12, Color.white, TextAnchor.UpperLeft);
+            if (!actionInteractable)
+            {
+                AddText(info, "Elderly rats cannot be sold.", 11,
+                    new Color(1f, 0.63f, 0.42f), TextAnchor.UpperLeft);
+            }
 
             if (inlineSaleConfirmation)
             {
@@ -2150,7 +2159,7 @@ namespace RatHabitat
             }
             else
             {
-                var actionButton = AddButtonTo(card, actionLabel, true, action, actionColor, 58f);
+                var actionButton = AddButtonTo(card, actionLabel, actionInteractable, action, actionColor, 58f);
                 var actionLayout = actionButton.GetComponent<LayoutElement>();
                 actionLayout.minWidth = actionWidth;
                 actionLayout.preferredWidth = actionWidth;
@@ -2550,21 +2559,26 @@ namespace RatHabitat
                 new Color(0.22f, 0.34f, 0.43f), 42f);
 
             bool liveRat = !historical && BreedingSystem.FindRat(game.Save, rat.id) != null;
-            if (liveRat && game.IsSellConfirmationFor(rat.id))
+            if (liveRat && game.CanSellRat(rat) && game.IsSellConfirmationFor(rat.id))
             {
                 AddInlineProfileSaleConfirmation(more, rat);
             }
-            else if (liveRat)
+            else if (liveRat && game.CanSellRat(rat))
             {
                 AddButtonTo(more, "Sell Rat\n$" + game.SellValue(rat), true,
                     () => game.RequestSellRat(rat.id), new Color(0.17f, 0.34f, 0.37f), 46f);
+            }
+            else if (liveRat)
+            {
+                AddText(more, "Elderly rats cannot be sold.", 13,
+                    new Color(1f, 0.63f, 0.42f), TextAnchor.UpperLeft);
             }
 
             if (liveRat && rat.enclosure == RatEnclosure.Pairing)
             {
                 bool dependentLitter = rat.sex == RatSex.Female && EnclosureSystem.HasDependentPinkies(game.Save, rat.id);
                 bool pendingPregnancy = EnclosureSystem.IsPregnant(game.Save, rat);
-                bool canRemove = !(rat.stage == RatStage.Adult && rat.sex == RatSex.Female &&
+                bool canRemove = !((rat.stage == RatStage.Adult || rat.stage == RatStage.Mature) && rat.sex == RatSex.Female &&
                     (dependentLitter || pendingPregnancy));
                 AddButton(more, canRemove ? "Remove from Pairing Habitat" : "Remain in Pairing Habitat while caring for litter",
                     canRemove, () => game.RemoveRatFromPairingHabitat(rat.id));
@@ -3353,11 +3367,18 @@ namespace RatHabitat
                 case RosterSortField.Health: result = TraitValue(first, 1).CompareTo(TraitValue(second, 1)); break;
                 case RosterSortField.Fertility: result = TraitValue(first, 2).CompareTo(TraitValue(second, 2)); break;
                 case RosterSortField.Sex: result = first.sex.CompareTo(second.sex); break;
-                case RosterSortField.Pregnancy: result = PregnancySortValue(first).CompareTo(PregnancySortValue(second)); break;
+                case RosterSortField.Pregnancy:
+                    result = BreedingSystem.ComparePregnancySort(
+                        game == null ? null : game.Save,
+                        first,
+                        second,
+                        game == null ? 0L : game.GameTime,
+                        rosterSortAscending);
+                    break;
                 case RosterSortField.Generation: result = first.generation.CompareTo(second.generation); break;
                 default: result = string.Compare(first.name, second.name, StringComparison.OrdinalIgnoreCase); break;
             }
-            if (!rosterSortAscending) result = -result;
+            if (!rosterSortAscending && rosterSortField != RosterSortField.Pregnancy) result = -result;
             if (result != 0) return result;
 
             result = string.Compare(first.name, second.name, StringComparison.OrdinalIgnoreCase);
@@ -3379,14 +3400,6 @@ namespace RatHabitat
                 case 1: return rat.traits.health;
                 default: return rat.traits.fertility;
             }
-        }
-
-        private int PregnancySortValue(RatData rat)
-        {
-            if (game == null || rat == null) return 0;
-            BreedingSystem.ReproductiveStatus status = BreedingSystem.GetReproductiveStatus(
-                game.Save, rat, game.GameTime);
-            return status.state == ReproductiveState.Pregnant ? 1 : 0;
         }
 
         private void AddRatRosterRow(Transform parent, RatData rat)
@@ -3704,10 +3717,8 @@ namespace RatHabitat
 
         private PregnancyData FindPregnancyForFemale(RatData rat)
         {
-            if (game == null || game.Save == null || rat == null || rat.sex != RatSex.Female || rat.stage != RatStage.Adult) return null;
-            PregnancyData pregnancy = BreedingSystem.FindPendingPregnancy(game.Save, rat.id);
-            if (pregnancy == null || pregnancy.status != "pending" || pregnancy.motherId != rat.id) return null;
-            return pregnancy;
+            if (game == null || game.Save == null || rat == null || rat.sex != RatSex.Female) return null;
+            return BreedingSystem.FindActivePregnancyForMother(game.Save, rat);
         }
 
         private string LitterNameForRat(RatData rat)
@@ -4324,7 +4335,9 @@ namespace RatHabitat
             AddText(developerToolsCard, "Growth and pregnancy tests", 17, Color.white, TextAnchor.UpperLeft);
             if (game.SelectedRat != null)
             {
-                bool adult = game.SelectedRat.stage == RatStage.Adult;
+                bool adult = game.SelectedRat.stage == RatStage.Adult ||
+                    game.SelectedRat.stage == RatStage.Mature ||
+                    game.SelectedRat.stage == RatStage.Elderly;
                 AddButton(developerToolsCard, adult ? "Already adult" : "Grow selected rat one stage", !adult, game.GrowSelectedRat);
             }
             else

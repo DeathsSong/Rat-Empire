@@ -14,7 +14,12 @@ namespace RatHabitat
         Pinkie,
         YoungRat,
         Adult,
-        Senior
+        Mature,
+        Elderly,
+        // Compatibility alias for saves/tests written before the explicit
+        // Mature/Elderly stages existed. Stage refresh always recalculates
+        // the correct value from age and the persisted breeding cutoff.
+        Senior = Mature
     }
 
     public enum ReproductiveState
