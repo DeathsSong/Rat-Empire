@@ -353,6 +353,10 @@ namespace RatHabitat
         public string colonyName = "New Generation";
         public long createdAt;
         public long updatedAt;
+        // True only for a genuinely new/reset colony until the player
+        // dismisses the one-time welcome modal. Missing in older saves,
+        // which correctly defaults to false and never interrupts them.
+        public bool welcomePopupPending;
         public ClockData clock = new ClockData();
         public List<string> ratIds = new List<string>();
         public List<RatData> rats = new List<RatData>();

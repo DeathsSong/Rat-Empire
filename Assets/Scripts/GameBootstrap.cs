@@ -253,6 +253,7 @@ namespace RatHabitat
         public string SimulationSpeedLabel { get { return ((int)SimulationSpeed) + "×"; } }
         public string MovementDiagnostics { get { return RatHabitatBehavior.GetMovementDiagnosticReadout(); } }
         public bool ResetConfirmationPending { get { return resetConfirmationPending; } }
+        public bool WelcomePopupPending { get { return Save != null && Save.welcomePopupPending; } }
         public HabitatCameraView CameraView { get { return cameraView; } }
         public int HabitatPageCount { get { return HabitatPages.Length; } }
         public int HabitatPageIndex
@@ -540,6 +541,7 @@ namespace RatHabitat
         private void Awake()
         {
             Debug.Log("[Rat Habitat] GameBootstrap.Awake started.");
+            GrowthSystem.SetSimulationPaused(false);
             Application.targetFrameRate = 60;
             try
             {
@@ -743,6 +745,12 @@ namespace RatHabitat
                 if (Save == null)
                 {
                     yield return new WaitForSecondsRealtime(1f);
+                    continue;
+                }
+
+                if (ui != null && ui.IsWelcomeOpen)
+                {
+                    yield return new WaitForSecondsRealtime(0.1f);
                     continue;
                 }
 
@@ -1368,6 +1376,17 @@ namespace RatHabitat
             UpdateCameraPresentation();
             UpdateHabitatPageSettling();
             if (Save == null) return;
+
+            bool welcomePaused = ui != null && ui.IsWelcomeOpen;
+            GrowthSystem.SetSimulationPaused(welcomePaused);
+            if (welcomePaused)
+            {
+                // Keep the clock's real-time anchor at the current instant so
+                // dismissing the modal never causes a catch-up jump.
+                if (Save.clock != null) Save.clock.lastRealTimestamp = GameConfig.NowMs();
+                return;
+            }
+
             GrowthSystem.AdvanceClock(Save, GameConfig.NowMs());
             bool stageChanged = GrowthSystem.RefreshRatStages(Save);
             bool reproductiveStateChanged = BreedingSystem.RefreshReproductiveStates(Save, GameTime);
@@ -3071,8 +3090,17 @@ namespace RatHabitat
             if (ui != null)
             {
                 ui.CloseTransientPanels();
-                ui.Refresh(true);
+                ui.OpenWelcomeForNewGame();
             }
+        }
+
+        public void DismissWelcomePopup()
+        {
+            if (Save == null) return;
+            Save.welcomePopupPending = false;
+            if (Save.clock != null) Save.clock.lastRealTimestamp = GameConfig.NowMs();
+            GrowthSystem.SetSimulationPaused(false);
+            SaveSystem.Save(Save);
         }
 
         public void ServiceSelectedObject()

@@ -31,22 +31,30 @@ namespace RatHabitat.Editor
             public int firstFrame;
             public int lastFrame;
             public bool loop;
+            // When true, lastFrame is the final included source frame. This
+            // prevents the slicer from sampling the following transition
+            // frame as the clip's end boundary.
+            public bool inclusiveEnd;
 
-            public ClipRange(string name, int firstFrame, int lastFrame, bool loop)
+            public ClipRange(string name, int firstFrame, int lastFrame, bool loop, bool inclusiveEnd = false)
             {
                 this.name = name;
                 this.firstFrame = firstFrame;
                 this.lastFrame = lastFrame;
                 this.loop = loop;
+                this.inclusiveEnd = inclusiveEnd;
             }
         }
 
-        // Exact boundaries confirmed by the user. Frame 1 is the first source
-        // frame. Idle is intentionally not baked or added to the controller.
-        // The one-frame changes preserve each affected end frame.
+        // Frame 1 is the first source frame. Idle is intentionally not baked
+        // or added to the controller. The walk window starts at source
+        // frame 33 to remove the initial held pose. Source frame 65
+        // begins the authored transition into the next action: the tail
+        // straightens and the body briefly returns to a stiff reset pose.
+        // Keep that transition out of the looping walk clip.
         private static readonly ClipRange[] ClipRanges =
         {
-            new ClipRange("HandPaintedRat_Walk", 36, 64, true),
+            new ClipRange("HandPaintedRat_Walk", 33, 64, true, true),
             new ClipRange("HandPaintedRat_IdleReaction", 67, 96, false),
             new ClipRange("HandPaintedRat_Run", 99, 128, true),
             new ClipRange("HandPaintedRat_Sniffing", 129, 161, false),
@@ -69,7 +77,8 @@ namespace RatHabitat.Editor
             AnimationClip reaction = AssetDatabase.LoadAssetAtPath<AnimationClip>(ClipFolderPath + "/HandPaintedRat_IdleReaction.anim");
             bool rangesMatch = HasExpectedDuration(walk, ClipRanges[0]) &&
                 HasExpectedDuration(reaction, ClipRanges[1]) &&
-                HasExpectedDuration(run, ClipRanges[2]);
+                HasExpectedDuration(run, ClipRanges[2]) &&
+                HasExpectedSourceRanges();
             if (HasUsableLoopingMotion(walk) && HasUsableLoopingMotion(run) && rangesMatch)
             {
                 // Keep the runtime showcase's curve status current even when
@@ -112,9 +121,29 @@ namespace RatHabitat.Editor
         private static bool HasExpectedDuration(AnimationClip clip, ClipRange range)
         {
             if (clip == null || clip.frameRate <= 0f) return false;
-            float expectedLength = (range.lastFrame - range.firstFrame + 1) / clip.frameRate;
+            float expectedLength = GetExpectedDuration(range, clip.frameRate);
             float oneFrame = 1f / clip.frameRate;
             return Mathf.Abs(clip.length - expectedLength) <= oneFrame * 0.2f;
+        }
+
+        private static float GetExpectedDuration(ClipRange range, float frameRate)
+        {
+            if (frameRate <= 0f) frameRate = SourceFrameRateFallback;
+            if (range.inclusiveEnd)
+            {
+                return Mathf.Max(1f / frameRate, (range.lastFrame - range.firstFrame) / frameRate);
+            }
+
+            return (range.lastFrame - range.firstFrame + 1) / frameRate;
+        }
+
+        private static float GetEndTime(ClipRange range, float frameRate)
+        {
+            if (frameRate <= 0f) frameRate = SourceFrameRateFallback;
+            int finalIncludedSourceFrame = range.inclusiveEnd ? range.lastFrame : range.lastFrame + 1;
+            float startTime = (range.firstFrame - 1) / frameRate;
+            float endTime = (finalIncludedSourceFrame - 1) / frameRate;
+            return Mathf.Max(startTime + 1f / frameRate, endTime);
         }
 
         private static void WriteRuntimeAuditForExistingClips()
@@ -281,11 +310,31 @@ namespace RatHabitat.Editor
                     animatedBindings = clip == null ? 0 : CountAnimatedBindings(clip),
                     animatedBodyBindings = clip == null ? 0 : CountAnimatedBodyBindings(clip),
                     lengthSeconds = clip == null ? 0f : clip.length,
+                    sourceFirstFrame = ClipRanges[i].firstFrame,
+                    sourceLastFrame = ClipRanges[i].lastFrame,
                 });
             }
 
             EditorUtility.SetDirty(audit);
             Debug.Log("[Rat Habitat] Runtime animation audit asset updated at " + RuntimeAuditPath + ".");
+        }
+
+        private static bool HasExpectedSourceRanges()
+        {
+            RatAnimationClipAudit audit = AssetDatabase.LoadAssetAtPath<RatAnimationClipAudit>(RuntimeAuditPath);
+            if (audit == null || audit.entries == null) return false;
+
+            for (int i = 0; i < ClipRanges.Length; i++)
+            {
+                RatAnimationClipAudit.Entry entry = audit.Find(ClipRanges[i].name);
+                if (entry == null || entry.sourceFirstFrame != ClipRanges[i].firstFrame ||
+                    entry.sourceLastFrame != ClipRanges[i].lastFrame)
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         private static AnimationClip LoadCombinedTake()
@@ -340,11 +389,12 @@ namespace RatHabitat.Editor
 
             float frameRate = clip.frameRate;
             float startTime = Mathf.Max(0f, (range.firstFrame - 1) / frameRate);
-            float endTime = Mathf.Max(startTime + (1f / frameRate), range.lastFrame / frameRate);
+            float endTime = GetEndTime(range, frameRate);
             // The imported preview take reports its final source frame as the
-            // clip length (frame 256 at 10.625s for 24fps). Keep the exclusive
-            // end boundary at lastFrame/frameRate so the final confirmed frame
-            // remains part of the baked range instead of truncating Attack.
+            // clip length (frame 256 at 10.625s for 24fps). GetEndTime keeps
+            // the historical exclusive boundary for normal ranges while the
+            // walk range uses its explicit inclusive final source frame so
+            // the following stiff transition cannot be sampled.
 
             EditorCurveBinding[] curveBindings = AnimationUtility.GetCurveBindings(source);
             for (int i = 0; i < curveBindings.Length; i++)

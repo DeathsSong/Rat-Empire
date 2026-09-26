@@ -29,6 +29,20 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void WelcomePopupIsPendingOnlyForNewOrResetColoniesAndPersistsAcknowledgement()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            Assert.IsTrue(save.welcomePopupPending);
+
+            ColonySaveData loaded = SaveSystem.FromJson(SaveSystem.ToJson(save));
+            Assert.IsTrue(loaded.welcomePopupPending);
+
+            loaded.welcomePopupPending = false;
+            ColonySaveData continued = SaveSystem.FromJson(SaveSystem.ToJson(loaded));
+            Assert.IsFalse(continued.welcomePopupPending);
+        }
+
+        [Test]
         public void NewGameFoundersUseAbsoluteBeginnerStats()
         {
             var save = ColonyFactory.CreateNew(1000000L);

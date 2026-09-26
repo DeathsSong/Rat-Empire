@@ -83,8 +83,9 @@ namespace RatHabitat
         private const string BundledUiFontResourcePath = "UI/NotoSansJP-Regular";
         private int layoutScreenWidth = -1;
         private int layoutScreenHeight = -1;
-        // World interaction must be available as soon as the scene renders.
-        // The welcome copy remains available through Settings > Show Welcome Again.
+        // World interaction is available as soon as the scene renders unless
+        // this save is a genuinely new/reset colony waiting for its first
+        // welcome acknowledgement.
         private bool welcomeOpen;
         private bool developerToolsOpen;
         private bool ratAnimationShowcaseOpen;
@@ -188,9 +189,13 @@ namespace RatHabitat
             if (ratAnimationShowcase == null) ratAnimationShowcase = gameObject.AddComponent<RatAnimationShowcase>();
             ratAnimationShowcase.Configure(game.RatVisualFactory, FindAnimationShowcaseSample());
             BuildShell();
+            welcomeOpen = game.WelcomePopupPending;
+            GrowthSystem.SetSimulationPaused(welcomeOpen);
             ready = true;
             Refresh(true);
         }
+
+        public bool IsWelcomeOpen { get { return welcomeOpen; } }
 
         /// <summary>
         /// Page controls live inside a nested ScrollRect and are generated at
@@ -614,14 +619,20 @@ namespace RatHabitat
             }
             if (liveEventText != null)
             {
+                // The habitat itself supplies the large in-world sign. Keep
+                // the header slot for real colony events, using the newest
+                // approved event as a quiet fallback after its live banner
+                // has expired. Do not repeat the habitat name and page count.
                 string liveMessage = game.LiveEventMessage;
-                // The habitat itself supplies the large in-world sign. Keep a
-                // compact page indicator in the header whenever no transient
-                // event is being announced, so a swipe is still discoverable
-                // after the Habitat controls collapse.
-                liveEventText.text = string.IsNullOrEmpty(liveMessage)
-                    ? game.HabitatPageLabel
-                    : liveMessage;
+                if (string.IsNullOrEmpty(liveMessage))
+                {
+                    List<ColonyEventData> recentEvents = game.RecentEvents;
+                    if (recentEvents != null && recentEvents.Count > 0 && recentEvents[0] != null)
+                    {
+                        liveMessage = recentEvents[0].message;
+                    }
+                }
+                liveEventText.text = liveMessage;
             }
             if (eventLogToggleButton != null)
             {
@@ -937,10 +948,21 @@ namespace RatHabitat
         private void BuildWelcomeModal()
         {
             welcomeOverlay = CreateModalOverlay("Welcome Modal", new Color(0.01f, 0.03f, 0.04f, 0.74f), out welcomeCard);
-            AddText(welcomeCard, "Welcome to the habitat", 22, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
-            AddText(welcomeCard, "Meet your randomized starter pair in their cozy 3D habitat.", 16, Color.white, TextAnchor.UpperLeft);
-            AddText(welcomeCard, "Tap a rat or habitat object to interact. Breed, care for the colony, and watch each generation grow.", 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
-            AddButtonTo(welcomeCard, "Continue", true, CloseWelcome, new Color(0.16f, 0.38f, 0.33f), 46f);
+            string femaleName = "your female rat";
+            string maleName = "your male rat";
+            if (game != null && game.Save != null && game.Save.rats != null)
+            {
+                foreach (var rat in game.Save.rats)
+                {
+                    if (rat == null) continue;
+                    if (rat.sex == RatSex.Female) femaleName = ColonyFactory.DisplayName(rat);
+                    else if (rat.sex == RatSex.Male) maleName = ColonyFactory.DisplayName(rat);
+                }
+            }
+            AddText(welcomeCard, "Welcome to Rat Empire!", 22, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
+            AddText(welcomeCard, "You're starting with " + femaleName + " and " + maleName + " in a small habitat. Take some time to get to know them, watch their health and fertility, and move them into the Pairing Habitat when you're ready to begin breeding.", 15, Color.white, TextAnchor.UpperLeft);
+            AddText(welcomeCard, "You can earn money by managing your colony, improve it with upgrades, and watch your rat family grow over time. Have fun building your little empire!", 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
+            AddButtonTo(welcomeCard, "Start Playing", true, CloseWelcome, new Color(0.16f, 0.38f, 0.33f), 46f);
         }
 
         private void BuildSettingsPopup()
@@ -953,7 +975,6 @@ namespace RatHabitat
                 "% pregnancy chance per " + (GameConfig.PairingCheckIntervalMs / 1000L).ToString() + " real-time seconds.",
                 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
             AddButtonTo(settingsCard, "Save now", true, game.SaveNow, new Color(0.16f, 0.38f, 0.33f), 46f);
-            AddButtonTo(settingsCard, "Show Welcome Again", true, ShowWelcomeAgain, new Color(0.22f, 0.31f, 0.4f), 46f);
             AddButtonTo(settingsCard, "Developer Tools", true, OpenDeveloperTools, new Color(0.12f, 0.27f, 0.29f), 46f);
             AddButtonTo(settingsCard, "Close Settings", true, CloseSettings, new Color(0.14f, 0.22f, 0.25f), 46f);
             SetOverlayVisibility();
@@ -1496,6 +1517,13 @@ namespace RatHabitat
 
         private void SetOverlayVisibility()
         {
+            // The welcome dialog is the one modal that must be acknowledged
+            // before any navigation or speed control is usable. Normally the
+            // header deliberately renders above panels, but temporarily place
+            // it below this overlay so its raycaster cannot bypass the modal
+            // blocker while a genuinely new colony is paused.
+            if (headerCanvas != null)
+                headerCanvas.sortingOrder = welcomeOpen ? canvas.sortingOrder - 1 : canvas.sortingOrder + 20;
             if (welcomeOverlay != null) welcomeOverlay.gameObject.SetActive(welcomeOpen);
             if (settingsOverlay != null) settingsOverlay.gameObject.SetActive(settingsOpen && !welcomeOpen);
             if (developerToolsOverlay != null) developerToolsOverlay.gameObject.SetActive(developerToolsOpen && !welcomeOpen && !settingsOpen);
@@ -1520,6 +1548,7 @@ namespace RatHabitat
         private void CloseWelcome()
         {
             welcomeOpen = false;
+            if (game != null) game.DismissWelcomePopup();
             developerToolsOpen = false;
             ratAnimationShowcaseOpen = false;
             eventLogOpen = false;
@@ -1556,15 +1585,17 @@ namespace RatHabitat
             Refresh(true);
         }
 
-        private void ShowWelcomeAgain()
+        public void OpenWelcomeForNewGame()
         {
-            settingsOpen = false;
             welcomeOpen = true;
+            GrowthSystem.SetSimulationPaused(true);
+            settingsOpen = false;
             developerToolsOpen = false;
             ratAnimationShowcaseOpen = false;
             eventLogOpen = false;
             activeMainPanel = MainPanel.None;
             SetOverlayVisibility();
+            Refresh(true);
         }
 
         private void OpenDeveloperTools()

@@ -21,6 +21,11 @@ namespace RatHabitat
             public int animatedBindings;
             public int animatedBodyBindings;
             public float lengthSeconds;
+            // Editor-only provenance for the baked clip range. Keeping this
+            // in the shared audit asset lets the editor detect a changed
+            // source window and regenerate the standalone clip automatically.
+            public int sourceFirstFrame;
+            public int sourceLastFrame;
         }
 
         public List<Entry> entries = new List<Entry>();

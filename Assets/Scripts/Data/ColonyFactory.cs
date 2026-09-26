@@ -13,6 +13,7 @@ namespace RatHabitat
                 colonyName = "New Generation",
                 createdAt = now,
                 updatedAt = now,
+                welcomePopupPending = true,
                 colonyCredits = GameConfig.StartingColonyCredits,
                 currencyInitialized = true,
                 storeInventoryInitialized = false,

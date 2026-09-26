@@ -150,6 +150,10 @@ namespace RatHabitat
             if (save.clock.gameStartTimestamp <= 0) save.clock.gameStartTimestamp = now;
             if (save.clock.gameTimeMs <= 0) save.clock.gameTimeMs = GameConfig.StartGameTimeMs;
             if (save.clock.speed <= 0f) save.clock.speed = 1f;
+            // A new colony may be reloaded while its welcome modal is still
+            // waiting for acknowledgement. Do not let the elapsed wall-clock
+            // time between browser sessions advance the paused colony.
+            if (save.welcomePopupPending) save.clock.lastRealTimestamp = now;
             foreach (var rat in save.rats)
             {
                 if (rat == null) continue;

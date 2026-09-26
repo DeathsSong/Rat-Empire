@@ -18,40 +18,54 @@ MonoBehaviour:
     floatBindings: 311
     animatedBindings: 102
     animatedBodyBindings: 100
-    lengthSeconds: 1.2083334
+    lengthSeconds: 1.2916666
+    sourceFirstFrame: 33
+    sourceLastFrame: 64
   - clipName: HandPaintedRat_IdleReaction
     available: 1
     floatBindings: 311
     animatedBindings: 135
     animatedBodyBindings: 125
     lengthSeconds: 1.25
+    sourceFirstFrame: 67
+    sourceLastFrame: 96
   - clipName: HandPaintedRat_Run
     available: 1
     floatBindings: 311
     animatedBindings: 146
     animatedBodyBindings: 136
     lengthSeconds: 1.25
+    sourceFirstFrame: 99
+    sourceLastFrame: 128
   - clipName: HandPaintedRat_Sniffing
     available: 1
     floatBindings: 311
     animatedBindings: 100
     animatedBodyBindings: 98
     lengthSeconds: 1.375
+    sourceFirstFrame: 129
+    sourceLastFrame: 161
   - clipName: HandPaintedRat_Dying
     available: 1
     floatBindings: 311
     animatedBindings: 140
     animatedBodyBindings: 130
     lengthSeconds: 1.2916665
+    sourceFirstFrame: 162
+    sourceLastFrame: 192
   - clipName: HandPaintedRat_Jump
     available: 1
     floatBindings: 311
     animatedBindings: 138
     animatedBodyBindings: 128
     lengthSeconds: 1.333333
+    sourceFirstFrame: 193
+    sourceLastFrame: 224
   - clipName: HandPaintedRat_Attack
     available: 1
     floatBindings: 311
     animatedBindings: 124
     animatedBodyBindings: 116
     lengthSeconds: 1.333334
+    sourceFirstFrame: 225
+    sourceLastFrame: 256

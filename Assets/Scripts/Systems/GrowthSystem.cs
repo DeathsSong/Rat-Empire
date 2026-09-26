@@ -17,10 +17,12 @@ namespace RatHabitat
         // below (1 minute/hour/day per real second). Keeping this value here
         // prevents individual behaviors from inventing their own speed path.
         private static float runtimeSimulationSpeed = 1f;
+        private static bool simulationPaused;
         private static float lastMovementRealDeltaSeconds;
         private static float lastMovementSimulationDeltaSeconds;
 
-        public static float RuntimeSimulationSpeed { get { return runtimeSimulationSpeed; } }
+        public static float RuntimeSimulationSpeed { get { return simulationPaused ? 0f : runtimeSimulationSpeed; } }
+        public static bool SimulationPaused { get { return simulationPaused; } }
 
         public static float LastMovementRealDeltaSeconds { get { return lastMovementRealDeltaSeconds; } }
         public static float LastMovementSimulationDeltaSeconds { get { return lastMovementSimulationDeltaSeconds; } }
@@ -28,6 +30,16 @@ namespace RatHabitat
         public static void SetRuntimeSpeed(float speed)
         {
             runtimeSimulationSpeed = NormalizeSpeed(speed);
+        }
+
+        public static void SetSimulationPaused(bool paused)
+        {
+            simulationPaused = paused;
+            if (paused)
+            {
+                lastMovementRealDeltaSeconds = 0f;
+                lastMovementSimulationDeltaSeconds = 0f;
+            }
         }
 
         /// <summary>
@@ -38,7 +50,7 @@ namespace RatHabitat
         /// </summary>
         public static float SimulationMovementDeltaSeconds(float realDeltaSeconds)
         {
-            if (realDeltaSeconds <= 0f) return 0f;
+            if (simulationPaused || realDeltaSeconds <= 0f) return 0f;
             float simulationDelta = realDeltaSeconds * runtimeSimulationSpeed;
             lastMovementRealDeltaSeconds = realDeltaSeconds;
             lastMovementSimulationDeltaSeconds = simulationDelta;
