@@ -136,7 +136,10 @@ namespace RatHabitat
         }
 
         private const float CameraFocusSmoothTime = 0.24f;
-        private const float CameraZoomSmoothTime = 0.28f;
+        // Zoom input is intentionally subtle. The camera still follows the
+        // same target, but takes a little longer to settle so a wheel notch,
+        // pinch update, or button press never produces a visible jump.
+        private const float CameraZoomSmoothTime = 0.36f;
         private const float InspectionOrthographicMultiplier = 0.169344f;
         private const float PinkieInspectionOrthographicMultiplier = InspectionOrthographicMultiplier * 0.2f;
         // Lower the selected-rat focus target slightly so the live rat sits
@@ -146,9 +149,10 @@ namespace RatHabitat
         // Pinkies get a slightly higher camera position in the live profile
         // window because their smaller body sits lower in the habitat view.
         private const float PinkieSelectedRatCameraVerticalOffset = 0.10f;
-        private const float TopNavigationReservedPixels = 122f;
+        private const float TopNavigationReservedReferenceHeight = 150f;
         private const int RatAnimationShowcasePreviewLayer = 30;
-        private const float HabitatZoomButtonStep = 0.9f;
+        private const float HabitatZoomInputStep = 0.42f;
+        private const float HabitatZoomButtonStep = HabitatZoomInputStep;
         private const float HabitatZoomOffsetLimit = 8f;
         private const float OverviewMinimumZoom = 7.5f;
         private const float EnclosureMinimumZoom = 5.8f;
@@ -243,6 +247,8 @@ namespace RatHabitat
         public bool GroupMoveConfirmationPending { get { return groupMoveConfirmationPending; } }
         public RatEnclosure GroupMoveConfirmationTarget { get { return groupMoveConfirmationTarget; } }
         public bool PairingMoveAllConfirmationPending { get { return pairingMoveAllConfirmationPending; } }
+        public int PairingHabitatCapacity { get { return GameConfig.BasePairingHabitatCapacity; } }
+        public int PairingHabitatCount { get { return CountPairingHabitatRats(); } }
         public float SimulationSpeed { get { return Save == null || Save.clock == null ? 1f : GrowthSystem.NormalizeSpeed(Save.clock.speed); } }
         public string SimulationSpeedLabel { get { return ((int)SimulationSpeed) + "×"; } }
         public string MovementDiagnostics { get { return RatHabitatBehavior.GetMovementDiagnosticReadout(); } }
@@ -468,6 +474,24 @@ namespace RatHabitat
         {
             get
             {
+                return BuildUiSignature(true);
+            }
+        }
+
+        // The profile uses this signature to distinguish structural changes
+        // from ordinary simulation ticks. The full UiSignature continues to
+        // include the clock for screens that need a normal refresh, while a
+        // live profile can update its labels/activity rows in place.
+        public string UiStructureSignature
+        {
+            get
+            {
+                return BuildUiSignature(false);
+            }
+        }
+
+        private string BuildUiSignature(bool includeClock)
+        {
                 var parts = new List<string>
                 {
                     selectedRatId ?? string.Empty,
@@ -476,7 +500,6 @@ namespace RatHabitat
                     parentAId ?? string.Empty,
                     parentBId ?? string.Empty,
                     breedingSelectionSlot.ToString(),
-                    Save == null || Save.clock == null ? "0" : (Save.clock.gameTimeMs / 1000L).ToString(),
                     Save == null ? "0" : Save.rats.Count.ToString(),
                     Save == null ? "0" : Save.litters.Count.ToString(),
                     Save == null ? "0" : Save.pregnancies.Count.ToString(),
@@ -489,6 +512,12 @@ namespace RatHabitat
                     ActiveDedicatedBreedingSession == null ? string.Empty :
                         ActiveDedicatedBreedingSession.id + ":" + ActiveDedicatedBreedingSession.status + ":" + ActiveDedicatedBreedingSession.endsAt,
                 };
+                if (includeClock)
+                {
+                    parts.Insert(6, Save == null || Save.clock == null
+                        ? "0"
+                        : (Save.clock.gameTimeMs / 1000L).ToString());
+                }
                 if (Save != null)
                 {
                     foreach (var rat in Save.rats)
@@ -506,7 +535,6 @@ namespace RatHabitat
                     }
                 }
                 return string.Join("|", parts.ToArray());
-            }
         }
 
         private void Awake()
@@ -984,6 +1012,7 @@ namespace RatHabitat
         {
             bool conceptionSucceeded;
             string reason;
+            PregnancyData createdPregnancy;
             bool resolved = PairingHabitatSystem.ResolvePair(
                 Save,
                 female,
@@ -992,7 +1021,8 @@ namespace RatHabitat
                 GameConfig.PairingPregnancyChance,
                 true,
                 out conceptionSucceeded,
-                out reason);
+                out reason,
+                out createdPregnancy);
 
             maleBehavior.FinishPairingInteraction();
             femaleBehavior.FinishPairingInteraction();
@@ -1011,17 +1041,34 @@ namespace RatHabitat
             {
                 // Pregnancy is a permitted colony-wide event; the ordinary
                 // Pairing Habitat breeding approach/interaction remains
-                // silent. Save the actual pregnancy before surfacing the
-                // announcement so the message can never outlive its state.
-                if (SaveSystem.Save(Save))
-                {
-                    StatusMessage = ColonyFactory.DisplayName(female) + " became pregnant.";
-                }
+                // silent. Resolve the announcement from the saved pregnancy
+                // record so the mother ID is always authoritative.
+                AnnounceCreatedPregnancy(createdPregnancy);
             }
 
             EnclosureSystem.RecalculateAssignments(Save);
             RefreshWorldAndUi(resolved && conceptionSucceeded);
             SaveSystem.Save(Save);
+        }
+
+        private bool AnnounceCreatedPregnancy(PregnancyData pregnancy)
+        {
+            if (Save == null || pregnancy == null || pregnancy.status != "pending" ||
+                pregnancy.pregnancyAnnouncementLogged) return false;
+
+            // The pregnancy record is the source of truth. Never derive this
+            // announcement from the selected rat, breeding slot, or father.
+            RatData mother = BreedingSystem.FindRat(Save, pregnancy.motherId);
+            if (mother == null || mother.sex != RatSex.Female) return false;
+
+            // The state must be persisted before the player-facing event is
+            // emitted. A second save persists the one-time announcement guard
+            // together with the approved global event entry.
+            if (!SaveSystem.Save(Save)) return false;
+            pregnancy.pregnancyAnnouncementLogged = true;
+            StatusMessage = ColonyFactory.DisplayName(mother) + " is pregnant!";
+            SaveSystem.Save(Save);
+            return true;
         }
 
         private void CancelPairingApproach(string reason)
@@ -1346,11 +1393,14 @@ namespace RatHabitat
                     foreach (var completedSession in completedSessions)
                     {
                         if (completedSession == null || !completedSession.conceptionSucceeded) continue;
-                        var mother = BreedingSystem.FindRat(Save, completedSession.motherId);
-                        if (mother != null)
-                            StatusMessage = ColonyFactory.DisplayName(mother) + " became pregnant.";
+                        // Use the pregnancy record created by the completed
+                        // session. Its motherId remains authoritative after
+                        // reloads and cannot be confused with the father or a
+                        // stale profile selection.
+                        PregnancyData pregnancy = BreedingSystem.FindPendingPregnancyForMother(
+                            Save, completedSession.motherId);
+                        AnnounceCreatedPregnancy(pregnancy);
                     }
-                    SaveSystem.Save(Save);
                 }
                 else
                 {
@@ -1362,10 +1412,8 @@ namespace RatHabitat
             int births = BreedingSystem.FinishDuePregnancies(Save, GameTime, out newLitters);
             if (births > 0)
             {
-                var litter = newLitters[0];
-                var mother = BreedingSystem.FindRat(Save, litter.motherId);
-                var father = BreedingSystem.FindRat(Save, litter.fatherId);
-                StatusMessage = "Birth: " + (mother == null ? "Mother" : ColonyFactory.DisplayName(mother)) + " and " + (father == null ? "Father" : ColonyFactory.DisplayName(father)) + " welcomed " + litter.size + " pinkies in the " + litter.litterName + ".";
+                foreach (var litter in newLitters)
+                    AnnounceBirth(litter);
                 stageChanged = true;
             }
             bool activityChanged = RefreshRatActivities();
@@ -1547,6 +1595,24 @@ namespace RatHabitat
             if (rats != null) rats.SetSelected(selectedRatId);
         }
 
+        /// <summary>
+        /// Clears the live habitat selection without refreshing the UI. A
+        /// top-level tab switch uses this as the first half of one atomic
+        /// navigation transition, then the UI rebuilds the requested panel in
+        /// the same frame. Keeping the refresh out of this helper prevents an
+        /// old profile from being rebuilt between clearing the selection and
+        /// selecting the new tab.
+        /// </summary>
+        public void ClearSelectionForNavigation()
+        {
+            ClearPendingSelectionActions();
+            selectedRatId = null;
+            selectedObjectId = null;
+            cameraFollowSelectedRat = false;
+            habitatZoomOffset = 0f;
+            if (rats != null) rats.SetSelected(null);
+        }
+
         public bool IsRatSelectedForGroup(string ratId)
         {
             return !string.IsNullOrEmpty(ratId) && selectedRatIds.Contains(ratId);
@@ -1702,6 +1768,15 @@ namespace RatHabitat
                 SaveSystem.Save(Save);
                 StatusMessage = ColonyFactory.DisplayName(rat) + " is already in the Pairing Habitat.";
                 if (ui != null) ui.Refresh(false);
+                return;
+            }
+
+            int pairingCount = CountPairingHabitatRats();
+            if (pairingCount >= GameConfig.BasePairingHabitatCapacity)
+            {
+                StatusMessage = "Pairing Habitat is full (" + pairingCount + "/" +
+                    GameConfig.BasePairingHabitatCapacity + "). Move a rat out first.";
+                if (ui != null) ui.Refresh(true);
                 return;
             }
 
@@ -1979,6 +2054,31 @@ namespace RatHabitat
 
         private void MoveSelectedRatsToHabitat(RatEnclosure target)
         {
+            if (target == RatEnclosure.Pairing)
+            {
+                int currentPairingCount = CountPairingHabitatRats();
+                int incomingCount = 0;
+                foreach (var id in selectedRatIds)
+                {
+                    RatData candidate = BreedingSystem.FindRat(Save, id);
+                    if (candidate == null || candidate.enclosure == RatEnclosure.Pairing) continue;
+                    if (BreedingSystem.FindActiveDedicatedSession(Save, candidate.id) != null) continue;
+                    incomingCount++;
+                }
+
+                int requestedCount = currentPairingCount + incomingCount;
+                if (requestedCount > GameConfig.BasePairingHabitatCapacity)
+                {
+                    StatusMessage = "Pairing Habitat has " +
+                        (GameConfig.BasePairingHabitatCapacity - currentPairingCount) +
+                        " space" + (GameConfig.BasePairingHabitatCapacity - currentPairingCount == 1 ? string.Empty : "s") +
+                        " remaining (" + currentPairingCount + "/" +
+                        GameConfig.BasePairingHabitatCapacity + ").";
+                    if (ui != null) ui.Refresh(true);
+                    return;
+                }
+            }
+
             int moved = 0;
             var ids = new List<string>(selectedRatIds);
             foreach (var id in ids)
@@ -2026,6 +2126,17 @@ namespace RatHabitat
             StatusMessage = "Moved " + moved + " selected rat" + (moved == 1 ? string.Empty : "s") + " to " + EnclosureSystem.Label(target) + ".";
             SaveSystem.Save(Save);
             RefreshWorldAndUi(true);
+        }
+
+        private int CountPairingHabitatRats()
+        {
+            if (Save == null || Save.rats == null) return 0;
+            int count = 0;
+            foreach (var rat in Save.rats)
+            {
+                if (rat != null && rat.enclosure == RatEnclosure.Pairing) count++;
+            }
+            return count;
         }
 
         public void ViewMaleEnclosure()
@@ -2457,13 +2568,45 @@ namespace RatHabitat
                 if (ui != null) ui.Refresh(false);
                 return;
             }
-            var mother = BreedingSystem.FindRat(Save, litter.motherId);
-            var father = BreedingSystem.FindRat(Save, litter.fatherId);
-            StatusMessage = "Birth: " + ColonyFactory.DisplayName(mother) + " and " + ColonyFactory.DisplayName(father) + " welcomed " + litter.size + " pinkies in the " + litter.litterName + ".";
+            AnnounceBirth(litter);
             EnclosureSystem.RecalculateAssignments(Save);
             SaveSystem.Save(Save);
             rats.Render(Save, habitat.NestPosition);
             if (ui != null) ui.Refresh(true);
+        }
+
+        private bool AnnounceBirth(LitterData litter)
+        {
+            if (Save == null || litter == null || litter.birthAnnouncementLogged) return false;
+
+            // The completed pregnancy record is authoritative for the mother.
+            // Do not use the selected rat, the father, or a stale profile.
+            PregnancyData pregnancy = BreedingSystem.FindPregnancyForLitter(Save, litter.id);
+            if (pregnancy == null || string.IsNullOrEmpty(pregnancy.motherId)) return false;
+            RatData mother = BreedingSystem.FindHistoricalRat(Save, pregnancy.motherId);
+            if (mother == null) return false;
+
+            int createdPups = 0;
+            if (litter.pupIds != null)
+            {
+                foreach (var pupId in litter.pupIds)
+                {
+                    if (BreedingSystem.FindHistoricalRat(Save, pupId) != null) createdPups++;
+                }
+            }
+            if (createdPups <= 0) return false;
+
+            // Persist the completed pregnancy, litter, and all created pinkies
+            // before exposing the player-facing event.
+            if (!SaveSystem.Save(Save)) return false;
+
+            string pupWord = createdPups == 1 ? "pup" : "pups";
+            litter.birthAnnouncementLogged = true;
+            StatusMessage = ColonyFactory.DisplayName(mother) + " has given birth to " +
+                createdPups + " " + pupWord + "!";
+            // Persist both the one-time guard and the approved event entry.
+            SaveSystem.Save(Save);
+            return true;
         }
 
         public void GrowSelectedRat()
@@ -2540,7 +2683,10 @@ namespace RatHabitat
 
             Save.EnsureLists();
             RatSex sex = Save.rats.Count % 2 == 0 ? RatSex.Female : RatSex.Male;
-            long birthTimestamp = GameTime - (long)((GameConfig.YoungStageDays + 30f) * GameConfig.GameDayMs);
+            float developerAdultAge = (sex == RatSex.Female
+                ? GameConfig.FemaleSexualMaturityDays
+                : GameConfig.MaleSexualMaturityDays) + 30f;
+            long birthTimestamp = GameTime - (long)(developerAdultAge * GameConfig.GameDayMs);
             string developerId = ColonyFactory.NewId("dev_rat");
             // Developer presets deliberately reuse the normal sex-specific
             // friendly-name pools. IDs remain unique, so duplicate display
@@ -3009,10 +3155,13 @@ namespace RatHabitat
         {
             if (mainCamera == null || Screen.width <= 0 || Screen.height <= 0) return;
 
-            // The top navigation is an overlay, so reserve its real pixel
-            // height in the camera viewport. This keeps the complete habitat
-            // below the header instead of rendering rats underneath it.
-            float reserved = Mathf.Clamp01(TopNavigationReservedPixels / Screen.height);
+            // The UI Canvas is height-scaled against the 540x960 mobile
+            // reference. Derive the world reservation from that same scale so
+            // the camera continues to line up when the browser is resized or
+            // moved between portrait and landscape displays.
+            float uiScale = Mathf.Max(0.5f, Screen.height / 960f);
+            float reservedPixels = TopNavigationReservedReferenceHeight * uiScale;
+            float reserved = Mathf.Clamp01(reservedPixels / Screen.height);
             Rect desired = new Rect(0f, 0f, 1f, 1f - reserved);
             Rect current = mainCamera.rect;
             if (Mathf.Abs(current.yMax - desired.yMax) > 0.0001f ||
@@ -3152,11 +3301,16 @@ namespace RatHabitat
             // Positive input means zoom in for the mouse wheel, pinch, and the
             // visible + button. Store an additive size offset because the
             // camera presentation recomputes its view frame every frame.
+            // Limit one input update to one small shared step so wheel,
+            // trackpad, pinch, and buttons all have the same gentle response.
+            float appliedAmount = Mathf.Clamp(amount, -HabitatZoomInputStep, HabitatZoomInputStep);
             habitatZoomOffset = Mathf.Clamp(
-                habitatZoomOffset - amount,
+                habitatZoomOffset - appliedAmount,
                 -HabitatZoomOffsetLimit,
                 HabitatZoomOffsetLimit);
-            cameraZoomVelocity = 0f;
+            // Keep the SmoothDamp velocity so consecutive small inputs blend
+            // into the existing camera motion instead of restarting the
+            // interpolation on every wheel or pinch sample.
         }
 
         private float MinimumZoomForCurrentView(RatData selectedRat)
@@ -3203,7 +3357,12 @@ namespace RatHabitat
             orthographicSize = Mathf.Max(halfHeight + padding, (halfWidth + padding) / aspect);
             // Avoid a very tight frame on unusual editor aspect ratios while
             // still making a single cage substantially larger than Overview.
-            orthographicSize = Mathf.Clamp(orthographicSize, 6.4f, normalCameraOrthographicSize);
+            // The lower bound prevents a loose frame on very wide screens.
+            // Do not cap the upper bound at the phone reference size: a narrow
+            // browser or tall tablet needs a little more vertical view to keep
+            // the entire enclosure width inside the camera without cropping.
+            orthographicSize = Mathf.Clamp(orthographicSize, 6.4f,
+                Mathf.Max(normalCameraOrthographicSize, GameConfig.CameraMaximumOrthographicSize));
         }
 
         private void ReportInputDiagnostic(string message)

@@ -213,17 +213,30 @@ namespace RatHabitat
 
         public static TraitData InheritTraits(TraitData mother, TraitData father)
         {
-            mother = mother ?? new TraitData();
-            father = father ?? new TraitData();
+            // Null parent trait data is missing data; a numeric zero on a
+            // real parent is intentional and must remain zero in the
+            // midpoint calculation.
             return new TraitData(
-                Vary((mother.size + father.size) * 0.5f),
-                Vary((mother.health + father.health) * 0.5f),
-                Vary((mother.fertility + father.fertility) * 0.5f));
+                Vary(Midpoint(mother == null ? 0f : mother.size, father == null ? 0f : father.size)),
+                Vary(Midpoint(mother == null ? 0f : mother.health, father == null ? 0f : father.health)),
+                Vary(Midpoint(mother == null ? 0f : mother.fertility, father == null ? 0f : father.fertility)));
         }
 
         private static float Vary(float midpoint)
         {
-            return Mathf.Clamp(midpoint + UnityEngine.Random.Range(-GameConfig.TraitVariation, GameConfig.TraitVariation), 0f, 100f);
+            float safeMidpoint = ClampTrait(midpoint);
+            return Mathf.Clamp(safeMidpoint + UnityEngine.Random.Range(-GameConfig.TraitVariation, GameConfig.TraitVariation), 0f, 100f);
+        }
+
+        private static float Midpoint(float first, float second)
+        {
+            return (ClampTrait(first) + ClampTrait(second)) * 0.5f;
+        }
+
+        private static float ClampTrait(float value)
+        {
+            if (float.IsNaN(value) || float.IsInfinity(value)) return 0f;
+            return Mathf.Clamp(value, 0f, 100f);
         }
 
         public static PhenotypeData DerivePhenotype(

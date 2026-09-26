@@ -164,6 +164,17 @@ namespace RatHabitat
                 listing.genotype == null ? new GenotypeData() : listing.genotype.Clone(),
                 CloneTraits(listing.traits),
                 RatStage.Adult);
+            // Store listings are adult previews. Give the preview the same
+            // persisted biological maturity curve as a purchased rat instead
+            // of leaving ageDays at CreateRat's newborn default, which would
+            // make the new age-based visual scale render an adult listing as
+            // a tiny pinkie.
+            GrowthSystem.EnsureBiologyDefaults(rat);
+            float adultPreviewAge = Math.Max(30f, rat.sexualMaturityDays);
+            rat.birthTimestamp = gameTime - (long)(adultPreviewAge * GameConfig.GameDayMs);
+            rat.growthTimestamp = rat.birthTimestamp;
+            rat.ageDays = adultPreviewAge;
+            rat.stage = GrowthSystem.StageForAge(rat.ageDays, rat.sex);
             if (!string.IsNullOrEmpty(listing.coatColorVariant)) rat.coatColorVariant = listing.coatColorVariant;
             if (listing.coatTone > 0f) rat.coatTone = listing.coatTone;
             rat.phenotype = GeneticsSystem.DerivePhenotype(RatStage.Adult, rat.genotype,
@@ -178,9 +189,6 @@ namespace RatHabitat
             if (listing == null) return null;
             RatData rat = CreatePreviewRat(listing, gameTime);
             rat.id = ColonyFactory.NewId("store_rat");
-            rat.birthTimestamp = gameTime - (30L * GameConfig.GameDayMs);
-            rat.growthTimestamp = rat.birthTimestamp;
-            rat.ageDays = 30f;
             rat.enclosure = rat.sex == RatSex.Male ? RatEnclosure.MaleColony : RatEnclosure.FemaleColony;
             return rat;
         }

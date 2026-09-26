@@ -17,6 +17,10 @@ namespace RatHabitat
         private Coroutine transitionRoutine;
         private RatStage currentStage;
         private bool hasVisual;
+        // The factory-normalized scale is kept separate from the age-driven
+        // scale so repeated simulation refreshes never compound or skew it.
+        private Vector3 currentBaseScale = Vector3.one;
+        private float currentVisualScale = GameConfig.AdultVisualScale;
 
         public RatStage CurrentStage
         {
@@ -146,6 +150,21 @@ namespace RatHabitat
             }
 
             factory.ApplyPhenotype(currentVisual, rat);
+            ApplyAgeScale(rat);
+        }
+
+        /// <summary>
+        /// Updates only the uniform visual scale. RatPresenter calls this in
+        /// LateUpdate so growth remains smooth between biological/UI refreshes
+        /// and is visible in the live habitat without rebuilding the model.
+        /// </summary>
+        public void ApplyAgeScale(RatData rat)
+        {
+            if (rat == null || currentVisual == null || !hasVisual || transitionRoutine != null) return;
+            float targetScale = GrowthSystem.VisualScaleForAge(rat);
+            if (Mathf.Abs(targetScale - currentVisualScale) <= 0.0001f) return;
+            currentVisualScale = targetScale;
+            SetStageScale(currentVisual, currentBaseScale, currentVisualScale);
         }
 
         private void EnsureVisualRoot()
@@ -167,8 +186,9 @@ namespace RatHabitat
             StopTransitionAndClearChildren();
             currentVisual = factory.CreateStageVisual(visualRoot, rat);
             if (currentVisual == null) return;
-            Vector3 baseScale = currentVisual.transform.localScale;
-            SetStageScale(currentVisual, baseScale, ScaleForStage(rat.stage));
+            currentBaseScale = UniformBaseScale(currentVisual.transform.localScale);
+            currentVisualScale = GrowthSystem.VisualScaleForAge(rat);
+            SetStageScale(currentVisual, currentBaseScale, currentVisualScale);
             currentStage = rat.stage;
             hasVisual = true;
         }
@@ -190,15 +210,15 @@ namespace RatHabitat
                 return;
             }
 
-            float fromScale = ScaleForStage(fromStage);
-            float toScale = ScaleForStage(rat.stage);
-            Vector3 previousBaseScale = previous == null
-                ? Vector3.one
-                : previous.transform.localScale / Mathf.Max(0.0001f, fromScale);
-            Vector3 nextBaseScale = next.transform.localScale;
+            float fromScale = Mathf.Max(0.0001f, currentVisualScale);
+            float toScale = GrowthSystem.VisualScaleForAge(rat);
+            Vector3 previousBaseScale = currentBaseScale;
+            Vector3 nextBaseScale = UniformBaseScale(next.transform.localScale);
             SetStageScale(next, nextBaseScale, fromScale);
             currentVisual = next;
             currentStage = rat.stage;
+            currentBaseScale = nextBaseScale;
+            currentVisualScale = fromScale;
             hasVisual = true;
             transitioningOutVisual = previous;
             transitionRoutine = StartCoroutine(AnimateStageChange(previous, next, previousBaseScale, nextBaseScale, fromScale, toScale, DurationFor(fromStage, rat.stage)));
@@ -220,6 +240,7 @@ namespace RatHabitat
             }
 
             SetStageScale(next, nextBaseScale, toScale);
+            currentVisualScale = toScale;
             if (previous != null) UnityEngine.Object.Destroy(previous);
             transitioningOutVisual = null;
             transitionRoutine = null;
@@ -228,7 +249,14 @@ namespace RatHabitat
         private static void SetStageScale(GameObject visual, Vector3 baseScale, float stageScale)
         {
             if (visual == null) return;
-            visual.transform.localScale = baseScale * stageScale;
+            float uniformBase = Mathf.Max(0.0001f, (Mathf.Abs(baseScale.x) + Mathf.Abs(baseScale.y) + Mathf.Abs(baseScale.z)) / 3f);
+            visual.transform.localScale = Vector3.one * (uniformBase * Mathf.Max(0f, stageScale));
+        }
+
+        private static Vector3 UniformBaseScale(Vector3 source)
+        {
+            float uniform = Mathf.Max(0.0001f, (Mathf.Abs(source.x) + Mathf.Abs(source.y) + Mathf.Abs(source.z)) / 3f);
+            return Vector3.one * uniform;
         }
 
         private void StopTransitionOnly()
@@ -251,16 +279,8 @@ namespace RatHabitat
             currentVisual = null;
             transitioningOutVisual = null;
             hasVisual = false;
-        }
-
-        private static float ScaleForStage(RatStage stage)
-        {
-            switch (stage)
-            {
-                case RatStage.Pinkie: return GameConfig.PinkieVisualScale;
-                case RatStage.YoungRat: return GameConfig.YoungVisualScale;
-                default: return GameConfig.AdultVisualScale;
-            }
+            currentBaseScale = Vector3.one;
+            currentVisualScale = GameConfig.AdultVisualScale;
         }
 
         private static float DurationFor(RatStage fromStage, RatStage toStage)

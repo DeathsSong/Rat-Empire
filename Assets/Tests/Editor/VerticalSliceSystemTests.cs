@@ -78,6 +78,165 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void OffspringTraitsUseParentMidpointsForLowValuesInsteadOfFiftyFallbacks()
+        {
+            var inherited = GeneticsSystem.InheritTraits(
+                new TraitData(8f, 8f, 8f),
+                new TraitData(2f, 2f, 2f));
+
+            // TraitVariation is intentionally preserved, so the expected
+            // midpoint is 5 with the existing +/- variation around it.
+            Assert.That(inherited.size, Is.InRange(0f, 9f));
+            Assert.That(inherited.health, Is.InRange(0f, 9f));
+            Assert.That(inherited.fertility, Is.InRange(0f, 9f));
+            Assert.Less(inherited.health, 50f);
+
+            var child = ColonyFactory.CreateRat(
+                "low-inherited-child", "Child", RatSex.Female, 1000000L, 1,
+                GeneticsSystem.CreateFounder("B", "b", "C", "C", "D", "D", "s", "s"),
+                inherited, RatStage.Pinkie);
+            GrowthSystem.EnsureBiologyDefaults(child);
+            Assert.AreEqual(child.traits.health, child.baseHealth);
+            Assert.AreEqual(child.traits.fertility, child.baseFertility);
+            Assert.IsTrue(child.baseHealthInitialized);
+            Assert.IsTrue(child.baseFertilityInitialized);
+        }
+
+        [Test]
+        public void ZeroInheritedTraitsRemainZeroThroughBiologyInitialization()
+        {
+            var inherited = GeneticsSystem.InheritTraits(
+                new TraitData(0f, 0f, 0f),
+                new TraitData(0f, 0f, 0f));
+            Assert.AreEqual(0f, inherited.size);
+            Assert.AreEqual(0f, inherited.health);
+            Assert.AreEqual(0f, inherited.fertility);
+
+            var child = ColonyFactory.CreateRat(
+                "zero-inherited-child", "Child", RatSex.Male, 1000000L, 1,
+                GeneticsSystem.CreateFounder("B", "b", "C", "C", "D", "D", "s", "s"),
+                inherited, RatStage.Pinkie);
+            GrowthSystem.EnsureBiologyDefaults(child);
+            Assert.AreEqual(0f, child.traits.health);
+            Assert.AreEqual(0f, child.baseHealth);
+            Assert.AreEqual(0f, child.traits.fertility);
+            Assert.AreEqual(0f, child.baseFertility);
+        }
+
+        [Test]
+        public void InheritedTraitRangesRemainValidForFifteenAndHighParents()
+        {
+            var beginner = GeneticsSystem.InheritTraits(
+                new TraitData(15f, 15f, 15f),
+                new TraitData(15f, 15f, 15f));
+            Assert.That(beginner.size, Is.InRange(11f, 19f));
+            Assert.That(beginner.health, Is.InRange(11f, 19f));
+            Assert.That(beginner.fertility, Is.InRange(11f, 19f));
+
+            var high = GeneticsSystem.InheritTraits(
+                new TraitData(96f, 96f, 96f),
+                new TraitData(88f, 88f, 88f));
+            Assert.That(high.size, Is.InRange(84f, 100f));
+            Assert.That(high.health, Is.InRange(84f, 100f));
+            Assert.That(high.fertility, Is.InRange(84f, 100f));
+        }
+
+        [Test]
+        public void AdultVisualScaleUsesStoredSizeAndAgeStillControlsGrowth()
+        {
+            GenotypeData genotype = GeneticsSystem.CreateFounder("B", "b", "C", "C", "D", "D", "s", "s");
+            RatData low = ColonyFactory.CreateRat("size-low", "Low", RatSex.Male, 0L, 0,
+                genotype.Clone(), new TraitData(0f, 40f, 40f), RatStage.Adult);
+            RatData middle = ColonyFactory.CreateRat("size-middle", "Middle", RatSex.Male, 0L, 0,
+                genotype.Clone(), new TraitData(50f, 40f, 40f), RatStage.Adult);
+            RatData high = ColonyFactory.CreateRat("size-high", "High", RatSex.Male, 0L, 0,
+                genotype.Clone(), new TraitData(100f, 40f, 40f), RatStage.Adult);
+
+            low.ageDays = low.sexualMaturityDays;
+            middle.ageDays = middle.sexualMaturityDays;
+            high.ageDays = high.sexualMaturityDays;
+
+            float lowAdultScale = GrowthSystem.VisualScaleForAge(low);
+            float middleAdultScale = GrowthSystem.VisualScaleForAge(middle);
+            float highAdultScale = GrowthSystem.VisualScaleForAge(high);
+
+            Assert.AreEqual(GameConfig.AdultSizeVisualScaleMinimum, lowAdultScale, 0.0001f);
+            Assert.AreEqual(GameConfig.AdultVisualScale, middleAdultScale, 0.0001f);
+            Assert.AreEqual(GameConfig.AdultSizeVisualScaleMaximum, highAdultScale, 0.0001f);
+            Assert.Less(lowAdultScale, middleAdultScale);
+            Assert.Less(middleAdultScale, highAdultScale);
+            Assert.AreEqual(0f, low.traits.size, 0.0001f,
+                "Visual scaling must not rewrite the stored Size rating.");
+            Assert.AreEqual(100f, high.traits.size, 0.0001f,
+                "Visual scaling must not rewrite the stored Size rating.");
+
+            low.ageDays = GameConfig.PinkieStageDays;
+            float lowYoungScale = GrowthSystem.VisualScaleForAge(low);
+            Assert.Greater(lowAdultScale, lowYoungScale,
+                "A young rat should grow toward its own size-dependent adult endpoint.");
+            Assert.Less(lowYoungScale, lowAdultScale);
+        }
+
+        [Test]
+        public void InheritedTraitBaselinesPersistThroughSaveReloadAndBirth()
+        {
+            const long gameTime = 1000000L;
+            var save = ColonyFactory.CreateNew(gameTime);
+            save.rats.Clear();
+            save.ratIds.Clear();
+            var genotype = GeneticsSystem.CreateFounder("B", "b", "C", "C", "D", "D", "s", "s");
+            var mother = ColonyFactory.CreateRat(
+                "inheritance-mother", "Taffy", RatSex.Female,
+                gameTime - (100L * GameConfig.GameDayMs), 0, genotype.Clone(),
+                new TraitData(8f, 8f, 8f), RatStage.Adult);
+            var father = ColonyFactory.CreateRat(
+                "inheritance-father", "Otto", RatSex.Male,
+                gameTime - (100L * GameConfig.GameDayMs), 0, genotype.Clone(),
+                new TraitData(2f, 2f, 2f), RatStage.Adult);
+            mother.enclosure = RatEnclosure.FemaleColony;
+            father.enclosure = RatEnclosure.MaleColony;
+            save.rats.Add(mother);
+            save.rats.Add(father);
+            save.ratIds.Add(mother.id);
+            save.ratIds.Add(father.id);
+            var pregnancy = new PregnancyData
+            {
+                id = "inheritance-pregnancy",
+                motherId = mother.id,
+                fatherId = father.id,
+                startedAt = gameTime,
+                dueAt = gameTime,
+                status = "pending",
+                expectedLitterSize = 1,
+            };
+            mother.pregnancyId = pregnancy.id;
+            mother.reproductiveState = ReproductiveState.Pregnant;
+            save.pregnancies.Add(pregnancy);
+
+            LitterData litter;
+            string reason;
+            Assert.IsTrue(BreedingSystem.FinishPregnancy(save, pregnancy.id, gameTime, out litter, out reason), reason);
+            RatData pup = BreedingSystem.FindRat(save, litter.pupIds[0]);
+            Assert.IsNotNull(pup);
+            Assert.That(pup.traits.size, Is.InRange(0f, 9f));
+            Assert.That(pup.traits.health, Is.InRange(0f, 9f));
+            Assert.That(pup.traits.fertility, Is.InRange(0f, 9f));
+            Assert.Less(pup.traits.health, 50f);
+            Assert.IsTrue(pup.baseHealthInitialized);
+            Assert.IsTrue(pup.baseFertilityInitialized);
+
+            string json = SaveSystem.ToJson(save);
+            ColonySaveData restored = SaveSystem.FromJson(json);
+            RatData restoredPup = BreedingSystem.FindRat(restored, pup.id);
+            Assert.IsNotNull(restoredPup);
+            Assert.AreEqual(pup.traits.size, restoredPup.traits.size, 0.0001f);
+            Assert.AreEqual(pup.traits.health, restoredPup.traits.health, 0.0001f);
+            Assert.AreEqual(pup.traits.fertility, restoredPup.traits.fertility, 0.0001f);
+            Assert.AreEqual(pup.baseHealth, restoredPup.baseHealth, 0.0001f);
+            Assert.AreEqual(pup.baseFertility, restoredPup.baseFertility, 0.0001f);
+        }
+
+        [Test]
         public void BehaviorDeltaFollowsSelectedSimulationSpeed()
         {
             // This also exercises a slower WebGL frame. No elapsed real time
@@ -178,6 +337,102 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void BreedingAgeDeclineStartsAtOneYearAndReachesZeroAtIndividualCutoff()
+        {
+            const long gameTime = 700000000L;
+            var save = CreatePairingTestSave(gameTime, 100f);
+            RatData female = save.rats[0];
+            RatData male = save.rats[1];
+            female.breedingEndAgeDays = 730f;
+            male.breedingEndAgeDays = 730f;
+
+            female.ageDays = 364f;
+            male.ageDays = 364f;
+            float beforeDecline = BreedingSystem.CalculateConceptionChance(
+                female, male, GameConfig.PairingPregnancyChance, 0f, 0.20f);
+            Assert.AreEqual(0.20f, beforeDecline, 0.000001f);
+
+            female.ageDays = 365f;
+            male.ageDays = 365f;
+            float atDeclineStart = BreedingSystem.CalculateConceptionChance(
+                female, male, GameConfig.PairingPregnancyChance, 0f, 0.20f);
+            Assert.AreEqual(beforeDecline, atDeclineStart, 0.000001f);
+            Assert.AreEqual(1f, BreedingSystem.AgeBreedingEffectiveness(female), 0.000001f);
+            female.stage = RatStage.Senior;
+            female.reproductiveState = ReproductiveState.Fertile;
+            female.estrousCycleAnchorGameTime = gameTime;
+            StringAssert.DoesNotContain("age-related decline",
+                BreedingSystem.ReproductiveStateLabel(save, female, gameTime));
+
+            female.ageDays = 547.5f;
+            male.ageDays = 547.5f;
+            float midpoint = BreedingSystem.CalculateConceptionChance(
+                female, male, GameConfig.PairingPregnancyChance, 0f, 0.20f);
+            Assert.Less(midpoint, atDeclineStart);
+            Assert.Greater(midpoint, 0f);
+            Assert.That(BreedingSystem.AgeBreedingEffectiveness(female), Is.InRange(0.49f, 0.51f));
+            StringAssert.Contains("age-related decline",
+                BreedingSystem.ReproductiveStateLabel(save, female, gameTime));
+
+            female.ageDays = 365f;
+            male.ageDays = 365f;
+            int fullMinimum;
+            int fullMaximum;
+            BreedingSystem.GetLitterSizeRange(female, male, out fullMinimum, out fullMaximum);
+            female.ageDays = 547.5f;
+            male.ageDays = 547.5f;
+            int midpointMinimum;
+            int midpointMaximum;
+            BreedingSystem.GetLitterSizeRange(female, male, out midpointMinimum, out midpointMaximum);
+            female.ageDays = 729f;
+            male.ageDays = 729f;
+            int lateMinimum;
+            int lateMaximum;
+            BreedingSystem.GetLitterSizeRange(female, male, out lateMinimum, out lateMaximum);
+            Assert.GreaterOrEqual(fullMaximum, midpointMaximum);
+            Assert.GreaterOrEqual(midpointMaximum, lateMaximum);
+            Assert.GreaterOrEqual(lateMinimum, 1);
+
+            female.ageDays = 729f;
+            male.ageDays = 729f;
+            Assert.Greater(BreedingSystem.AgeBreedingEffectiveness(female), 0f);
+            female.ageDays = 730f;
+            male.ageDays = 730f;
+            Assert.AreEqual(0f, BreedingSystem.AgeBreedingEffectiveness(female), 0.000001f);
+            Assert.AreEqual(0f, BreedingSystem.CalculateConceptionChance(
+                female, male, GameConfig.PairingPregnancyChance, 0f, 0.20f), 0.000001f);
+
+            string reason;
+            Assert.IsFalse(BreedingSystem.IsBreedEligible(save, female, gameTime, out reason));
+            Assert.AreEqual("Past breeding age", BreedingSystem.ReproductiveStateLabel(save, female, gameTime));
+        }
+
+        [Test]
+        public void LegacyBreedingEndAgesAreExtendedOnceDuringSaveMigration()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            save.schemaVersion = GameConfig.SaveVersion - 1;
+            save.rats[0].breedingEndAgeDays = 270f;
+            save.rats[1].breedingEndAgeDays = 365f;
+
+            Assert.IsTrue(ColonyFactory.MigrateLegacyStarterStats(save));
+            Assert.AreEqual(635f, save.rats[0].breedingEndAgeDays, 0.0001f);
+            Assert.AreEqual(730f, save.rats[1].breedingEndAgeDays, 0.0001f);
+            Assert.AreEqual(GameConfig.SaveVersion, save.schemaVersion);
+            save.rats[1].ageDays = 400f;
+            save.rats[1].stage = RatStage.Senior;
+            save.rats[1].reproductiveState = ReproductiveState.Infertile;
+            save.rats[1].breedingCooldownUntil = 0L;
+            string reason;
+            Assert.IsTrue(BreedingSystem.IsBreedEligible(save, save.rats[1], save.clock.gameTimeMs, out reason), reason);
+            Assert.AreEqual("Fertile — age-related decline",
+                BreedingSystem.ReproductiveStateLabel(save, save.rats[1], save.clock.gameTimeMs));
+            Assert.IsFalse(ColonyFactory.MigrateLegacyStarterStats(save));
+            Assert.AreEqual(635f, save.rats[0].breedingEndAgeDays, 0.0001f);
+            Assert.AreEqual(730f, save.rats[1].breedingEndAgeDays, 0.0001f);
+        }
+
+        [Test]
         public void ReproductiveLabelsAndEligibilityShareSexualMaturityRules()
         {
             const long birthTime = 0L;
@@ -209,7 +464,7 @@ namespace RatHabitat.Tests
             long outsideWindowTime = maturityTime + (2L * GameConfig.GameDayMs);
             female.ageDays = GameConfig.FemaleSexualMaturityDays + 2f;
             Assert.IsFalse(BreedingSystem.IsBreedEligible(save, female, outsideWindowTime, out reason));
-            StringAssert.StartsWith("Next fertile window:",
+            StringAssert.StartsWith("Next fertile window in",
                 BreedingSystem.ReproductiveStateLabel(save, female, outsideWindowTime));
             StringAssert.Contains("Outside the fertile window", reason);
 

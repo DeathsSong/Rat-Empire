@@ -188,6 +188,11 @@ namespace RatHabitat
             try
             {
                 save.EnsureLists();
+                // Finalize any legacy trait-baseline migration before the
+                // document is serialized. This keeps explicit zero baselines
+                // and inherited values stable even when a caller saves
+                // immediately after a birth or stat change.
+                ColonyFactory.MigrateLegacyStarterStats(save);
                 EventLogPolicy.Prune(save);
                 RatActivitySystem.EnsureSaveState(save, save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
                 save.schemaVersion = GameConfig.SaveVersion;
@@ -254,6 +259,7 @@ namespace RatHabitat
         {
             if (save == null) return string.Empty;
             save.EnsureLists();
+            ColonyFactory.MigrateLegacyStarterStats(save);
             EventLogPolicy.Prune(save);
             RatActivitySystem.EnsureSaveState(save, save.clock.gameTimeMs);
             return JsonUtility.ToJson(save, true);
@@ -417,7 +423,9 @@ namespace RatHabitat
                 lower.Contains(" died") || lower.StartsWith("died") ||
                 lower.Contains(" was sold") ||
                 lower.Contains(" became pregnant") ||
-                lower.StartsWith("birth:") || lower.Contains(" gave birth");
+                lower.Contains(" is pregnant") ||
+                lower.StartsWith("birth:") || lower.Contains(" gave birth") ||
+                lower.Contains(" has given birth to");
         }
 
         /// <summary>

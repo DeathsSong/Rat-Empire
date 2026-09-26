@@ -85,12 +85,80 @@ namespace RatHabitat
                 }
             }
 
+            // Older saves did not carry an explicit initialized bit for the
+            // age-decline baselines. Migrate those records once, using the
+            // current trait as the safe legacy source when the old baseline
+            // was absent. Future saves use the bool flags, so a real zero is
+            // never treated as missing again.
+            changed |= MigrateTraitBaselines(save.rats);
+            changed |= MigrateTraitBaselines(save.retiredRats);
+
+            // Save version 6 and earlier stored individualized breeding
+            // cutoffs in the old 270-365 day range. Extend those persisted
+            // values once by exactly one year; the schema bump prevents a
+            // subsequent save, reload, or UI refresh from extending them a
+            // second time. Retired records are migrated too so historical
+            // profiles retain the same biology data.
+            if (save.schemaVersion < GameConfig.SaveVersion)
+            {
+                changed |= MigrateLegacyBreedingEndAges(save.rats);
+                changed |= MigrateLegacyBreedingEndAges(save.retiredRats);
+            }
+
             if (save.schemaVersion < GameConfig.SaveVersion)
             {
                 save.schemaVersion = GameConfig.SaveVersion;
                 changed = true;
             }
             return changed;
+        }
+
+        private static bool MigrateLegacyBreedingEndAges(System.Collections.Generic.List<RatData> rats)
+        {
+            if (rats == null) return false;
+            bool changed = false;
+            foreach (var rat in rats)
+            {
+                if (rat == null || rat.breedingEndAgeDays <= 0f) continue;
+                rat.breedingEndAgeDays += GameConfig.BreedingEndAgeMigrationDays;
+                changed = true;
+            }
+            return changed;
+        }
+
+        private static bool MigrateTraitBaselines(System.Collections.Generic.List<RatData> rats)
+        {
+            if (rats == null) return false;
+            bool changed = false;
+            foreach (var rat in rats)
+            {
+                if (rat == null) continue;
+                rat.traits ??= new TraitData();
+                if (!rat.baseHealthInitialized)
+                {
+                    float legacyHealth = IsFiniteTraitValue(rat.baseHealth) && rat.baseHealth > 0f
+                        ? rat.baseHealth
+                        : rat.traits.health;
+                    rat.baseHealth = Mathf.Clamp(IsFiniteTraitValue(legacyHealth) ? legacyHealth : 0f, 0f, 100f);
+                    rat.baseHealthInitialized = true;
+                    changed = true;
+                }
+                if (!rat.baseFertilityInitialized)
+                {
+                    float legacyFertility = IsFiniteTraitValue(rat.baseFertility) && rat.baseFertility > 0f
+                        ? rat.baseFertility
+                        : rat.traits.fertility;
+                    rat.baseFertility = Mathf.Clamp(IsFiniteTraitValue(legacyFertility) ? legacyFertility : 0f, 0f, 100f);
+                    rat.baseFertilityInitialized = true;
+                    changed = true;
+                }
+            }
+            return changed;
+        }
+
+        private static bool IsFiniteTraitValue(float value)
+        {
+            return !float.IsNaN(value) && !float.IsInfinity(value);
         }
 
         public static bool IsBeginnerFounder(RatData rat)
@@ -130,6 +198,10 @@ namespace RatHabitat
 
         public static RatData CreateRat(string id, string name, RatSex sex, long birthTimestamp, int generation, GenotypeData genotype, TraitData traits, RatStage stageOverride)
         {
+            TraitData startingTraits = traits ?? new TraitData();
+            startingTraits.size = Mathf.Clamp(FiniteOrZero(startingTraits.size), 0f, 100f);
+            startingTraits.health = Mathf.Clamp(FiniteOrZero(startingTraits.health), 0f, 100f);
+            startingTraits.fertility = Mathf.Clamp(FiniteOrZero(startingTraits.fertility), 0f, 100f);
             var rat = new RatData
             {
                 id = id,
@@ -139,7 +211,7 @@ namespace RatHabitat
                 generation = generation,
                 birthTimestamp = birthTimestamp,
                 growthTimestamp = birthTimestamp,
-                traits = traits ?? new TraitData(),
+                traits = startingTraits,
                 genotype = genotype ?? new GenotypeData(),
                 motherId = null,
                 fatherId = null,
@@ -150,6 +222,10 @@ namespace RatHabitat
                     ? RatEnclosure.Nursery
                     : sex == RatSex.Male ? RatEnclosure.MaleColony : RatEnclosure.FemaleColony,
                 nursing = false,
+                baseHealth = startingTraits.health,
+                baseFertility = startingTraits.fertility,
+                baseHealthInitialized = true,
+                baseFertilityInitialized = true,
             };
             GeneticsSystem.Normalize(rat.genotype);
             GeneticsSystem.EnsureCoatAppearance(rat);
@@ -160,6 +236,11 @@ namespace RatHabitat
             rat.ageDays = 0f;
             GrowthSystem.EnsureBiologyDefaults(rat);
             return rat;
+        }
+
+        private static float FiniteOrZero(float value)
+        {
+            return float.IsNaN(value) || float.IsInfinity(value) ? 0f : value;
         }
 
         /// <summary>

@@ -129,6 +129,13 @@ namespace RatHabitat
             if (rat == null) return;
             rat.traits ??= new TraitData();
 
+            // Zero is a valid inherited stat. Sanitize only non-finite input
+            // and clamp the authored values; never use a value threshold to
+            // decide whether a trait exists.
+            rat.traits.size = ClampTraitValue(rat.traits.size);
+            rat.traits.health = ClampTraitValue(rat.traits.health);
+            rat.traits.fertility = ClampTraitValue(rat.traits.fertility);
+
             // The two new-game founders are intentionally absolute beginner
             // values. Keep this guard here, at the authoritative biology
             // boundary, so stage refreshes, save loading, and phenotype
@@ -143,11 +150,13 @@ namespace RatHabitat
                 rat.traits.fertility = Mathf.Clamp(rat.traits.fertility, 0f, 15f);
                 rat.baseHealth = rat.traits.health;
                 rat.baseFertility = rat.traits.fertility;
+                rat.baseHealthInitialized = true;
+                rat.baseFertilityInitialized = true;
             }
 
             int seed = StableSeed(rat.id);
             int lifespanRange = Mathf.Max(1, Mathf.RoundToInt(GameConfig.MaximumLifespanDays - GameConfig.MinimumLifespanDays));
-            int breedingRange = Mathf.Max(1, Mathf.RoundToInt(GameConfig.MaximumBreedingEndDays - GameConfig.MinimumBreedingEndDays));
+            int breedingRange = Mathf.Max(1, Mathf.RoundToInt(GameConfig.MaximumBreedingEndDays - GameConfig.MinimumBreedingEndDays) + 1);
 
             if (rat.expectedLifespanDays <= 0f)
                 rat.expectedLifespanDays = GameConfig.MinimumLifespanDays + Mathf.Abs(seed % lifespanRange);
@@ -163,8 +172,18 @@ namespace RatHabitat
             }
             if (rat.estrousCycleAnchorGameTime <= 0L)
                 rat.estrousCycleAnchorGameTime = rat.birthTimestamp + (long)(rat.sexualMaturityDays * GameConfig.GameDayMs);
-            if (!beginnerFounder && rat.baseHealth <= 0f) rat.baseHealth = rat.traits.health > 0f ? rat.traits.health : 50f;
-            if (!beginnerFounder && rat.baseFertility <= 0f) rat.baseFertility = rat.traits.fertility > 0f ? rat.traits.fertility : 50f;
+            if (!rat.baseHealthInitialized)
+            {
+                rat.baseHealth = rat.traits.health;
+                rat.baseHealthInitialized = true;
+            }
+            if (!rat.baseFertilityInitialized)
+            {
+                rat.baseFertility = rat.traits.fertility;
+                rat.baseFertilityInitialized = true;
+            }
+            rat.baseHealth = ClampTraitValue(rat.baseHealth);
+            rat.baseFertility = ClampTraitValue(rat.baseFertility);
 
             // Only a female can carry a pregnancy. The father remains a
             // historical participant in PregnancyData and stays breedable.
@@ -244,8 +263,14 @@ namespace RatHabitat
             if (rat == null || rat.traits == null) return;
             float healthAge = Mathf.Max(0f, rat.ageDays - GameConfig.HealthDeclineStartDays);
             float fertilityAge = Mathf.Max(0f, rat.ageDays - GameConfig.FertilityDeclineStartDays);
-            rat.traits.health = Mathf.Clamp(rat.baseHealth - healthAge * GameConfig.HealthDeclinePerDay, 1f, 100f);
+            rat.traits.health = Mathf.Clamp(rat.baseHealth - healthAge * GameConfig.HealthDeclinePerDay, 0f, 100f);
             rat.traits.fertility = Mathf.Clamp(rat.baseFertility - fertilityAge * GameConfig.FertilityDeclinePerDay, 0f, 100f);
+        }
+
+        private static float ClampTraitValue(float value)
+        {
+            if (float.IsNaN(value) || float.IsInfinity(value)) return 0f;
+            return Mathf.Clamp(value, 0f, 100f);
         }
 
         public static RatStage StageForAge(float ageDays)
@@ -276,6 +301,72 @@ namespace RatHabitat
                 case RatStage.Senior: return GameConfig.SeniorStartDays;
                 default: return 0f;
             }
+        }
+
+        /// <summary>
+        /// Returns the uniform presentation scale for a rat's actual age.
+        /// Stage labels remain biological states, while this curve prevents a
+        /// seven-day Young Rat from appearing adult-sized in one frame. The
+        /// maturity value is persisted on RatData, so the same rat keeps the
+        /// same curve after saving, loading, or moving between views.
+        /// </summary>
+        public static float VisualScaleForAge(RatData rat)
+        {
+            if (rat == null) return GameConfig.AdultVisualScale;
+            // A valid Size value of zero is meaningful and must remain the
+            // smallest adult endpoint. Only a missing Traits object falls
+            // back to the neutral size-50 presentation.
+            float size = rat.traits == null ? 50f : rat.traits.size;
+            return VisualScaleForAge(rat.ageDays, rat.sex, rat.sexualMaturityDays, size);
+        }
+
+        public static float VisualScaleForAge(float ageDays, RatSex sex, float sexualMaturityDays)
+        {
+            // Preserve the original overload for callers that only have age
+            // data. A neutral size maps exactly to AdultVisualScale.
+            return VisualScaleForAge(ageDays, sex, sexualMaturityDays, 50f);
+        }
+
+        /// <summary>
+        /// Maps the persisted 0-100 Size trait to the final adult presentation
+        /// scale. This affects only the visual model; gameplay dimensions and
+        /// navigation remain unchanged.
+        /// </summary>
+        public static float AdultVisualScaleForSize(float size)
+        {
+            float normalizedSize = Mathf.Clamp01(ClampTraitValue(size) / 100f);
+            return Mathf.Lerp(GameConfig.AdultSizeVisualScaleMinimum,
+                GameConfig.AdultSizeVisualScaleMaximum, normalizedSize);
+        }
+
+        public static float VisualScaleForAge(float ageDays, RatSex sex, float sexualMaturityDays, float size)
+        {
+            float age = Mathf.Max(0f, ageDays);
+            float pinkieEnd = Mathf.Max(0.001f, GameConfig.PinkieStageDays);
+            float youngScale = Mathf.Max(0.001f, GameConfig.YoungVisualScale);
+            float pinkieScale = Mathf.Max(0.001f, GameConfig.PinkieVisualScale);
+            float adultScale = AdultVisualScaleForSize(size);
+
+            // The imported pinkie visual grows gently during its first week,
+            // ending at the same small scale used by the first Young Rat
+            // model. This keeps the model swap at day seven visually stable.
+            if (age < pinkieEnd)
+            {
+                float progress = Mathf.SmoothStep(0f, 1f, age / pinkieEnd);
+                return Mathf.Lerp(pinkieScale, youngScale, progress);
+            }
+
+            float maturity = sexualMaturityDays;
+            if (maturity <= pinkieEnd)
+                maturity = sex == RatSex.Female
+                    ? GameConfig.FemaleSexualMaturityDays
+                    : GameConfig.MaleSexualMaturityDays;
+            maturity = Mathf.Max(pinkieEnd + 0.001f, maturity);
+            if (age >= maturity) return adultScale;
+
+            float adultProgress = Mathf.InverseLerp(pinkieEnd, maturity, age);
+            adultProgress = Mathf.SmoothStep(0f, 1f, adultProgress);
+            return Mathf.Lerp(youngScale, adultScale, adultProgress);
         }
 
         public static bool AdvanceRatToNextStage(RatData rat, long gameTime)

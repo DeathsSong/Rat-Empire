@@ -13,6 +13,11 @@ namespace RatHabitat
             public bool canBreed;
             public string label;
             public string eligibilityReason;
+            // When the current state is temporarily unavailable, this is the
+            // authoritative next time at which the rat can be considered for
+            // breeding. UI summaries can use it without reimplementing the
+            // maturity, cooldown, or fertile-window calculations.
+            public long nextAvailableAt;
         }
 
         public static RatData FindRat(ColonySaveData save, string id)
@@ -57,6 +62,17 @@ namespace RatHabitat
             foreach (var pregnancy in save.pregnancies)
             {
                 if (pregnancy != null && pregnancy.status == "pending" && pregnancy.motherId == ratId)
+                    return pregnancy;
+            }
+            return null;
+        }
+
+        public static PregnancyData FindPregnancyForLitter(ColonySaveData save, string litterId)
+        {
+            if (save == null || string.IsNullOrEmpty(litterId)) return null;
+            foreach (var pregnancy in save.pregnancies)
+            {
+                if (pregnancy != null && pregnancy.status == "finished" && pregnancy.litterId == litterId)
                     return pregnancy;
             }
             return null;
@@ -154,7 +170,7 @@ namespace RatHabitat
             if (session != null)
             {
                 string label = "Breeding session — ends in " + FormatDuration(Math.Max(0L, session.endsAt - gameTime));
-                return Unavailable(ReproductiveState.Fertile, label, "Occupied by a dedicated breeding session.");
+                return Unavailable(ReproductiveState.Fertile, label, "Occupied by a dedicated breeding session.", session.endsAt);
             }
 
             PregnancyData pregnancy = FindPendingPregnancyForMother(save, rat.id);
@@ -163,24 +179,26 @@ namespace RatHabitat
                 string label = pregnancy == null
                     ? "Pregnant"
                     : "Pregnant — birth in " + FormatDuration(Math.Max(0L, pregnancy.dueAt - gameTime));
-                return Unavailable(ReproductiveState.Pregnant, label, "Currently pregnant.");
+                return Unavailable(ReproductiveState.Pregnant, label, "Currently pregnant.", pregnancy == null ? 0L : pregnancy.dueAt);
             }
 
             if (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing)
             {
                 string label = "Nursing — weaning in " + FormatDuration(Math.Max(0L, rat.nursingUntil - gameTime));
                 return Unavailable(ReproductiveState.Nursing, label, "Nursing — weaning in " +
-                    FormatDuration(Math.Max(0L, rat.nursingUntil - gameTime)) + ".");
+                    FormatDuration(Math.Max(0L, rat.nursingUntil - gameTime)) + ".", rat.nursingUntil);
             }
 
             if (rat.reproductiveState == ReproductiveState.Recovery)
             {
-                string label = "Recovery — fertile again in " + FormatDuration(Math.Max(0L, rat.recoveryUntil - gameTime));
-                return Unavailable(ReproductiveState.Recovery, label, label + ".");
+                string label = "Recovering — fertile again in " + FormatDuration(Math.Max(0L, rat.recoveryUntil - gameTime));
+                return Unavailable(ReproductiveState.Recovery, label, label + ".", rat.recoveryUntil);
             }
 
-            if (rat.stage == RatStage.Senior || rat.ageDays >= rat.breedingEndAgeDays ||
-                rat.reproductiveState == ReproductiveState.Infertile)
+            // Senior stage begins at one year, but senior rats can still
+            // breed during the individualized decline period. Only the
+            // persisted breeding-end age is the past-breeding cutoff.
+            if (rat.ageDays >= rat.breedingEndAgeDays)
             {
                 return Unavailable(ReproductiveState.Infertile, "Past breeding age", "Past breeding age.");
             }
@@ -192,14 +210,14 @@ namespace RatHabitat
             {
                 long remaining = Math.Max(0L, (long)((rat.sexualMaturityDays - rat.ageDays) * GameConfig.GameDayMs));
                 string label = "Immature — breeding available in " + FormatDuration(remaining);
-                return Unavailable(ReproductiveState.Immature, label, label + ".");
+                return Unavailable(ReproductiveState.Immature, label, label + ".", gameTime + remaining);
             }
 
             if (rat.breedingCooldownUntil > gameTime)
             {
                 string label = "Breeding cooldown — available in " +
                     FormatDuration(Math.Max(0L, rat.breedingCooldownUntil - gameTime));
-                return Unavailable(ReproductiveState.Fertile, label, label + ".");
+                return Unavailable(ReproductiveState.Fertile, label, label + ".", rat.breedingCooldownUntil);
             }
 
             if (rat.sex == RatSex.Female)
@@ -211,16 +229,17 @@ namespace RatHabitat
                 if (elapsed < 0L) elapsed += cycleMs;
                 if (elapsed < windowMs)
                 {
-                    string label = "Fertile — window ends in " + FormatDuration(windowMs - elapsed);
+                    string label = "Fertile" + AgeDeclineLabelSuffix(rat) + " — window ends in " + FormatDuration(windowMs - elapsed);
                     return Available(ReproductiveState.Fertile, label);
                 }
 
-                string nextWindow = "Next fertile window: " + FormatDuration(cycleMs - elapsed);
+                string nextWindow = "Next fertile window in " + FormatDuration(cycleMs - elapsed) + AgeDeclineLabelSuffix(rat);
                 return Unavailable(ReproductiveState.Fertile, nextWindow,
-                    "Outside the fertile window — next window in " + FormatDuration(cycleMs - elapsed) + ".");
+                    "Outside the fertile window — next window in " + FormatDuration(cycleMs - elapsed) + ".",
+                    gameTime + cycleMs - elapsed);
             }
 
-            return Available(ReproductiveState.Fertile, "Fertile");
+            return Available(ReproductiveState.Fertile, "Fertile" + AgeDeclineLabelSuffix(rat));
         }
 
         private static ReproductiveStatus Available(ReproductiveState state, string label)
@@ -231,10 +250,16 @@ namespace RatHabitat
                 canBreed = true,
                 label = label,
                 eligibilityReason = string.Empty,
+                nextAvailableAt = 0L,
             };
         }
 
         private static ReproductiveStatus Unavailable(ReproductiveState state, string label, string reason)
+        {
+            return Unavailable(state, label, reason, 0L);
+        }
+
+        private static ReproductiveStatus Unavailable(ReproductiveState state, string label, string reason, long nextAvailableAt)
         {
             return new ReproductiveStatus
             {
@@ -242,6 +267,7 @@ namespace RatHabitat
                 canBreed = false,
                 label = label,
                 eligibilityReason = reason,
+                nextAvailableAt = nextAvailableAt,
             };
         }
 
@@ -250,13 +276,43 @@ namespace RatHabitat
             if (rat == null || rat.sex != RatSex.Female) return true;
             GrowthSystem.EnsureBiologyDefaults(rat);
             if (rat.stage == RatStage.Pinkie || rat.stage == RatStage.YoungRat ||
-                rat.ageDays < rat.sexualMaturityDays) return false;
+                rat.ageDays < rat.sexualMaturityDays || rat.ageDays >= rat.breedingEndAgeDays) return false;
             long cycleMs = Math.Max(1L, (long)(GameConfig.EstrousCycleDays * GameConfig.GameDayMs));
             long windowMs = Math.Max(1L, (long)(GameConfig.EstrousFertileWindowDays * GameConfig.GameDayMs));
             long elapsed = gameTime - rat.estrousCycleAnchorGameTime;
             elapsed %= cycleMs;
             if (elapsed < 0L) elapsed += cycleMs;
             return elapsed < windowMs;
+        }
+
+        /// <summary>
+        /// Returns the smooth age-based effectiveness multiplier. A rat is
+        /// fully effective through exactly 365 days, then declines
+        /// deterministically to zero at its own persisted cutoff.
+        /// </summary>
+        public static float AgeBreedingEffectiveness(RatData rat)
+        {
+            if (rat == null) return 0f;
+            GrowthSystem.EnsureBiologyDefaults(rat);
+            float start = GameConfig.BreedingAgeDeclineStartDays;
+            float end = rat.breedingEndAgeDays;
+            if (rat.ageDays <= start) return 1f;
+            if (end <= start || rat.ageDays >= end) return 0f;
+
+            float progress = Mathf.InverseLerp(start, end, rat.ageDays);
+            return 1f - Mathf.SmoothStep(0f, 1f, progress);
+        }
+
+        public static bool IsAgeBreedingDeclining(RatData rat)
+        {
+            if (rat == null) return false;
+            return rat.ageDays > GameConfig.BreedingAgeDeclineStartDays &&
+                rat.ageDays < rat.breedingEndAgeDays;
+        }
+
+        private static string AgeDeclineLabelSuffix(RatData rat)
+        {
+            return IsAgeBreedingDeclining(rat) ? " — age-related decline" : string.Empty;
         }
 
         /// <summary>
@@ -280,8 +336,11 @@ namespace RatHabitat
             float fertilityCurve = geometricMean <= 0f
                 ? 0f
                 : Mathf.Pow(geometricMean, GameConfig.ConceptionFertilityCurveExponent);
+            float ageEffectiveness = Mathf.Min(
+                AgeBreedingEffectiveness(female),
+                AgeBreedingEffectiveness(male));
             float habitatMaximum = Mathf.Clamp(habitatBaseChance + habitatBonus, 0f, cap);
-            return Mathf.Clamp01(habitatMaximum * fertilityCurve);
+            return Mathf.Clamp01(habitatMaximum * fertilityCurve * ageEffectiveness);
         }
 
         public static string ConceptionChanceLabel(RatData female, RatData male, float habitatBaseChance, float habitatBonus, float cap)
@@ -319,8 +378,12 @@ namespace RatHabitat
             // the requested approximately 18/9/4 maxima at 100/50/25% when
             // both parents share the same fertility.
             float litterFactor = Mathf.Clamp01((maternalFertility * 0.8f) + (paternalFertility * 0.2f));
-            minimum = Mathf.Max(1, Mathf.FloorToInt(GameConfig.MinimumLitterSizeAtFullFertility * litterFactor));
-            maximum = Mathf.Max(minimum, Mathf.FloorToInt(GameConfig.MaximumLitterSizeAtFullFertility * litterFactor));
+            float ageEffectiveness = Mathf.Min(
+                AgeBreedingEffectiveness(mother),
+                AgeBreedingEffectiveness(father));
+            float ageAdjustedLitterFactor = litterFactor * ageEffectiveness;
+            minimum = Mathf.Max(1, Mathf.FloorToInt(GameConfig.MinimumLitterSizeAtFullFertility * ageAdjustedLitterFactor));
+            maximum = Mathf.Max(minimum, Mathf.FloorToInt(GameConfig.MaximumLitterSizeAtFullFertility * ageAdjustedLitterFactor));
         }
 
         private static int CalculateExpectedLitterSize(RatData mother, RatData father)
@@ -334,6 +397,35 @@ namespace RatHabitat
         public static string ReproductiveStateLabel(ColonySaveData save, RatData rat, long gameTime)
         {
             return GetReproductiveStatus(save, rat, gameTime).label;
+        }
+
+        /// <summary>
+        /// Compact summary for list cards. It is derived from the same
+        /// ReproductiveStatus used by breeding validation, so a card cannot
+        /// claim that breeding is available when the action would reject it.
+        /// </summary>
+        public static string BreedingAvailabilityLabel(ColonySaveData save, RatData rat, long gameTime)
+        {
+            ReproductiveStatus status = GetReproductiveStatus(save, rat, gameTime);
+            if (status.canBreed)
+                return "Breeding available now" + (IsAgeBreedingDeclining(rat) ? " — age-related decline" : string.Empty);
+
+            switch (status.state)
+            {
+                case ReproductiveState.Pregnant:
+                    return "Breeding unavailable — pregnant";
+                case ReproductiveState.Nursing:
+                    return "Breeding unavailable — nursing";
+                case ReproductiveState.Recovery:
+                    return "Breeding unavailable — recovering";
+                case ReproductiveState.Infertile:
+                    return "Breeding unavailable — past breeding age";
+            }
+
+            if (status.nextAvailableAt > gameTime)
+                return "Breeding available in " + FormatDuration(status.nextAvailableAt - gameTime) +
+                    (IsAgeBreedingDeclining(rat) ? " — age-related decline" : string.Empty);
+            return "Breeding unavailable — past breeding age";
         }
 
         private static string FormatDuration(long milliseconds)
@@ -361,7 +453,7 @@ namespace RatHabitat
                 {
                     rat.reproductiveState = ReproductiveState.Immature;
                 }
-                else if (rat.stage == RatStage.Senior || rat.ageDays >= rat.breedingEndAgeDays)
+                else if (rat.ageDays >= rat.breedingEndAgeDays)
                 {
                     rat.reproductiveState = ReproductiveState.Infertile;
                 }
@@ -395,12 +487,12 @@ namespace RatHabitat
                         ? ReproductiveState.Fertile
                         : ReproductiveState.Recovery;
                 }
-                else if (rat.reproductiveState == ReproductiveState.Infertile)
-                {
-                    rat.reproductiveState = ReproductiveState.Infertile;
-                }
                 else
                 {
+                    // Infertile was historically left sticky after the old
+                    // 270-365 day cutoff. Once migration extends a rat's
+                    // cutoff, age is authoritative and the rat can return
+                    // to normal fertile-window evaluation.
                     rat.reproductiveState = ReproductiveState.Fertile;
                 }
                 if (oldState != rat.reproductiveState) changed = true;
@@ -543,8 +635,10 @@ namespace RatHabitat
                 var mother = FindRat(save, session.motherId);
                 var father = FindRat(save, session.fatherId);
                 bool valid = mother != null && father != null && mother.sex == RatSex.Female && father.sex == RatSex.Male &&
-                    mother.stage == RatStage.Adult && father.stage == RatStage.Adult &&
-                    FindPendingPregnancy(save, mother.id) == null;
+                    mother.stage != RatStage.Pinkie && mother.stage != RatStage.YoungRat &&
+                    father.stage != RatStage.Pinkie && father.stage != RatStage.YoungRat &&
+                    mother.ageDays < mother.breedingEndAgeDays && father.ageDays < father.breedingEndAgeDays &&
+                    FindPendingPregnancyForMother(save, mother.id) == null;
                 if (valid && UnityEngine.Random.value <= Mathf.Clamp(session.successChance, 0f, GameConfig.DedicatedBreedingSuccessCap))
                 {
                     CreatePregnancy(save, mother, father, gameTime);
@@ -764,7 +858,8 @@ namespace RatHabitat
             var females = new List<RatData>();
             foreach (var rat in save.rats)
             {
-                if (rat == null || rat.stage != RatStage.Adult || rat.enclosure != RatEnclosure.Pairing) continue;
+                if (rat == null || (rat.stage != RatStage.Adult && rat.stage != RatStage.Senior) ||
+                    rat.enclosure != RatEnclosure.Pairing) continue;
 
                 string reason;
                 if (!BreedingSystem.IsBreedEligible(save, rat, gameTime, out reason)) continue;
@@ -797,7 +892,7 @@ namespace RatHabitat
             out string reason)
         {
             return ResolvePair(save, female, male, gameTime, pregnancyChance, false,
-                out conceptionSucceeded, out reason);
+                out conceptionSucceeded, out reason, out _);
         }
 
         /// <summary>
@@ -819,8 +914,26 @@ namespace RatHabitat
             out bool conceptionSucceeded,
             out string reason)
         {
+            PregnancyData ignoredPregnancy;
+            return ResolvePair(save, female, male, gameTime, pregnancyChance,
+                allowFertilityWindowElapsed, out conceptionSucceeded, out reason,
+                out ignoredPregnancy);
+        }
+
+        public static bool ResolvePair(
+            ColonySaveData save,
+            RatData female,
+            RatData male,
+            long gameTime,
+            float pregnancyChance,
+            bool allowFertilityWindowElapsed,
+            out bool conceptionSucceeded,
+            out string reason,
+            out PregnancyData createdPregnancy)
+        {
             conceptionSucceeded = false;
             reason = string.Empty;
+            createdPregnancy = null;
             if (save == null || female == null || male == null)
             {
                 reason = "The pairing rats are no longer available.";
@@ -865,7 +978,7 @@ namespace RatHabitat
             // Create the pregnancy directly here so a committed interaction
             // can finish after the female's fertile window closes without
             // re-running the pre-interaction window gate.
-            PregnancyData pregnancy = BreedingSystem.CreatePregnancy(save, female, male, gameTime);
+            createdPregnancy = BreedingSystem.CreatePregnancy(save, female, male, gameTime);
             reason = string.Empty;
             // Apply this immediately rather than waiting until birth. The
             // pregnancy state blocks the mother; the cooldown also prevents

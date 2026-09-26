@@ -49,6 +49,10 @@ namespace RatHabitat
         private const float MouseMoveThreshold = 8f;
         private const float HorizontalGestureDominance = 1.25f;
         private const float MinimumRayDirectionMagnitude = 0.0001f;
+        // All desktop zoom units use the same small amount as the on-screen
+        // buttons. Pinch deltas are converted into that same unit below.
+        private const float ZoomInputStep = 0.42f;
+        private const float PinchZoomPixelsPerStep = 100f;
 
         private bool managerReady;
         private string startupError = string.Empty;
@@ -214,7 +218,11 @@ namespace RatHabitat
 
                 float distance = Vector2.Distance(first.position, second.position);
                 if (!pinchZooming) pinchZooming = true;
-                else AdjustZoom((distance - lastPinchDistance) * 0.012f);
+                else
+                {
+                    float pinchDelta = (distance - lastPinchDistance) / PinchZoomPixelsPerStep;
+                    AdjustZoom(pinchDelta * ZoomInputStep);
+                }
                 lastPinchDistance = distance;
                 return;
             }
@@ -1107,9 +1115,9 @@ namespace RatHabitat
             float wheelZoom = Input.mouseScrollDelta.y;
             if (Mathf.Abs(wheelZoom) > 0.001f && IsPointerOverInteractiveUi(Input.mousePosition, -1)) wheelZoom = 0f;
             float zoom = wheelZoom;
-            if (Input.GetKeyDown(KeyCode.Equals) || Input.GetKeyDown(KeyCode.KeypadPlus)) zoom += 0.2f;
-            if (Input.GetKeyDown(KeyCode.Minus) || Input.GetKeyDown(KeyCode.KeypadMinus)) zoom -= 0.2f;
-            if (Mathf.Abs(zoom) > 0.001f) AdjustZoom(zoom * 3f);
+            if (Input.GetKeyDown(KeyCode.Equals) || Input.GetKeyDown(KeyCode.KeypadPlus)) zoom += 1f;
+            if (Input.GetKeyDown(KeyCode.Minus) || Input.GetKeyDown(KeyCode.KeypadMinus)) zoom -= 1f;
+            if (Mathf.Abs(zoom) > 0.001f) AdjustZoom(zoom * ZoomInputStep);
 
             if (Input.GetKeyDown(KeyCode.Escape) && escapeHandler != null) escapeHandler();
         }

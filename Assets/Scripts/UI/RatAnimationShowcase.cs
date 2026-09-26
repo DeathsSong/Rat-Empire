@@ -63,6 +63,9 @@ namespace RatHabitat
         private float trackClock;
         private float oneShotPauseRemaining;
         private float playbackSpeed = 1f;
+        private RatData previewSample;
+        private float normalizedBaseScale = 1f;
+        private float appliedGrowthScale = 1f;
         private int currentIndex;
         private bool playing;
         private bool configured;
@@ -107,6 +110,11 @@ namespace RatHabitat
                 setupMessage = "RatVisualFactory could not create the imported preview visual.";
                 return;
             }
+
+            previewSample = sample;
+            normalizedBaseScale = UniformBaseScale(previewVisual.transform.localScale);
+            appliedGrowthScale = GrowthSystem.VisualScaleForAge(previewSample);
+            ApplyPreviewScale();
 
             SetLayerRecursively(previewVisual, PreviewLayer);
             RemoveGameplayComponents(previewVisual);
@@ -264,6 +272,24 @@ namespace RatHabitat
                             oneShotPauseRemaining -= deltaTime;
                             if (oneShotPauseRemaining <= 0f) PlayCurrent();
                         }
+                    }
+                }
+            }
+
+            // The showcase is a rotating presentation of the same saved rat
+            // data used by the other previews. Keep its uniform scale tied to
+            // the stored Size trait and biological age as that sample grows.
+            if (previewSample != null)
+            {
+                float growthScale = GrowthSystem.VisualScaleForAge(previewSample);
+                if (Mathf.Abs(growthScale - appliedGrowthScale) > 0.0001f)
+                {
+                    appliedGrowthScale = growthScale;
+                    ApplyPreviewScale();
+                    if (bodyRenderer != null)
+                    {
+                        bodyBounds = bodyRenderer.bounds;
+                        ConfigurePreviewCamera(bodyBounds);
                     }
                 }
             }
@@ -462,6 +488,9 @@ namespace RatHabitat
             visualRoot = null;
             animator = null;
             bodyRenderer = null;
+            previewSample = null;
+            normalizedBaseScale = 1f;
+            appliedGrowthScale = 1f;
             previewCamera = null;
             clips = null;
             auditEntries = null;
@@ -475,6 +504,19 @@ namespace RatHabitat
         private static bool IsValidIndex(int index)
         {
             return index >= 0 && index < Definitions.Length;
+        }
+
+        private void ApplyPreviewScale()
+        {
+            if (previewVisual == null) return;
+            previewVisual.transform.localScale = Vector3.one *
+                (normalizedBaseScale * Mathf.Max(0f, appliedGrowthScale));
+        }
+
+        private static float UniformBaseScale(Vector3 source)
+        {
+            float uniform = (Mathf.Abs(source.x) + Mathf.Abs(source.y) + Mathf.Abs(source.z)) / 3f;
+            return Mathf.Max(0.0001f, uniform);
         }
     }
 }

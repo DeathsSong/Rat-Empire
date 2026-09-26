@@ -15,25 +15,34 @@ namespace RatHabitat
     {
         private const float ReferenceWidth = 540f;
         private const float ReferenceHeight = 960f;
-        private const float MaximumUiColumnWidth = 540f;
+        // Keep the 540 reference layout on phones, but allow the centered UI
+        // column to grow on tablets and desktop instead of leaving the game
+        // pinned to a narrow phone-width strip.
+        private const float MaximumUiColumnWidth = 1120f;
         private const float MinimumSideMargin = 12f;
         // The header has a title/status strip, navigation strip, and exactly
         // three persistent simulation-speed controls. The world camera uses
         // the same reservation so the habitat never renders under the header.
-        private const float HeaderHeight = 122f;
-        private const float PageTopInset = 126f;
+        private const float HeaderHeight = 150f;
+        private const float PageTopInset = HeaderHeight + 4f;
         // The profile is a fixed phone-safe frame: the live habitat remains
         // visible above it, while the opaque information surface is anchored
         // to the lower edge and grows upward when expanded.
         private const float RatProfileFrameHeight = 730f;
-        private const float RatProfileCollapsedInformationHeight = 205f;
+        // The collapsed profile must contain the live activity, stats,
+        // reproductive countdown, and More Information control without
+        // making the player scroll. The reproductive line can wrap on the
+        // phone-width reference layout, so reserve that extra line here.
+        private const float RatProfileCollapsedInformationHeight = 252f;
         private const float RatProfileExpandedInformationHeight = 406f;
         private const float RatProfileBottomPadding = 16f;
-        private const float ModalMaximumWidth = 500f;
+        private const float ModalMaximumWidth = 760f;
         private const int PageBottomSafePadding = 104;
 
         private GameBootstrap game;
         private Canvas canvas;
+        private Canvas headerCanvas;
+        private CanvasScaler canvasScaler;
         private RectTransform safeRoot;
         private RectTransform headerContent;
         private RectTransform welcomeOverlay;
@@ -123,7 +132,19 @@ namespace RatHabitat
         private bool profileMoreInformationExpanded;
         private string ratProfileScrollRatId;
         private float ratProfileScrollNormalized = 1f;
+        private bool profileScrollResetRequested;
         private bool profileRefreshDeferred;
+        private string lastProfileStructureSignature;
+        private string liveProfileRatId;
+        private Text liveProfileActivityText;
+        private Text liveProfileAgeText;
+        private Text liveProfileStatsText;
+        private Text liveProfileHabitatText;
+        private Text liveProfileReproductiveText;
+        private RectTransform liveProfileActivityHistoryPanel;
+        private LayoutElement liveProfileActivityHistoryLayout;
+        private string liveProfileActivityHistorySignature;
+        private bool profileActivityHistoryDeferred;
 
         private enum MainPanel
         {
@@ -146,8 +167,7 @@ namespace RatHabitat
             Health,
             Fertility,
             Sex,
-            CoatColor,
-            Markings,
+            Pregnancy,
             Generation,
         }
 
@@ -231,6 +251,8 @@ namespace RatHabitat
             DirectUiClickRelay[] relays = GetComponentsInChildren<DirectUiClickRelay>(false);
             DirectUiClickRelay best = null;
             int bestDepth = int.MinValue;
+            bool pointerOverHeader = headerContent != null &&
+                RectTransformUtility.RectangleContainsScreenPoint(headerContent, screenPoint, null);
             for (int index = 0; index < relays.Length; index++)
             {
                 DirectUiClickRelay relay = relays[index];
@@ -243,6 +265,14 @@ namespace RatHabitat
                     depth++;
                     current = current.parent;
                 }
+                // The profile is generated later in the page hierarchy and
+                // can extend beyond its visual frame while layout is settling.
+                // If the pointer is over the header column, the header control
+                // must win even if an oversized profile graphic also contains
+                // that screen point. This mirrors the dedicated header Canvas
+                // used by the normal EventSystem raycaster below.
+                if (pointerOverHeader && relay.transform.IsChildOf(headerContent))
+                    depth += 100000;
                 if (best == null || depth >= bestDepth)
                 {
                     best = relay;
@@ -322,6 +352,135 @@ namespace RatHabitat
             ratProfileScrollNormalized = Mathf.Clamp01(ratProfileScroll.verticalNormalizedPosition);
         }
 
+        private string GetProfileStructureSignature(RatData rat)
+        {
+            if (game == null || rat == null) return string.Empty;
+            string reason;
+            bool canBreed = BreedingSystem.IsBreedEligible(game.Save, rat, game.GameTime, out reason);
+            PregnancyData pregnancy = FindPregnancyForFemale(rat);
+            string pregnancyKey = pregnancy == null
+                ? string.Empty
+                : pregnancy.id + ":" + pregnancy.status + ":" + pregnancy.dueAt;
+            string phenotypeKey = rat.phenotype == null
+                ? string.Empty
+                : (rat.phenotype.coatColorLabel ?? string.Empty) + ":" + (rat.phenotype.markingsLabel ?? string.Empty);
+            return game.UiStructureSignature + "|profile:" + rat.id + ":" +
+                (rat.name ?? string.Empty) + ":" + rat.stage + ":" + rat.enclosure + ":" +
+                rat.reproductiveState + ":" + rat.nursing + ":" + rat.pregnancyId + ":" +
+                pregnancyKey + ":" + phenotypeKey + ":breed=" + canBreed + ":" +
+                (reason ?? string.Empty) + ":more=" + profileMoreInformationExpanded;
+        }
+
+        private void RefreshLiveRatProfile()
+        {
+            if (game == null || string.IsNullOrEmpty(liveProfileRatId)) return;
+            RatData rat = BreedingSystem.FindHistoricalRat(game.Save, liveProfileRatId);
+            if (rat == null) return;
+
+            if (liveProfileActivityText != null)
+                liveProfileActivityText.text = "Current activity: " + game.CurrentRatActivityLabel(rat);
+            if (liveProfileAgeText != null)
+                liveProfileAgeText.text = "Age: " + GrowthSystem.FormatAge(rat.ageDays);
+            if (liveProfileStatsText != null)
+            {
+                TraitData traits = rat.traits ?? new TraitData();
+                liveProfileStatsText.text = "Size " + traits.size.ToString("0") +
+                    "  •  Health " + traits.health.ToString("0") +
+                    "  •  Fertility " + traits.fertility.ToString("0");
+            }
+            if (liveProfileHabitatText != null)
+                liveProfileHabitatText.text = "Current habitat: " + EnclosureSystem.Label(rat.enclosure);
+            if (liveProfileReproductiveText != null)
+                liveProfileReproductiveText.text = "Reproductive state: " + ReproductiveStateLabel(rat);
+
+            string historySignature = BuildRatActivityHistorySignature(rat);
+            if (liveProfileActivityHistoryPanel != null && historySignature != liveProfileActivityHistorySignature)
+            {
+                if (IsRatProfileScrollMoving())
+                {
+                    profileActivityHistoryDeferred = true;
+                    return;
+                }
+
+                RebuildRatActivityHistoryRows(liveProfileActivityHistoryPanel, rat);
+                liveProfileActivityHistorySignature = historySignature;
+                profileActivityHistoryDeferred = false;
+            }
+        }
+
+        private static string BuildRatActivityHistorySignature(RatData rat)
+        {
+            if (rat == null || rat.activity == null || rat.activity.history == null || rat.activity.history.Count == 0)
+                return string.Empty;
+            int count = Mathf.Min(RatActivitySystem.MaximumHistoryEntries, rat.activity.history.Count);
+            string signature = count.ToString();
+            for (int index = 0; index < count; index++)
+            {
+                RatActivityEntryData entry = rat.activity.history[index];
+                if (entry == null) continue;
+                signature += "|" + entry.gameTimeMs + ":" + entry.activityKey + ":" + entry.message;
+            }
+            return signature;
+        }
+
+        private void RebuildRatActivityHistoryRows(RectTransform historyPanel, RatData rat)
+        {
+            if (historyPanel == null || rat == null) return;
+            float previousNormalized = ratProfileScroll == null
+                ? 1f
+                : Mathf.Clamp01(ratProfileScroll.verticalNormalizedPosition);
+            Vector2 previousContentPosition = ratProfileScroll == null || ratProfileScroll.content == null
+                ? Vector2.zero
+                : ratProfileScroll.content.anchoredPosition;
+
+            for (int index = historyPanel.childCount - 1; index >= 0; index--)
+            {
+                GameObject oldRow = historyPanel.GetChild(index).gameObject;
+                oldRow.SetActive(false);
+                Destroy(oldRow);
+            }
+
+            int count = rat.activity == null || rat.activity.history == null
+                ? 0
+                : Mathf.Min(RatActivitySystem.MaximumHistoryEntries, rat.activity.history.Count);
+            if (liveProfileActivityHistoryLayout != null)
+            {
+                liveProfileActivityHistoryLayout.minHeight = 28f;
+                liveProfileActivityHistoryLayout.preferredHeight = 28f + count * 19f;
+            }
+
+            if (count == 0)
+            {
+                AddText(historyPanel, "No recent activity recorded.", 11,
+                    new Color(0.70f, 0.78f, 0.74f), TextAnchor.UpperLeft);
+            }
+            else
+            {
+                for (int index = 0; index < count; index++)
+                {
+                    RatActivityEntryData entry = rat.activity.history[index];
+                    if (entry == null) continue;
+                    AddText(historyPanel, game.FormatRatActivityEntry(entry), 11,
+                        new Color(0.80f, 0.87f, 0.83f), TextAnchor.UpperLeft);
+                }
+            }
+
+            // The profile content is intentionally kept in place. Reapply the
+            // same viewport position after the small history sub-tree changes
+            // instead of allowing a new row to snap the whole ScrollRect to its
+            // default top position.
+            Canvas.ForceUpdateCanvases();
+            if (ratProfileScroll != null && ratProfileScroll.content != null)
+            {
+                ratProfileScroll.content.anchoredPosition = previousContentPosition;
+                // At the top there is no useful anchored offset to restore;
+                // explicitly preserving the normalized value also lets Unity
+                // clamp a newly shorter history cleanly.
+                if (Mathf.Abs(previousContentPosition.y) < 0.001f)
+                    ratProfileScroll.verticalNormalizedPosition = previousNormalized;
+            }
+        }
+
         private bool IsRelayInsideActiveModal(DirectUiClickRelay relay)
         {
             if (relay == null) return false;
@@ -370,6 +529,22 @@ namespace RatHabitat
             bool sameProfile = ratProfileScroll != null &&
                 game.SelectedRat != null &&
                 ratProfileScrollRatId == game.SelectedRat.id;
+
+            // Clock ticks, activity transitions, and countdowns are live
+            // values. They must update the existing profile hierarchy rather
+            // than replacing the ScrollRect while the player is reading it.
+            // Structural changes (a different rat, stage/enclosure change,
+            // pregnancy/action state, or More Information toggle) still take
+            // the normal rebuild path below.
+            if (sameProfile &&
+                string.Equals(GetProfileStructureSignature(game.SelectedRat), lastProfileStructureSignature,
+                    StringComparison.Ordinal))
+            {
+                lastSignature = signature;
+                RefreshLiveRatProfile();
+                RefreshTopNavigationState();
+                return;
+            }
             if (sameProfile && IsRatProfileScrollMoving())
             {
                 profileRefreshDeferred = true;
@@ -377,7 +552,24 @@ namespace RatHabitat
             }
 
             profileRefreshDeferred = false;
-            CaptureRatProfileScrollPosition();
+            string profileTargetId = game.SelectedRat != null
+                ? game.SelectedRat.id
+                : familyTreeSubjectId;
+            bool profileTargetChanged = ratProfileScroll != null &&
+                !string.IsNullOrEmpty(profileTargetId) &&
+                !string.Equals(ratProfileScrollRatId, profileTargetId, StringComparison.Ordinal);
+            if (profileScrollResetRequested || profileTargetChanged)
+            {
+                // Only an intentional expansion or a different profile gets
+                // a fresh view. Live clock/activity/countdown refreshes keep
+                // the user's current position in the nested ScrollRect.
+                ratProfileScrollNormalized = 1f;
+                profileScrollResetRequested = false;
+            }
+            else
+            {
+                CaptureRatProfileScrollPosition();
+            }
             float previousNormalized = string.IsNullOrEmpty(lastSignature) ? 1f : pageScroll.verticalNormalizedPosition;
             float previousMateNormalized = mateListScroll == null ? 1f : mateListScroll.verticalNormalizedPosition;
             float previousRosterNormalized = ratRosterScroll == null ? 1f : ratRosterScroll.verticalNormalizedPosition;
@@ -386,6 +578,10 @@ namespace RatHabitat
             if (developerToolsOpen) RebuildDeveloperToolsContent();
             if (ratAnimationShowcaseOpen) RefreshAnimationShowcasePanel();
             lastSignature = signature;
+            if (ratProfileScroll != null && game.SelectedRat != null && ratProfileScrollRatId == game.SelectedRat.id)
+                lastProfileStructureSignature = GetProfileStructureSignature(game.SelectedRat);
+            else
+                lastProfileStructureSignature = null;
             Canvas.ForceUpdateCanvases();
             // Rebuilds preserve the user's current page position. No focus or
             // viewport jump is requested by a selection or clock refresh.
@@ -395,6 +591,7 @@ namespace RatHabitat
             if (storeRatListScroll != null) storeRatListScroll.verticalNormalizedPosition = previousStoreNormalized;
             if (ratProfileScroll != null && ratProfileScrollRatId == (game.SelectedRat == null ? string.Empty : game.SelectedRat.id))
                 ratProfileScroll.verticalNormalizedPosition = ratProfileScrollNormalized;
+            RefreshLiveRatProfile();
             RefreshTopNavigationState();
         }
 
@@ -443,6 +640,7 @@ namespace RatHabitat
             {
                 liveTimedTextUpdates[index]?.Invoke();
             }
+            RefreshLiveRatProfile();
             RefreshTopNavigationState();
         }
 
@@ -457,11 +655,15 @@ namespace RatHabitat
             canvas.sortingOrder = 50;
             canvasObject.AddComponent<GraphicRaycaster>();
 
-            var scaler = canvasObject.AddComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(ReferenceWidth, ReferenceHeight);
-            scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
-            scaler.matchWidthOrHeight = 0.5f;
+            canvasScaler = canvasObject.AddComponent<CanvasScaler>();
+            canvasScaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+            canvasScaler.referenceResolution = new Vector2(ReferenceWidth, ReferenceHeight);
+            canvasScaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
+            // Vertical sizing keeps the mobile reference readable on narrow
+            // screens and prevents a wide desktop window from magnifying the
+            // phone UI. Horizontal space is handled by the centered column
+            // below, not by stretching the UI scale.
+            canvasScaler.matchWidthOrHeight = 1f;
 
             safeRoot = CreateRect("Safe Area", canvas.transform);
             ApplySafeArea();
@@ -486,21 +688,32 @@ namespace RatHabitat
             headerContent.anchoredPosition = Vector2.zero;
             headerContent.sizeDelta = new Vector2(MaximumUiColumnWidth, 0f);
 
+            // Page cards and profile ScrollRects are generated after the
+            // header and share the root canvas. Give the fixed navigation its
+            // own sorting canvas so a profile that is temporarily oversized
+            // during a layout rebuild can never intercept a header tap. The
+            // separate raycaster also gives the EventSystem an unambiguous
+            // hit target on touch and desktop WebGL.
+            headerCanvas = header.gameObject.AddComponent<Canvas>();
+            headerCanvas.overrideSorting = true;
+            headerCanvas.sortingOrder = canvas.sortingOrder + 20;
+            header.gameObject.AddComponent<GraphicRaycaster>();
+
             var title = AddText(headerContent, "RAT EMPIRE", 16, Color.white, TextAnchor.MiddleLeft);
-            title.rectTransform.anchorMin = new Vector2(0f, 0.68f);
+            title.rectTransform.anchorMin = new Vector2(0f, 0.73f);
             title.rectTransform.anchorMax = new Vector2(0.34f, 1f);
             title.rectTransform.offsetMin = new Vector2(12f, 1f);
             title.rectTransform.offsetMax = new Vector2(0f, -1f);
             title.fontStyle = FontStyle.Bold;
 
             walletText = AddText(headerContent, "$0", 12, new Color(1f, 0.82f, 0.38f), TextAnchor.MiddleLeft);
-            walletText.rectTransform.anchorMin = new Vector2(0f, 0.54f);
-            walletText.rectTransform.anchorMax = new Vector2(0.34f, 0.69f);
+            walletText.rectTransform.anchorMin = new Vector2(0f, 0.59f);
+            walletText.rectTransform.anchorMax = new Vector2(0.34f, 0.74f);
             walletText.rectTransform.offsetMin = new Vector2(12f, 0f);
             walletText.rectTransform.offsetMax = new Vector2(0f, -1f);
 
             clockText = AddText(headerContent, "Day 1", 14, new Color(0.73f, 0.9f, 0.78f), TextAnchor.UpperLeft);
-            clockText.rectTransform.anchorMin = new Vector2(0.34f, 0.54f);
+            clockText.rectTransform.anchorMin = new Vector2(0.34f, 0.59f);
             clockText.rectTransform.anchorMax = new Vector2(0.55f, 1f);
             clockText.rectTransform.offsetMin = new Vector2(2f, 1f);
             clockText.rectTransform.offsetMax = new Vector2(0f, -1f);
@@ -508,14 +721,14 @@ namespace RatHabitat
             eventLogToggleButton = AddButtonTo(headerContent, "Events", true, ToggleEventLog,
                 new Color(0.11f, 0.25f, 0.25f, 1f), 30f);
             RectTransform eventLogButtonRect = eventLogToggleButton.GetComponent<RectTransform>();
-            eventLogButtonRect.anchorMin = new Vector2(0.55f, 0.54f);
-            eventLogButtonRect.anchorMax = new Vector2(1f, 0.72f);
+            eventLogButtonRect.anchorMin = new Vector2(0.55f, 0.59f);
+            eventLogButtonRect.anchorMax = new Vector2(1f, 0.77f);
             eventLogButtonRect.offsetMin = new Vector2(0f, 1f);
             eventLogButtonRect.offsetMax = new Vector2(-12f, -1f);
 
             liveEventText = AddText(headerContent, string.Empty, 10,
                 new Color(1f, 0.82f, 0.38f), TextAnchor.MiddleRight);
-            liveEventText.rectTransform.anchorMin = new Vector2(0.55f, 0.72f);
+            liveEventText.rectTransform.anchorMin = new Vector2(0.55f, 0.77f);
             liveEventText.rectTransform.anchorMax = new Vector2(1f, 1f);
             liveEventText.rectTransform.offsetMin = new Vector2(0f, 1f);
             liveEventText.rectTransform.offsetMax = new Vector2(-12f, -1f);
@@ -523,8 +736,8 @@ namespace RatHabitat
             liveEventText.verticalOverflow = VerticalWrapMode.Truncate;
 
             var navigation = CreateRect("Top Navigation", headerContent);
-            navigation.anchorMin = new Vector2(0f, 0.25f);
-            navigation.anchorMax = new Vector2(1f, 0.54f);
+            navigation.anchorMin = new Vector2(0f, 0.33f);
+            navigation.anchorMax = new Vector2(1f, 0.58f);
             navigation.offsetMin = new Vector2(8f, 1f);
             navigation.offsetMax = new Vector2(-8f, -3f);
             var navigationLayout = navigation.gameObject.AddComponent<HorizontalLayoutGroup>();
@@ -545,7 +758,7 @@ namespace RatHabitat
 
             var speedRow = CreateRect("Simulation Speed Controls", headerContent);
             speedRow.anchorMin = new Vector2(0f, 0f);
-            speedRow.anchorMax = new Vector2(1f, 0.23f);
+            speedRow.anchorMax = new Vector2(1f, 0.32f);
             speedRow.offsetMin = new Vector2(82f, 2f);
             speedRow.offsetMax = new Vector2(-82f, -2f);
             var speedLayout = speedRow.gameObject.AddComponent<HorizontalLayoutGroup>();
@@ -1141,7 +1354,7 @@ namespace RatHabitat
         {
             int speedInt = Mathf.RoundToInt(speed);
             var button = AddButtonTo(parent, speedInt + "×", true,
-                () => game.SetSimulationSpeed(speed), new Color(0.14f, 0.29f, 0.29f), 28f);
+                () => game.SetSimulationSpeed(speed), new Color(0.14f, 0.29f, 0.29f), 46f);
             button.gameObject.name = "Simulation Speed " + speedInt + "x";
             simulationSpeedButtons[speedInt] = button;
             return button;
@@ -1150,7 +1363,11 @@ namespace RatHabitat
         private void ReturnToHabitatFromNavigation()
         {
             bool collapse = activeMainPanel == MainPanel.Habitat;
-            if (game != null) game.DeactivateMultipleSelection();
+            if (game != null)
+            {
+                game.DeactivateMultipleSelection();
+                game.ClearSelectionForNavigation();
+            }
             expandedMyRatsId = null;
             familyTreeSubjectId = null;
             ResetProfileInformationExpansion();
@@ -1164,19 +1381,15 @@ namespace RatHabitat
             if (game != null)
             {
                 if (game.BreedingOpen) game.CloseBreeding();
-                // Collapsing the Habitat panel must not reset the camera to
-                // Overview. In particular, keep a focused Pairing Habitat
-                // view while its controls are hidden. Opening Habitat from a
-                // different page still behaves like Return to Habitat and
-                // clears the selection as before.
-                if (!collapse) game.ReturnToHabitat();
-            }
-            else
-            {
-                Refresh(true);
+                // The selection was cleared above. Rebuild once below so the
+                // habitat page and the selected navigation state are applied
+                // atomically; calling ReturnToHabitat here would refresh the
+                // old page once in between and could leave stale profile
+                // content visible for a frame.
             }
 
             SetOverlayVisibility();
+            Refresh(true);
             RefreshTopNavigationState();
         }
 
@@ -1232,6 +1445,13 @@ namespace RatHabitat
                 // behind another panel on the next refresh.
                 game.CloseBreeding();
             }
+
+            // A profile is represented by the live selected-rat ID, not by a
+            // separate panel flag. Clear that ID before rebuilding the new
+            // page so the same refresh cannot select the old default profile
+            // after the tab state has changed.
+            if (game != null)
+                game.ClearSelectionForNavigation();
 
             activeMainPanel = samePanel ? MainPanel.None : panel;
             Refresh(true);
@@ -1321,6 +1541,10 @@ namespace RatHabitat
             settingsOpen = true;
             activeMainPanel = MainPanel.Settings;
             SetOverlayVisibility();
+            // Settings owns the navigation state immediately. Rebuild the
+            // page now so a profile cannot remain underneath as stale page
+            // content when the modal opens or when it is later closed.
+            Refresh(true);
             RefreshTopNavigationState();
         }
 
@@ -1412,6 +1636,11 @@ namespace RatHabitat
         {
             if (profileRefreshDeferred && !IsRatProfileScrollMoving())
                 Refresh(true);
+            if (profileActivityHistoryDeferred && !IsRatProfileScrollMoving())
+            {
+                profileActivityHistoryDeferred = false;
+                RefreshLiveRatProfile();
+            }
             if (ratAnimationShowcaseOpen) RefreshAnimationShowcasePanel();
             UpdateFamilyTreeZoomInput();
         }
@@ -1551,6 +1780,16 @@ namespace RatHabitat
         {
             ratRosterScroll = null;
             ratProfileScroll = null;
+            liveProfileRatId = null;
+            liveProfileActivityText = null;
+            liveProfileAgeText = null;
+            liveProfileStatsText = null;
+            liveProfileHabitatText = null;
+            liveProfileReproductiveText = null;
+            liveProfileActivityHistoryPanel = null;
+            liveProfileActivityHistoryLayout = null;
+            liveProfileActivityHistorySignature = null;
+            profileActivityHistoryDeferred = false;
             familyTreeScroll = null;
             familyTreeViewport = null;
             familyTreeContent = null;
@@ -2014,6 +2253,8 @@ namespace RatHabitat
             var card = CreateCard(game.HabitatPageLabel);
             AddText(card, "Swipe left or right to move between full-size habitats.",
                 13, new Color(0.78f, 0.9f, 0.82f), TextAnchor.UpperLeft);
+            AddText(card, "Pairing Habitat: " + game.PairingHabitatCount + " / " + game.PairingHabitatCapacity + " spaces",
+                13, new Color(1f, 0.84f, 0.52f), TextAnchor.UpperLeft);
 
             var pagerRow = CreateRect("Habitat Pager Controls", card);
             var pagerLayout = pagerRow.gameObject.AddComponent<HorizontalLayoutGroup>();
@@ -2074,6 +2315,7 @@ namespace RatHabitat
 
         private void AddRatProfile(RatData rat)
         {
+            liveProfileRatId = rat == null ? null : rat.id;
             if (profileMoreInformationRatId != rat.id)
             {
                 profileMoreInformationRatId = rat.id;
@@ -2232,9 +2474,10 @@ namespace RatHabitat
             }
             Text activityText = AddText(details, string.Empty, 14,
                 new Color(1f, 0.82f, 0.38f), TextAnchor.UpperLeft);
+            liveProfileActivityText = activityText;
             BindLiveText(activityText, () => "Current activity: " + game.CurrentRatActivityLabel(rat));
 
-            AddBasicRatProfileInformation(details, rat, 14);
+            AddRatProfileBasicInformation(details, rat, 14);
             AddButtonTo(details,
                 profileMoreInformationExpanded ? "More Information  ▴" : "More Information  ▾",
                 true, ToggleProfileMoreInformation,
@@ -2249,6 +2492,27 @@ namespace RatHabitat
             {
                 AddSoldStamp(card);
             }
+
+            liveProfileActivityHistorySignature = BuildRatActivityHistorySignature(rat);
+        }
+
+        private void AddRatProfileBasicInformation(RectTransform parent, RatData rat, int fontSize)
+        {
+            if (parent == null || rat == null) return;
+            TraitData traits = rat.traits ?? new TraitData();
+            liveProfileAgeText = AddText(parent, string.Empty, fontSize, Color.white, TextAnchor.UpperLeft);
+            BindLiveText(liveProfileAgeText, () => "Age: " + GrowthSystem.FormatAge(rat.ageDays));
+            liveProfileStatsText = AddText(parent, string.Empty, fontSize, Color.white, TextAnchor.UpperLeft);
+            BindLiveText(liveProfileStatsText, () =>
+            {
+                TraitData currentTraits = rat.traits ?? traits;
+                return "Size " + currentTraits.size.ToString("0") +
+                    "  •  Health " + currentTraits.health.ToString("0") +
+                    "  •  Fertility " + currentTraits.fertility.ToString("0");
+            });
+            liveProfileReproductiveText = AddText(parent, string.Empty, fontSize,
+                new Color(0.72f, 0.84f, 0.78f), TextAnchor.UpperLeft);
+            BindLiveText(liveProfileReproductiveText, () => ReproductiveStateLabel(rat));
         }
 
         private void AddBasicRatProfileInformation(RectTransform parent, RatData rat, int fontSize)
@@ -2348,20 +2612,27 @@ namespace RatHabitat
                 "  •  Generation: " + rat.generation, fontSize, Color.white, TextAnchor.UpperLeft);
             AddText(parent, "Coat: " + coat + "  •  Markings: " + markings, fontSize,
                 new Color(0.95f, 0.83f, 0.55f), TextAnchor.UpperLeft);
+            Text reproductiveStateText = AddText(parent, string.Empty, fontSize,
+                new Color(0.72f, 0.84f, 0.78f), TextAnchor.UpperLeft);
+            BindLiveText(reproductiveStateText, () => "Reproductive state: " + ReproductiveStateLabel(rat));
             AddText(parent, "Known genes: " + KnownGeneSummary(rat), fontSize - 1,
                 new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
             AddText(parent, "Parents: " + ParentSummary(rat) + "  •  Litter: " + LitterNameForRat(rat), fontSize - 1,
                 new Color(0.70f, 0.78f, 0.74f), TextAnchor.UpperLeft);
-            AddText(parent, "Current habitat: " + EnclosureSystem.Label(rat.enclosure), fontSize,
+            liveProfileHabitatText = AddText(parent, string.Empty, fontSize,
                 new Color(0.78f, 0.90f, 0.82f), TextAnchor.UpperLeft);
-            Text reproductiveStateText = AddText(parent, string.Empty, fontSize,
-                new Color(0.72f, 0.84f, 0.78f), TextAnchor.UpperLeft);
-            BindLiveText(reproductiveStateText, () => "Reproductive state: " + ReproductiveStateLabel(rat));
+            BindLiveText(liveProfileHabitatText, () => "Current habitat: " + EnclosureSystem.Label(rat.enclosure));
         }
 
         private void ToggleProfileMoreInformation()
         {
+            bool wasExpanded = profileMoreInformationExpanded;
             profileMoreInformationExpanded = !profileMoreInformationExpanded;
+            if (!wasExpanded && profileMoreInformationExpanded)
+            {
+                profileScrollResetRequested = true;
+                ratProfileScrollNormalized = 1f;
+            }
             Refresh(true);
         }
 
@@ -2369,6 +2640,21 @@ namespace RatHabitat
         {
             profileMoreInformationRatId = null;
             profileMoreInformationExpanded = false;
+            ratProfileScrollRatId = null;
+            ratProfileScrollNormalized = 1f;
+            profileScrollResetRequested = false;
+            profileRefreshDeferred = false;
+            profileActivityHistoryDeferred = false;
+            liveProfileRatId = null;
+            liveProfileActivityText = null;
+            liveProfileAgeText = null;
+            liveProfileStatsText = null;
+            liveProfileHabitatText = null;
+            liveProfileReproductiveText = null;
+            liveProfileActivityHistoryPanel = null;
+            liveProfileActivityHistoryLayout = null;
+            liveProfileActivityHistorySignature = null;
+            lastProfileStructureSignature = null;
         }
 
         private void AddInlineProfileSaleConfirmation(RectTransform parent, RatData rat)
@@ -3003,8 +3289,7 @@ namespace RatHabitat
                 RosterSortField.Health,
                 RosterSortField.Fertility,
                 RosterSortField.Sex,
-                RosterSortField.CoatColor,
-                RosterSortField.Markings,
+                RosterSortField.Pregnancy,
                 RosterSortField.Generation,
             };
             for (int index = 0; index < fields.Length; index += 4)
@@ -3052,8 +3337,7 @@ namespace RatHabitat
                 case RosterSortField.Health: return "Health";
                 case RosterSortField.Fertility: return "Fertility";
                 case RosterSortField.Sex: return "Sex";
-                case RosterSortField.CoatColor: return "Coat";
-                case RosterSortField.Markings: return "Markings";
+                case RosterSortField.Pregnancy: return "Pregnancy";
                 case RosterSortField.Generation: return "Generation";
                 default: return "Name";
             }
@@ -3069,8 +3353,7 @@ namespace RatHabitat
                 case RosterSortField.Health: result = TraitValue(first, 1).CompareTo(TraitValue(second, 1)); break;
                 case RosterSortField.Fertility: result = TraitValue(first, 2).CompareTo(TraitValue(second, 2)); break;
                 case RosterSortField.Sex: result = first.sex.CompareTo(second.sex); break;
-                case RosterSortField.CoatColor: result = string.Compare(CoatSortKey(first), CoatSortKey(second), StringComparison.OrdinalIgnoreCase); break;
-                case RosterSortField.Markings: result = string.Compare(MarkingSortKey(first), MarkingSortKey(second), StringComparison.OrdinalIgnoreCase); break;
+                case RosterSortField.Pregnancy: result = PregnancySortValue(first).CompareTo(PregnancySortValue(second)); break;
                 case RosterSortField.Generation: result = first.generation.CompareTo(second.generation); break;
                 default: result = string.Compare(first.name, second.name, StringComparison.OrdinalIgnoreCase); break;
             }
@@ -3098,18 +3381,12 @@ namespace RatHabitat
             }
         }
 
-        private static string CoatSortKey(RatData rat)
+        private int PregnancySortValue(RatData rat)
         {
-            if (rat == null || rat.phenotype == null || !rat.phenotype.furRevealed) return "unknown";
-            return rat.phenotype.coatColorLabel ?? "unknown";
-        }
-
-        private static string MarkingSortKey(RatData rat)
-        {
-            if (rat == null) return "unknown";
-            if (rat.phenotype != null && !string.IsNullOrEmpty(rat.phenotype.markingsLabel))
-                return rat.phenotype.markingsLabel;
-            return rat.markingFamily ?? "unknown";
+            if (game == null || rat == null) return 0;
+            BreedingSystem.ReproductiveStatus status = BreedingSystem.GetReproductiveStatus(
+                game.Save, rat, game.GameTime);
+            return status.state == ReproductiveState.Pregnant ? 1 : 0;
         }
 
         private void AddRatRosterRow(Transform parent, RatData rat)
@@ -3146,6 +3423,8 @@ namespace RatHabitat
             rowVertical.childControlHeight = true;
             rowVertical.childForceExpandWidth = true;
             rowVertical.childForceExpandHeight = false;
+            var rowFitter = rowRoot.AddComponent<ContentSizeFitter>();
+            rowFitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
 
             var header = CreateRect("My Rats Row Header", rowRoot.transform);
             var headerImage = header.gameObject.AddComponent<Image>();
@@ -3155,8 +3434,10 @@ namespace RatHabitat
             headerImage.raycastTarget = false;
 
             var rowLayout = rowRoot.AddComponent<LayoutElement>();
-            rowLayout.preferredHeight = expanded ? 336f : 116f;
-            rowLayout.minHeight = expanded ? 336f : 116f;
+            // The card height comes from its vertical layout and the content
+            // fitters below. Keep a small collapsed minimum so four summary
+            // lines never compete with the portrait or the next card.
+            rowLayout.minHeight = expanded ? 0f : 124f;
             var horizontal = header.gameObject.AddComponent<HorizontalLayoutGroup>();
             horizontal.padding = new RectOffset(8, 8, 7, 7);
             horizontal.spacing = 8f;
@@ -3167,7 +3448,7 @@ namespace RatHabitat
             horizontal.childForceExpandHeight = false;
 
             const float rosterPortraitSize = 80f;
-            const float headerHeight = 96f;
+            const float headerHeight = 124f;
             var headerElement = header.gameObject.AddComponent<LayoutElement>();
             headerElement.preferredHeight = headerHeight;
             headerElement.minHeight = headerHeight;
@@ -3191,14 +3472,25 @@ namespace RatHabitat
             var infoRoot = CreateRect("My Rats Basic Information", header.transform);
             var infoLayout = infoRoot.gameObject.AddComponent<LayoutElement>();
             infoLayout.flexibleWidth = 1f;
-            infoLayout.minHeight = 80f;
-            infoLayout.preferredHeight = 80f;
-            var infoText = AddTextTo(infoRoot, BuildRatRosterLabel(rat, selected), 14, Color.white, TextAnchor.MiddleLeft);
-            infoText.rectTransform.anchorMin = Vector2.zero;
-            infoText.rectTransform.anchorMax = Vector2.one;
-            infoText.rectTransform.offsetMin = new Vector2(2f, 0f);
-            infoText.rectTransform.offsetMax = new Vector2(-2f, 0f);
-            BindLiveText(infoText, () => BuildRatRosterLabel(rat, selected));
+            infoLayout.minHeight = 0f;
+            var infoVertical = infoRoot.gameObject.AddComponent<VerticalLayoutGroup>();
+            infoVertical.spacing = 0f;
+            infoVertical.childControlWidth = true;
+            infoVertical.childControlHeight = true;
+            infoVertical.childForceExpandWidth = true;
+            infoVertical.childForceExpandHeight = false;
+            var infoFitter = infoRoot.gameObject.AddComponent<ContentSizeFitter>();
+            infoFitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+            Text nameText = AddTextTo(infoRoot, BuildRatRosterName(rat, selected), 15, Color.white, TextAnchor.MiddleLeft);
+            BindLiveText(nameText, () => BuildRatRosterName(rat, selected));
+            Text ageText = AddTextTo(infoRoot, BuildRatRosterAge(rat), 13, Color.white, TextAnchor.MiddleLeft);
+            BindLiveText(ageText, () => BuildRatRosterAge(rat));
+            Text stageText = AddTextTo(infoRoot, BuildRatRosterStage(rat), 13, Color.white, TextAnchor.MiddleLeft);
+            BindLiveText(stageText, () => BuildRatRosterStage(rat));
+            Text availabilityText = AddTextTo(infoRoot, BuildRatRosterAvailability(rat), 13,
+                new Color(0.95f, 0.83f, 0.55f), TextAnchor.MiddleLeft);
+            BindLiveText(availabilityText, () => BuildRatRosterAvailability(rat));
 
             if (expanded)
             {
@@ -3213,10 +3505,13 @@ namespace RatHabitat
                 detailLayout.childControlHeight = true;
                 detailLayout.childForceExpandWidth = true;
                 detailLayout.childForceExpandHeight = false;
-                var detailElement = detailPanel.gameObject.AddComponent<LayoutElement>();
-                detailElement.preferredHeight = 222f;
-                detailElement.minHeight = 222f;
+                var detailFitter = detailPanel.gameObject.AddComponent<ContentSizeFitter>();
+                detailFitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
                 AddDetailedRatInformation(detailPanel, rat, 12);
+                AddRatActivityHistory(detailPanel, rat);
+                AddButtonTo(detailPanel, "Profile", true,
+                    () => OpenRatProfileFromMyRats(rat.id),
+                    new Color(0.22f, 0.38f, 0.46f), 42f);
             }
         }
 
@@ -3231,14 +3526,26 @@ namespace RatHabitat
             update();
         }
 
-        private string BuildRatRosterLabel(RatData rat, bool selected)
+        private string BuildRatRosterName(RatData rat, bool selected)
         {
             if (rat == null) return string.Empty;
-            string markings = rat.phenotype == null || !rat.phenotype.furRevealed ? "Hidden" : rat.phenotype.markingsLabel;
-            return (selected ? "✓ " : string.Empty) + ColonyFactory.DisplayName(rat) + "  •  " + SexLabel(rat.sex) + "  •  " + GrowthSystem.StageLabel(rat.stage) + "\n" +
-                "Markings " + markings + "  •  Age " + GrowthSystem.FormatAge(rat.ageDays) + "  •  Gen " + rat.generation +
-                RosterPregnancySuffix(rat) + "\nHabitat: " + EnclosureSystem.Label(rat.enclosure) +
-                "\nState: " + ReproductiveStateLabel(rat);
+            return (selected ? "✓ " : string.Empty) + ColonyFactory.DisplayName(rat);
+        }
+
+        private static string BuildRatRosterAge(RatData rat)
+        {
+            return rat == null ? string.Empty : "Age: " + GrowthSystem.FormatAge(rat.ageDays);
+        }
+
+        private static string BuildRatRosterStage(RatData rat)
+        {
+            return rat == null ? string.Empty : "Stage: " + GrowthSystem.StageLabel(rat.stage);
+        }
+
+        private string BuildRatRosterAvailability(RatData rat)
+        {
+            if (game == null || rat == null) return string.Empty;
+            return BreedingSystem.BreedingAvailabilityLabel(game.Save, rat, game.GameTime);
         }
 
         private void AddDetailedRatInformation(RectTransform parent, RatData rat, int fontSize)
@@ -3289,6 +3596,8 @@ namespace RatHabitat
             historyLayout.childForceExpandWidth = true;
             historyLayout.childForceExpandHeight = false;
             var historyElement = historyPanel.gameObject.AddComponent<LayoutElement>();
+            liveProfileActivityHistoryPanel = historyPanel;
+            liveProfileActivityHistoryLayout = historyElement;
             historyElement.minHeight = 28f;
             historyElement.preferredHeight = 28f + Mathf.Min(
                 RatActivitySystem.MaximumHistoryEntries,
@@ -3298,6 +3607,7 @@ namespace RatHabitat
             {
                 AddText(historyPanel, "No recent activity recorded.", 11,
                     new Color(0.70f, 0.78f, 0.74f), TextAnchor.UpperLeft);
+                liveProfileActivityHistorySignature = BuildRatActivityHistorySignature(rat);
                 return;
             }
 
@@ -3309,6 +3619,7 @@ namespace RatHabitat
                 AddText(historyPanel, game.FormatRatActivityEntry(entry), 11,
                     new Color(0.80f, 0.87f, 0.83f), TextAnchor.UpperLeft);
             }
+            liveProfileActivityHistorySignature = BuildRatActivityHistorySignature(rat);
         }
 
         private static string KnownGeneSummary(RatData rat)
@@ -3336,6 +3647,42 @@ namespace RatHabitat
             // move the camera: the pointer/touch belongs to this UI row and
             // must never be reused by the habitat raycast path.
             Refresh(true);
+        }
+
+        private void OpenRatProfileFromMyRats(string ratId)
+        {
+            if (game == null || string.IsNullOrEmpty(ratId)) return;
+            RatData rat = BreedingSystem.FindHistoricalRat(game.Save, ratId);
+            if (rat == null) return;
+
+            // The button belongs to the expanded card, so use its stable ID
+            // and close the modal My Rats page before rebuilding the profile.
+            // This also prevents the My Rats blocker/list from remaining over
+            // the live profile view.
+            game.DeactivateMultipleSelection();
+            expandedMyRatsId = null;
+            activeMainPanel = MainPanel.None;
+            ResetProfileInformationExpansion();
+
+            RatData liveRat = BreedingSystem.FindRat(game.Save, ratId);
+            if (liveRat != null)
+            {
+                familyTreeSubjectId = null;
+                // This selects the actual live rat root; the profile then
+                // follows that same object rather than creating a preview.
+                game.SelectRatFromRoster(ratId);
+            }
+            else
+            {
+                // Retired rats have no live habitat object. Keep their stable
+                // ID as the informational profile subject so historical
+                // parentage/status data can still be displayed.
+                familyTreeSubjectId = ratId;
+                game.SelectEntity(null);
+            }
+
+            SetOverlayVisibility();
+            RefreshTopNavigationState();
         }
 
         private string ReproductiveStateLabel(RatData rat)
@@ -3419,17 +3766,6 @@ namespace RatHabitat
             var fillImage = fill.gameObject.AddComponent<Image>();
             fillImage.color = new Color(0.95f, 0.55f, 0.28f, 1f);
             fillImage.raycastTarget = false;
-        }
-
-        private string RosterPregnancySuffix(RatData rat)
-        {
-            PregnancyData pregnancy = FindPregnancyForFemale(rat);
-            if (pregnancy == null || game == null) return string.Empty;
-            long durationMs = pregnancy.dueAt - pregnancy.startedAt;
-            if (durationMs <= 0L) return string.Empty;
-            float progress = Mathf.Clamp01((game.GameTime - pregnancy.startedAt) / (float)durationMs);
-            int percentage = Mathf.Clamp(Mathf.RoundToInt(progress * 100f), 1, 100);
-            return "\nPregnant " + percentage + "%";
         }
 
         private string PregnancyProgressLabel(PregnancyData pregnancy)

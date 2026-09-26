@@ -228,6 +228,11 @@ namespace RatHabitat
         public ReproductiveState reproductiveState = ReproductiveState.Immature;
         public float baseHealth;
         public float baseFertility;
+        // These flags distinguish a legitimate inherited value of zero from
+        // an older save that never initialized the age-decline baselines.
+        // Never infer missing data from the stat value itself.
+        public bool baseHealthInitialized;
+        public bool baseFertilityInitialized;
         // Marks the two randomized founders created for a genuinely new game.
         // This is persisted so biology refreshes can preserve their absolute
         // beginner-stat cap without affecting bred offspring or developer rats.
@@ -267,6 +272,10 @@ namespace RatHabitat
         // record prevents a reload, UI refresh, or delayed birth resolution
         // from rerolling the litter size.
         public int expectedLitterSize;
+        // Persisted guard for the single colony-wide conception announcement.
+        // It belongs to the pregnancy record so reloads cannot announce it
+        // twice through a stale selection or profile reference.
+        public bool pregnancyAnnouncementLogged;
     }
 
     [Serializable]
@@ -295,6 +304,10 @@ namespace RatHabitat
         public int generation;
         public long birthTimestamp;
         public long weaningTimestamp;
+        // Persisted guard for the single colony-wide birth announcement.
+        // Keeping it on the litter prevents a reload or UI refresh from
+        // replaying the same birth message.
+        public bool birthAnnouncementLogged;
     }
 
     [Serializable]

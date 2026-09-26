@@ -4,7 +4,7 @@ namespace RatHabitat
 {
     public static class GameConfig
     {
-        public const int SaveVersion = 5;
+        public const int SaveVersion = 7;
         public const long GameDayMs = 24L * 60L * 60L * 1000L;
         public const long StartGameTimeMs = 8L * 60L * 60L * 1000L;
         // Biological timing is expressed in simulated days. The legacy
@@ -17,8 +17,12 @@ namespace RatHabitat
         public const float SeniorStartDays = 365f;
         public const float MinimumLifespanDays = 540f;
         public const float MaximumLifespanDays = 1080f;
-        public const float MinimumBreedingEndDays = 270f;
-        public const float MaximumBreedingEndDays = 365f;
+        // Breeding-end ages were previously randomized from 270-365 days.
+        // Keep the same individualized range, extended by exactly one year.
+        public const float BreedingAgeDeclineStartDays = 365f;
+        public const float BreedingEndAgeMigrationDays = 365f;
+        public const float MinimumBreedingEndDays = 635f;
+        public const float MaximumBreedingEndDays = 730f;
         public const float EstrousCycleDays = 4.5f;
         public const float EstrousFertileWindowDays = 1f;
         public const float RecoveryDays = 60f;
@@ -68,12 +72,19 @@ namespace RatHabitat
         public const int ColonyCapacityUpgradeStep = 5;
         public const int ColonyCapacityUpgradeBaseCost = 150;
         public const int ColonyCapacityUpgradeCostStep = 100;
+        // Pairing Habitat placement has its own starting limit. This is an
+        // admission limit for that enclosure, separate from the overall
+        // colony capacity and from breeding eligibility.
+        public const int BasePairingHabitatCapacity = 10;
         // A full-fertility female can carry a realistic 6-18 pinkie litter.
         // Lower fertility scales both limits down, with a successful
         // pregnancy always clamped to at least one pinkie.
         public const int MinimumLitterSizeAtFullFertility = 6;
         public const int MaximumLitterSizeAtFullFertility = 18;
-        public const float PinkieStageDays = 21f;
+        // Pinkies remain newborns for exactly one week. GrowthSystem is the
+        // single authority for this threshold; all habitat/UI consumers read
+        // the resulting RatStage rather than maintaining their own cutoff.
+        public const float PinkieStageDays = 7f;
         // Kept as the legacy neutral threshold. GrowthSystem uses the sex
         // specific maturity thresholds above for the authoritative stage.
         public const float YoungStageDays = 56f;
@@ -81,8 +92,9 @@ namespace RatHabitat
         public const float SellCreditTraitMultiplier = 0.5f;
         public const float TraitVariation = 4f;
         public const float MutationRate = 0.0025f;
-        // Visual stage values are presentation-only. They do not change the
-        // saved age, stage, phenotype, or growth rules above.
+        // Visual scale endpoints are presentation-only. GrowthSystem uses
+        // them as the endpoints of its age-based uniform curve; they do not
+        // change the saved age, stage, phenotype, or biology rules above.
         public const float PinkieVisualScale = 0.28f;
         // Presentation-only local offset on the imported pinkie visual under
         // Rat Visual Stage. This matches the manually corrected reference
@@ -109,8 +121,17 @@ namespace RatHabitat
         // root-height correction for young/adult rats; X/Z placement remains
         // owned by the live movement system.
         public const float PairingAdultRootVerticalLift = 0.522f;
-        public const float YoungVisualScale = 0.68f;
+        // Young Rats should be only slightly larger than the pinkie visual at
+        // the seven-day transition. GrowthSystem interpolates from this value
+        // to the size-dependent adult endpoint at the rat's saved sexual
+        // maturity age.
+        public const float YoungVisualScale = 0.36f;
         public const float AdultVisualScale = 1f;
+        // AdultVisualScale remains the neutral size-50 baseline. These bounds
+        // map the persisted 0-100 Size trait to a noticeable but safe uniform
+        // presentation scale without changing gameplay colliders or movement.
+        public const float AdultSizeVisualScaleMinimum = 0.82f;
+        public const float AdultSizeVisualScaleMaximum = 1.18f;
         public const float PinkieToYoungVisualTransitionSeconds = 0.85f;
         public const float YoungToAdultVisualTransitionSeconds = 1.05f;
         public const float ImportedRatTargetHeight = 0.5f;

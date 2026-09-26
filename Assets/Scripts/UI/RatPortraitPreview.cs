@@ -28,6 +28,9 @@ namespace RatHabitat
         {
             public GameObject visual;
             public RenderTexture texture;
+            public RatData rat;
+            public float normalizedBaseScale;
+            public float appliedGrowthScale;
         }
 
         private readonly Dictionary<string, PortraitEntry> portraits = new Dictionary<string, PortraitEntry>();
@@ -73,8 +76,9 @@ namespace RatHabitat
             // The factory normalizes the imported root uniformly. Preserve
             // that proportion when applying the presentation-only stage scale
             // instead of allowing any preview compensation to skew an axis.
-            float normalizedScale = visual.transform.localScale.x;
-            visual.transform.localScale = Vector3.one * (normalizedScale * StageScale(rat.stage));
+            float normalizedScale = UniformBaseScale(visual.transform.localScale);
+            float growthScale = GrowthSystem.VisualScaleForAge(rat);
+            visual.transform.localScale = Vector3.one * (normalizedScale * growthScale);
 
             Bounds bounds;
             if (!TryGetBounds(visual, out bounds, true))
@@ -88,7 +92,14 @@ namespace RatHabitat
             target.hideFlags = HideFlags.HideAndDontSave;
             target.Create();
 
-            var entry = new PortraitEntry { visual = visual, texture = target };
+            var entry = new PortraitEntry
+            {
+                visual = visual,
+                texture = target,
+                rat = rat,
+                normalizedBaseScale = normalizedScale,
+                appliedGrowthScale = growthScale,
+            };
             portraits[key] = entry;
             RenderEntry(entry, bounds);
             return target;
@@ -105,6 +116,21 @@ namespace RatHabitat
             {
                 PortraitEntry entry = item.Value;
                 if (entry == null || entry.visual == null || entry.texture == null) continue;
+
+                // Keep cached portraits live as a rat grows within the same
+                // biological stage. RawImages share this RenderTexture, so
+                // updating the cached visual updates Store, My Rats, family
+                // tree, breeding, and other previews without rebuilding UI.
+                if (entry.rat != null)
+                {
+                    float growthScale = GrowthSystem.VisualScaleForAge(entry.rat);
+                    if (Mathf.Abs(growthScale - entry.appliedGrowthScale) > 0.0001f)
+                    {
+                        entry.appliedGrowthScale = growthScale;
+                        entry.visual.transform.localScale = Vector3.one *
+                            (entry.normalizedBaseScale * growthScale);
+                    }
+                }
 
                 // Each cached preview visual is presentation-only and lives
                 // under the hidden rig, so this rotation cannot affect the
@@ -278,14 +304,10 @@ namespace RatHabitat
             return rat.id + "|" + rat.stage + "|" + phenotypeKey;
         }
 
-        private static float StageScale(RatStage stage)
+        private static float UniformBaseScale(Vector3 source)
         {
-            switch (stage)
-            {
-                case RatStage.Pinkie: return GameConfig.PinkieVisualScale;
-                case RatStage.YoungRat: return GameConfig.YoungVisualScale;
-                default: return GameConfig.AdultVisualScale;
-            }
+            return Mathf.Max(0.0001f,
+                (Mathf.Abs(source.x) + Mathf.Abs(source.y) + Mathf.Abs(source.z)) / 3f);
         }
 
         private static void SetLayerRecursively(GameObject root, int layer)

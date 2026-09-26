@@ -151,14 +151,27 @@ namespace RatHabitat
                 GameObject root;
                 if (controller == null || !ratRoots.TryGetValue(item.Key, out root) || root == null) continue;
 
+                RatData rat;
+                GameObject currentVisual;
+                if (liveRats.TryGetValue(item.Key, out rat) &&
+                    controller.TryGetCurrentVisual(out currentVisual))
+                {
+                    // Age changes every simulation tick, not only when a
+                    // stage label changes. Apply the shared age curve before
+                    // bounds/grounding work so the live model grows smoothly
+                    // and its selection surface follows the same scale.
+                    controller.ApplyAgeScale(rat);
+                    GameObject ring;
+                    if (selectionRings.TryGetValue(item.Key, out ring))
+                        PositionSelectionRing(ring, rat);
+                }
+
                 Bounds bounds;
                 if (controller.TryGetSelectionBounds(out bounds))
                 {
                     ConfigureRatCollider(root, controller.CurrentStage, controller);
                 }
 
-                RatData rat;
-                GameObject currentVisual;
                 if (liveRats.TryGetValue(item.Key, out rat) &&
                     controller.TryGetCurrentVisual(out currentVisual))
                 {
@@ -259,7 +272,12 @@ namespace RatHabitat
 
             controller = root.AddComponent<RatVisualController>();
             controller.Configure(EnsureVisualFactory());
-            var ring = CreateSelectionRing(root.transform, SelectionRingOuterRadius(rat.stage), SelectionRingInnerRadius(rat.stage));
+            // Keep one adult-sized ring mesh and scale it uniformly with the
+            // actual age curve. Rebuilding a stage-sized mesh would make the
+            // ring jump when a rat crosses the seven-day boundary.
+            var ring = CreateSelectionRing(root.transform,
+                SelectionRingOuterRadius(RatStage.Adult),
+                SelectionRingInnerRadius(RatStage.Adult));
             ring.SetActive(false);
             PositionSelectionRing(ring, rat);
 
@@ -597,6 +615,9 @@ namespace RatHabitat
                     ? GameConfig.PairingAdultVisualVerticalOffset
                     : 0f;
             ring.transform.localPosition = new Vector3(0f, visualOffset + 0.01f, 0f);
+            float ringScale = GrowthSystem.VisualScaleForAge(rat) /
+                Mathf.Max(0.0001f, GameConfig.AdultVisualScale);
+            ring.transform.localScale = Vector3.one * Mathf.Max(0.01f, ringScale);
         }
 
         private static void UpdateSelectionRing(GameObject ring, RatStage stage)
@@ -606,8 +627,8 @@ namespace RatHabitat
             if (filter == null) return;
             Mesh oldMesh = filter.sharedMesh;
             filter.sharedMesh = CreateRingMesh(
-                SelectionRingOuterRadius(stage),
-                SelectionRingInnerRadius(stage),
+                SelectionRingOuterRadius(RatStage.Adult),
+                SelectionRingInnerRadius(RatStage.Adult),
                 0.055f);
             if (oldMesh != null) UnityEngine.Object.Destroy(oldMesh);
         }
