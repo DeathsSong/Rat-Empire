@@ -222,6 +222,11 @@ namespace RatHabitat
         // enclosure reconciliation cannot infer a different destination.
         public bool pairingHabitatAssigned;
         public bool nursing;
+        // Persisted nursing interaction state. nursingUntil is the biological
+        // weaning deadline; these fields describe the short visible care
+        // interaction and must not be confused with it.
+        public string nursingPupId;
+        public long nursingInteractionUntil;
         // Authoritative life/reproduction state. These values are persisted so
         // a reload cannot silently reroll a rat's lifespan or fertile window.
         public float expectedLifespanDays;
@@ -250,6 +255,9 @@ namespace RatHabitat
         // but are no longer active in the habitat simulation.
         public RatRemovalDisposition removalDisposition = RatRemovalDisposition.None;
         public long removedAt;
+        // Persisted per-pup rotation marker. Zero means the pup has not yet
+        // received a nursing turn in this colony cycle.
+        public long lastNursedAt;
     }
 
     [Serializable]
@@ -357,6 +365,12 @@ namespace RatHabitat
         // dismisses the one-time welcome modal. Missing in older saves,
         // which correctly defaults to false and never interrupts them.
         public bool welcomePopupPending;
+        // Browser display preference. The initialized bit distinguishes an
+        // intentional opt-out from an older JSON record that predates this
+        // setting; older colonies therefore receive the gameplay-friendly
+        // default of keeping the screen awake.
+        public bool keepScreenAwake = true;
+        public bool keepScreenAwakePreferenceInitialized;
         public ClockData clock = new ClockData();
         public List<string> ratIds = new List<string>();
         public List<RatData> rats = new List<RatData>();
@@ -394,6 +408,11 @@ namespace RatHabitat
 
         public void EnsureLists()
         {
+            if (!keepScreenAwakePreferenceInitialized)
+            {
+                keepScreenAwake = true;
+                keepScreenAwakePreferenceInitialized = true;
+            }
             clock ??= new ClockData();
             ratIds ??= new List<string>();
             rats ??= new List<RatData>();

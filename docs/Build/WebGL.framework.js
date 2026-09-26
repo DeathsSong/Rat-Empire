@@ -1993,13 +1993,13 @@ var tempI64;
 // === Body ===
 
 var ASM_CONSTS = {
-  1836192: function() {return Module.webglContextAttributes.premultipliedAlpha;},  
- 1836253: function() {return Module.webglContextAttributes.preserveDrawingBuffer;},  
- 1836317: function() {return Module.webglContextAttributes.powerPreference;},  
- 1836375: function() {Module['emscripten_get_now_backup'] = performance.now;},  
- 1836430: function($0) {performance.now = function() { return $0; };},  
- 1836478: function($0) {performance.now = function() { return $0; };},  
- 1836526: function() {performance.now = Module['emscripten_get_now_backup'];}
+  1837232: function() {return Module.webglContextAttributes.premultipliedAlpha;},  
+ 1837293: function() {return Module.webglContextAttributes.preserveDrawingBuffer;},  
+ 1837357: function() {return Module.webglContextAttributes.powerPreference;},  
+ 1837415: function() {Module['emscripten_get_now_backup'] = performance.now;},  
+ 1837470: function($0) {performance.now = function() { return $0; };},  
+ 1837518: function($0) {performance.now = function() { return $0; };},  
+ 1837566: function() {performance.now = Module['emscripten_get_now_backup'];}
 };
 
 
@@ -4538,6 +4538,183 @@ var ASM_CONSTS = {
               window.localStorage.removeItem(key);
           } catch (error) {
               console.warn("Rat Habitat browser save remove failed", error);
+          }
+      }
+
+  function _RatHabitatBrowserWakeLockGetStatus() {
+          try {
+              var state = window.__ratHabitatWakeLockState;
+              if (!state) return 4;
+              return state.status || 4;
+          } catch (error) {
+              return 3;
+          }
+      }
+
+  function _RatHabitatBrowserWakeLockRegisterLifecycle() {
+          try {
+              var state = window.__ratHabitatWakeLockState;
+              if (!state) {
+                  state = window.__ratHabitatWakeLockState = {
+                      enabled: true,
+                      sentinel: null,
+                      pending: false,
+                      status: 5,
+                      listenersInstalled: false
+                  };
+              }
+              if (state.listenersInstalled) return;
+              state.listenersInstalled = true;
+              window.__ratHabitatRequestWakeLock = function () {
+                  try {
+                      if (window.__ratHabitatWakeLockState &&
+                          window.__ratHabitatWakeLockState.enabled &&
+                          document.visibilityState === "visible") {
+                          // Invoke the bridge function without requiring a fake
+                          // input event. This is used only to reacquire a lock
+                          // that the browser revoked after visibility changed.
+                          var current = window.__ratHabitatWakeLockState;
+                          if (!current.sentinel && !current.pending && navigator.wakeLock && navigator.wakeLock.request) {
+                              current.pending = true;
+                              current.status = 5;
+                              navigator.wakeLock.request("screen").then(function (sentinel) {
+                                  current.pending = false;
+                                  if (!current.enabled || document.visibilityState !== "visible") {
+                                      try { sentinel.release(); } catch (releaseError) { }
+                                      current.status = current.enabled ? 5 : 4;
+                                      return;
+                                  }
+                                  current.sentinel = sentinel;
+                                  current.status = 1;
+                                  sentinel.addEventListener("release", function () {
+                                      current.sentinel = null;
+                                      current.pending = false;
+                                      current.status = current.enabled ? 5 : 4;
+                                  }, false);
+                              }).catch(function () {
+                                  current.pending = false;
+                                  current.sentinel = null;
+                                  current.status = 3;
+                              });
+                          }
+                      }
+                  } catch (error) { }
+              };
+              document.addEventListener("visibilitychange", function () {
+                  if (document.visibilityState === "hidden") {
+                      if (state.sentinel) {
+                          try { state.sentinel.release(); } catch (releaseError) { }
+                          state.sentinel = null;
+                      }
+                      state.pending = false;
+                      state.status = state.enabled ? 5 : 4;
+                  } else if (state.enabled) {
+                      window.setTimeout(window.__ratHabitatRequestWakeLock, 150);
+                  }
+              }, false);
+          } catch (error) { }
+      }
+
+  function _RatHabitatBrowserWakeLockRequest() {
+          try {
+              var state = window.__ratHabitatWakeLockState;
+              if (!state) {
+                  state = window.__ratHabitatWakeLockState = {
+                      enabled: true,
+                      sentinel: null,
+                      pending: false,
+                      status: 5,
+                      listenersInstalled: false
+                  };
+              }
+              if (!state.enabled) {
+                  state.status = 4;
+                  return 0;
+              }
+              if (!navigator.wakeLock || typeof navigator.wakeLock.request !== "function") {
+                  state.status = 2;
+                  return 0;
+              }
+              if (document.visibilityState !== "visible") {
+                  state.status = 5;
+                  return 0;
+              }
+              if (state.sentinel || state.pending) return 1;
+  
+              state.pending = true;
+              state.status = 5;
+              navigator.wakeLock.request("screen").then(function (sentinel) {
+                  state.pending = false;
+                  if (!state.enabled || document.visibilityState !== "visible") {
+                      try { sentinel.release(); } catch (releaseError) { }
+                      state.status = state.enabled ? 5 : 4;
+                      return;
+                  }
+                  state.sentinel = sentinel;
+                  state.status = 1; // active
+                  sentinel.addEventListener("release", function () {
+                      state.sentinel = null;
+                      state.pending = false;
+                      if (!state.enabled) {
+                          state.status = 4;
+                      } else if (document.visibilityState === "visible") {
+                          // Surface the revocation without retrying in a tight
+                          // loop. The next real user gesture or visibility
+                          // transition is the safe retry point, especially when
+                          // the browser revoked the lock for low-battery mode.
+                          state.status = 3;
+                      } else {
+                          state.status = 5;
+                      }
+                  }, false);
+              }).catch(function () {
+                  state.pending = false;
+                  state.sentinel = null;
+                  state.status = 3; // denied/revoked/error
+              });
+              return 1;
+          } catch (error) {
+              var failedState = window.__ratHabitatWakeLockState;
+              if (failedState) {
+                  failedState.pending = false;
+                  failedState.status = 3;
+              }
+              return 0;
+          }
+      }
+
+  function _RatHabitatBrowserWakeLockSetDesired(enabled) {
+          try {
+              var state = window.__ratHabitatWakeLockState;
+              if (!state) {
+                  state = window.__ratHabitatWakeLockState = {
+                      enabled: false,
+                      sentinel: null,
+                      pending: false,
+                      status: 4,
+                      listenersInstalled: false
+                  };
+              }
+              state.enabled = !!enabled;
+              if (!state.enabled) {
+                  state.pending = false;
+                  state.status = 4; // disabled
+                  if (state.sentinel) {
+                      var sentinel = state.sentinel;
+                      state.sentinel = null;
+                      try { sentinel.release(); } catch (releaseError) { }
+                  }
+                  return;
+              }
+              if (!navigator.wakeLock || typeof navigator.wakeLock.request !== "function") {
+                  state.status = 2; // unsupported
+              } else if (document.visibilityState !== "visible") {
+                  state.status = 5; // waiting for a visible page
+              } else if (!state.sentinel && !state.pending) {
+                  state.status = 5; // awaiting a user-gesture request
+              }
+          } catch (error) {
+              // A browser integration failure must never affect the game loop.
           }
       }
 
@@ -15195,6 +15372,10 @@ var asmLibraryArg = {
   "RatHabitatBrowserRead": _RatHabitatBrowserRead,
   "RatHabitatBrowserRegisterLifecycle": _RatHabitatBrowserRegisterLifecycle,
   "RatHabitatBrowserRemove": _RatHabitatBrowserRemove,
+  "RatHabitatBrowserWakeLockGetStatus": _RatHabitatBrowserWakeLockGetStatus,
+  "RatHabitatBrowserWakeLockRegisterLifecycle": _RatHabitatBrowserWakeLockRegisterLifecycle,
+  "RatHabitatBrowserWakeLockRequest": _RatHabitatBrowserWakeLockRequest,
+  "RatHabitatBrowserWakeLockSetDesired": _RatHabitatBrowserWakeLockSetDesired,
   "RatHabitatBrowserWrite": _RatHabitatBrowserWrite,
   "__assert_fail": ___assert_fail,
   "__cxa_allocate_exception": ___cxa_allocate_exception,
@@ -15502,6 +15683,7 @@ var asmLibraryArg = {
   "invoke_iji": invoke_iji,
   "invoke_ijji": invoke_ijji,
   "invoke_j": invoke_j,
+  "invoke_jfi": invoke_jfi,
   "invoke_ji": invoke_ji,
   "invoke_jii": invoke_jii,
   "invoke_jiii": invoke_jiii,
@@ -15787,6 +15969,30 @@ var dynCall_j = Module["dynCall_j"] = createExportWrapper("dynCall_j");
 var dynCall_iijii = Module["dynCall_iijii"] = createExportWrapper("dynCall_iijii");
 
 /** @type {function(...*):?} */
+var dynCall_iiijii = Module["dynCall_iiijii"] = createExportWrapper("dynCall_iiijii");
+
+/** @type {function(...*):?} */
+var dynCall_iiiji = Module["dynCall_iiiji"] = createExportWrapper("dynCall_iiiji");
+
+/** @type {function(...*):?} */
+var dynCall_iiiiijii = Module["dynCall_iiiiijii"] = createExportWrapper("dynCall_iiiiijii");
+
+/** @type {function(...*):?} */
+var dynCall_ji = Module["dynCall_ji"] = createExportWrapper("dynCall_ji");
+
+/** @type {function(...*):?} */
+var dynCall_viiiiiiiiiii = Module["dynCall_viiiiiiiiiii"] = createExportWrapper("dynCall_viiiiiiiiiii");
+
+/** @type {function(...*):?} */
+var dynCall_fii = Module["dynCall_fii"] = createExportWrapper("dynCall_fii");
+
+/** @type {function(...*):?} */
+var dynCall_viiiffi = Module["dynCall_viiiffi"] = createExportWrapper("dynCall_viiiffi");
+
+/** @type {function(...*):?} */
+var dynCall_ifi = Module["dynCall_ifi"] = createExportWrapper("dynCall_ifi");
+
+/** @type {function(...*):?} */
 var dynCall_fi = Module["dynCall_fi"] = createExportWrapper("dynCall_fi");
 
 /** @type {function(...*):?} */
@@ -15814,28 +16020,7 @@ var dynCall_iiiiji = Module["dynCall_iiiiji"] = createExportWrapper("dynCall_iii
 var dynCall_iiiifi = Module["dynCall_iiiifi"] = createExportWrapper("dynCall_iiiifi");
 
 /** @type {function(...*):?} */
-var dynCall_iiijii = Module["dynCall_iiijii"] = createExportWrapper("dynCall_iiijii");
-
-/** @type {function(...*):?} */
-var dynCall_iiiji = Module["dynCall_iiiji"] = createExportWrapper("dynCall_iiiji");
-
-/** @type {function(...*):?} */
-var dynCall_iiiiijii = Module["dynCall_iiiiijii"] = createExportWrapper("dynCall_iiiiijii");
-
-/** @type {function(...*):?} */
-var dynCall_ji = Module["dynCall_ji"] = createExportWrapper("dynCall_ji");
-
-/** @type {function(...*):?} */
-var dynCall_viiiiiiiiiii = Module["dynCall_viiiiiiiiiii"] = createExportWrapper("dynCall_viiiiiiiiiii");
-
-/** @type {function(...*):?} */
-var dynCall_fii = Module["dynCall_fii"] = createExportWrapper("dynCall_fii");
-
-/** @type {function(...*):?} */
-var dynCall_viiiffi = Module["dynCall_viiiffi"] = createExportWrapper("dynCall_viiiffi");
-
-/** @type {function(...*):?} */
-var dynCall_ifi = Module["dynCall_ifi"] = createExportWrapper("dynCall_ifi");
+var dynCall_jfi = Module["dynCall_jfi"] = createExportWrapper("dynCall_jfi");
 
 /** @type {function(...*):?} */
 var dynCall_viji = Module["dynCall_viji"] = createExportWrapper("dynCall_viji");
@@ -16184,9 +16369,6 @@ var dynCall_vijiiiiii = Module["dynCall_vijiiiiii"] = createExportWrapper("dynCa
 
 /** @type {function(...*):?} */
 var dynCall_jdi = Module["dynCall_jdi"] = createExportWrapper("dynCall_jdi");
-
-/** @type {function(...*):?} */
-var dynCall_jfi = Module["dynCall_jfi"] = createExportWrapper("dynCall_jfi");
 
 /** @type {function(...*):?} */
 var dynCall_fji = Module["dynCall_fji"] = createExportWrapper("dynCall_fji");
@@ -16882,50 +17064,6 @@ function invoke_iiifi(index,a1,a2,a3,a4) {
   }
 }
 
-function invoke_vfi(index,a1,a2) {
-  var sp = stackSave();
-  try {
-    dynCall_vfi(index,a1,a2);
-  } catch(e) {
-    stackRestore(sp);
-    if (e !== e+0) throw e;
-    _setThrew(1, 0);
-  }
-}
-
-function invoke_iiiifi(index,a1,a2,a3,a4,a5) {
-  var sp = stackSave();
-  try {
-    return dynCall_iiiifi(index,a1,a2,a3,a4,a5);
-  } catch(e) {
-    stackRestore(sp);
-    if (e !== e+0) throw e;
-    _setThrew(1, 0);
-  }
-}
-
-function invoke_ffiffi(index,a1,a2,a3,a4,a5) {
-  var sp = stackSave();
-  try {
-    return dynCall_ffiffi(index,a1,a2,a3,a4,a5);
-  } catch(e) {
-    stackRestore(sp);
-    if (e !== e+0) throw e;
-    _setThrew(1, 0);
-  }
-}
-
-function invoke_viifii(index,a1,a2,a3,a4,a5) {
-  var sp = stackSave();
-  try {
-    dynCall_viifii(index,a1,a2,a3,a4,a5);
-  } catch(e) {
-    stackRestore(sp);
-    if (e !== e+0) throw e;
-    _setThrew(1, 0);
-  }
-}
-
 function invoke_viiiiiiiiiii(index,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11) {
   var sp = stackSave();
   try {
@@ -16963,6 +17101,50 @@ function invoke_ifi(index,a1,a2) {
   var sp = stackSave();
   try {
     return dynCall_ifi(index,a1,a2);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
+function invoke_vfi(index,a1,a2) {
+  var sp = stackSave();
+  try {
+    dynCall_vfi(index,a1,a2);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
+function invoke_iiiifi(index,a1,a2,a3,a4,a5) {
+  var sp = stackSave();
+  try {
+    return dynCall_iiiifi(index,a1,a2,a3,a4,a5);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
+function invoke_ffiffi(index,a1,a2,a3,a4,a5) {
+  var sp = stackSave();
+  try {
+    return dynCall_ffiffi(index,a1,a2,a3,a4,a5);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
+function invoke_viifii(index,a1,a2,a3,a4,a5) {
+  var sp = stackSave();
+  try {
+    dynCall_viifii(index,a1,a2,a3,a4,a5);
   } catch(e) {
     stackRestore(sp);
     if (e !== e+0) throw e;
@@ -17223,6 +17405,39 @@ function invoke_iijii(index,a1,a2,a3,a4,a5) {
   }
 }
 
+function invoke_iiijii(index,a1,a2,a3,a4,a5,a6) {
+  var sp = stackSave();
+  try {
+    return dynCall_iiijii(index,a1,a2,a3,a4,a5,a6);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
+function invoke_iiiji(index,a1,a2,a3,a4,a5) {
+  var sp = stackSave();
+  try {
+    return dynCall_iiiji(index,a1,a2,a3,a4,a5);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
+function invoke_iiiiijii(index,a1,a2,a3,a4,a5,a6,a7,a8) {
+  var sp = stackSave();
+  try {
+    return dynCall_iiiiijii(index,a1,a2,a3,a4,a5,a6,a7,a8);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
 function invoke_viiiji(index,a1,a2,a3,a4,a5,a6) {
   var sp = stackSave();
   try {
@@ -17245,32 +17460,10 @@ function invoke_iiiiji(index,a1,a2,a3,a4,a5,a6) {
   }
 }
 
-function invoke_iiiiijii(index,a1,a2,a3,a4,a5,a6,a7,a8) {
+function invoke_jfi(index,a1,a2) {
   var sp = stackSave();
   try {
-    return dynCall_iiiiijii(index,a1,a2,a3,a4,a5,a6,a7,a8);
-  } catch(e) {
-    stackRestore(sp);
-    if (e !== e+0) throw e;
-    _setThrew(1, 0);
-  }
-}
-
-function invoke_iiijii(index,a1,a2,a3,a4,a5,a6) {
-  var sp = stackSave();
-  try {
-    return dynCall_iiijii(index,a1,a2,a3,a4,a5,a6);
-  } catch(e) {
-    stackRestore(sp);
-    if (e !== e+0) throw e;
-    _setThrew(1, 0);
-  }
-}
-
-function invoke_iiiji(index,a1,a2,a3,a4,a5) {
-  var sp = stackSave();
-  try {
-    return dynCall_iiiji(index,a1,a2,a3,a4,a5);
+    return dynCall_jfi(index,a1,a2);
   } catch(e) {
     stackRestore(sp);
     if (e !== e+0) throw e;

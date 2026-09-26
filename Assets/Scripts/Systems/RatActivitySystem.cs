@@ -135,7 +135,14 @@ namespace RatHabitat
                 if (session != null) return "Breeding";
                 if (BreedingSystem.FindPendingPregnancyForMother(save, rat.id) != null) return "Pregnant";
             }
-            if (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing) return "Nursing";
+            if (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing)
+            {
+                if (rat.nursingInteractionUntil > gameTimeMs && rat.activity != null &&
+                    string.Equals(rat.activity.currentActivityKey, "nursing", System.StringComparison.Ordinal) &&
+                    !string.IsNullOrEmpty(rat.activity.currentActivityLabel))
+                    return rat.activity.currentActivityLabel;
+                return "Nursing";
+            }
             if (rat.reproductiveState == ReproductiveState.Recovery) return "Recovering";
             RatActivityData activity = Ensure(rat, gameTimeMs);
             return string.IsNullOrEmpty(activity.currentActivityLabel) ? DefaultLabel : activity.currentActivityLabel;
@@ -190,7 +197,9 @@ namespace RatHabitat
                 else if (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing)
                 {
                     key = "nursing";
-                    label = "Nursing";
+                    label = rat.nursingInteractionUntil > gameTimeMs
+                        ? "Caring for pinkies"
+                        : "Nursing";
                 }
                 else if (rat.reproductiveState == ReproductiveState.Recovery)
                 {

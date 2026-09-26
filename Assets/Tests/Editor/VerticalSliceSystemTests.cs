@@ -159,6 +159,46 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void PupSaleRequiresSixWeeksAndCompletedWeaning()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            long now = save.clock.gameTimeMs;
+            var pup = new RatData
+            {
+                id = "pup-sale-test",
+                name = "Pup",
+                sex = RatSex.Female,
+                stage = RatStage.YoungRat,
+                ageDays = 42f,
+                birthTimestamp = now - (long)(42f * GameConfig.GameDayMs),
+                breedingEndAgeDays = 700f,
+                sexualMaturityDays = GameConfig.FemaleSexualMaturityDays,
+                expectedLifespanDays = GameConfig.MaximumLifespanDays,
+                motherId = save.rats[0].id,
+                litterId = "litter-sale-test",
+                traits = new TraitData(8f, 8f, 8f),
+            };
+            save.rats.Add(pup);
+            save.ratIds.Add(pup.id);
+            save.litters.Add(new LitterData
+            {
+                id = pup.litterId,
+                motherId = pup.motherId,
+                pupIds = new List<string> { pup.id },
+                birthTimestamp = now - (long)(21f * GameConfig.GameDayMs),
+                weaningTimestamp = now + GameConfig.GameDayMs,
+            });
+
+            Assert.IsFalse(StoreSystem.CanSellRat(save, pup, now));
+            Assert.That(StoreSystem.SaleRestrictionReason(save, pup, now), Does.Contain("Not fully weaned"));
+            Assert.IsTrue(StoreSystem.CanSellRat(save, pup, now + GameConfig.GameDayMs));
+
+            pup.ageDays = 41f;
+            Assert.IsFalse(StoreSystem.CanSellRat(save, pup, now + GameConfig.GameDayMs));
+            Assert.That(StoreSystem.SaleRestrictionReason(save, pup, now + GameConfig.GameDayMs), Does.Contain("Too young"));
+        }
+
+        [Test]
         public void OffspringTraitsUseParentMidpointsForLowValuesInsteadOfFiftyFallbacks()
         {
             var inherited = GeneticsSystem.InheritTraits(
@@ -1030,18 +1070,18 @@ namespace RatHabitat.Tests
             string reason;
             Assert.IsTrue(BreedingSystem.StartBreeding(save, mother, father, 2000000L, out pregnancy, out reason), reason);
             EnclosureSystem.RecalculateAssignments(save);
-            Assert.AreEqual(RatEnclosure.Nursery, mother.enclosure);
+            Assert.AreEqual(RatEnclosure.FemaleColony, mother.enclosure);
             Assert.IsFalse(mother.nursing);
             Assert.AreEqual(RatEnclosure.MaleColony, father.enclosure);
 
             LitterData litter;
             Assert.IsTrue(BreedingSystem.FinishPregnancy(save, pregnancy.id, 2001000L, out litter, out reason), reason);
             EnclosureSystem.RecalculateAssignments(save);
-            Assert.AreEqual(RatEnclosure.Nursery, mother.enclosure);
+            Assert.AreEqual(RatEnclosure.FemaleColony, mother.enclosure);
             Assert.IsTrue(mother.nursing);
             foreach (var pupId in litter.pupIds)
             {
-                Assert.AreEqual(RatEnclosure.Nursery, BreedingSystem.FindRat(save, pupId).enclosure);
+                Assert.AreEqual(RatEnclosure.FemaleColony, BreedingSystem.FindRat(save, pupId).enclosure);
             }
 
             foreach (var pupId in litter.pupIds)
@@ -1055,7 +1095,7 @@ namespace RatHabitat.Tests
             foreach (var pupId in litter.pupIds)
             {
                 RatData pup = BreedingSystem.FindRat(save, pupId);
-                Assert.AreEqual(pup.sex == RatSex.Male ? RatEnclosure.MaleColony : RatEnclosure.FemaleColony, pup.enclosure);
+                Assert.AreEqual(RatEnclosure.FemaleColony, pup.enclosure);
             }
         }
 
@@ -1116,7 +1156,6 @@ namespace RatHabitat.Tests
             {
                 RatEnclosure.MaleColony,
                 RatEnclosure.FemaleColony,
-                RatEnclosure.Nursery,
                 RatEnclosure.Breeding,
                 RatEnclosure.Pairing,
             };
@@ -1132,10 +1171,60 @@ namespace RatHabitat.Tests
             }
 
             Vector3 femalePoint = EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, -1.5f, 4f);
-            Vector3 nurseryOpenPoint = EnclosureSystem.PointInEnclosure(RatEnclosure.Nursery, 3f, 4f);
             Assert.IsTrue(EnclosureSystem.IsBehaviorPointAllowed(RatEnclosure.FemaleColony, femalePoint));
-            Assert.IsFalse(EnclosureSystem.IsBehaviorPointAllowed(RatEnclosure.Nursery, EnclosureSystem.NurseryNestPosition));
-            Assert.IsTrue(EnclosureSystem.IsBehaviorPointAllowed(RatEnclosure.Nursery, nurseryOpenPoint));
+            Assert.IsFalse(EnclosureSystem.IsBehaviorPointAllowed(RatEnclosure.Pairing, EnclosureSystem.PairingNestPosition));
+        }
+
+        [Test]
+        public void RemovedNurseryAssignmentsFollowTheRecordedMother()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            RatData mother = save.rats[0];
+            mother.enclosure = RatEnclosure.Pairing;
+            mother.pairingHabitatAssigned = true;
+
+            RatData pup = ColonyFactory.CreateRat(
+                "legacy-pup", "Legacy Pup", RatSex.Male, 1000000L, 1,
+                mother.genotype.Clone(), new TraitData(4f, 5f, 6f), RatStage.Pinkie);
+            pup.motherId = mother.id;
+            pup.enclosure = RatEnclosure.Nursery;
+            save.rats.Add(pup);
+            save.ratIds.Add(pup.id);
+
+            RatData orphan = ColonyFactory.CreateRat(
+                "legacy-orphan", "Legacy Orphan", RatSex.Male, 1000000L, 1,
+                mother.genotype.Clone(), new TraitData(4f, 5f, 6f), RatStage.Pinkie);
+            orphan.enclosure = RatEnclosure.Nursery;
+            save.rats.Add(orphan);
+            save.ratIds.Add(orphan.id);
+
+            EnclosureSystem.RecalculateAssignments(save);
+
+            Assert.AreEqual(RatEnclosure.Pairing, pup.enclosure);
+            Assert.IsTrue(pup.pairingHabitatAssigned);
+            Assert.AreEqual(RatEnclosure.MaleColony, orphan.enclosure);
+        }
+
+        [Test]
+        public void ScreenAwakePreferenceDefaultsOnAndPreservesAnIntentionalOptOut()
+        {
+            ColonySaveData newSave = ColonyFactory.CreateNew(1000000L);
+            Assert.IsTrue(newSave.keepScreenAwake);
+            Assert.IsTrue(newSave.keepScreenAwakePreferenceInitialized);
+
+            // A legacy JSON record has no initialized bit. EnsureLists should
+            // migrate it to the gameplay-friendly default rather than treating
+            // a missing field as an intentional opt-out.
+            var legacy = new ColonySaveData { keepScreenAwake = false };
+            legacy.keepScreenAwakePreferenceInitialized = false;
+            legacy.EnsureLists();
+            Assert.IsTrue(legacy.keepScreenAwake);
+            Assert.IsTrue(legacy.keepScreenAwakePreferenceInitialized);
+
+            legacy.keepScreenAwake = false;
+            legacy.keepScreenAwakePreferenceInitialized = true;
+            legacy.EnsureLists();
+            Assert.IsFalse(legacy.keepScreenAwake);
         }
 
         [Test]

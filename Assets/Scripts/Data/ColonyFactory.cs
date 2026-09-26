@@ -14,6 +14,8 @@ namespace RatHabitat
                 createdAt = now,
                 updatedAt = now,
                 welcomePopupPending = true,
+                keepScreenAwake = true,
+                keepScreenAwakePreferenceInitialized = true,
                 colonyCredits = GameConfig.StartingColonyCredits,
                 currencyInitialized = true,
                 storeInventoryInitialized = false,
@@ -219,9 +221,11 @@ namespace RatHabitat
                 litterId = null,
                 pregnancyId = null,
                 breedingCooldownUntil = 0,
-                enclosure = stageOverride == RatStage.Pinkie
-                    ? RatEnclosure.Nursery
-                    : sex == RatSex.Male ? RatEnclosure.MaleColony : RatEnclosure.FemaleColony,
+                // Nursery was removed as a player-facing destination. A
+                // newborn is temporarily assigned by BreedingSystem to its
+                // mother's current enclosure; this safe fallback keeps
+                // standalone/test-created pinkies out of the legacy enum.
+                enclosure = sex == RatSex.Male ? RatEnclosure.MaleColony : RatEnclosure.FemaleColony,
                 nursing = false,
                 baseHealth = startingTraits.health,
                 baseFertility = startingTraits.fertility,

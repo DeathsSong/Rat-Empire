@@ -576,6 +576,8 @@ namespace RatHabitat
                     else
                     {
                         rat.nursing = false;
+                        rat.nursingPupId = null;
+                        rat.nursingInteractionUntil = 0L;
                         rat.recoveryUntil = Math.Max(rat.recoveryUntil,
                             gameTime + (long)(GameConfig.RecoveryDays * GameConfig.GameDayMs));
                         rat.reproductiveState = ReproductiveState.Recovery;
@@ -852,12 +854,18 @@ namespace RatHabitat
                 pup.coatColorVariant = GeneticsSystem.ResolveOffspringCoatColorVariant(
                     mother, father, pup.genotype, pup.id);
                 pup.coatTone = GeneticsSystem.DefaultCoatTone(pup.id, pup.genotype);
-                // A Pairing Habitat litter stays with its mother there for
-                // pregnancy, birth, nursing, and growth. Normal pregnancies
-                // continue using the existing Nursery assignment.
-                pup.enclosure = mother.enclosure == RatEnclosure.Pairing
-                    ? RatEnclosure.Pairing
-                    : RatEnclosure.Nursery;
+                // A litter always stays with its mother in the habitat where
+                // the birth occurred. Nursery is no longer a valid runtime
+                // destination; Pairing therefore remains a valid nest
+                // habitat, while ordinary litters remain in Female/Breeding
+                // as appropriate.
+                pup.enclosure = mother.enclosure == RatEnclosure.Nursery
+                    ? EnclosureSystem.StandardEnclosure(save, mother)
+                    : mother.enclosure;
+                if (pup.enclosure == RatEnclosure.Nursery)
+                    pup.enclosure = mother.sex == RatSex.Male
+                        ? RatEnclosure.MaleColony
+                        : RatEnclosure.FemaleColony;
                 pup.pairingHabitatAssigned = pup.enclosure == RatEnclosure.Pairing;
                 GeneticsSystem.EnsureCoatAppearance(pup);
                 pup.phenotype = GeneticsSystem.DerivePhenotype(RatStage.Pinkie, pup.genotype,

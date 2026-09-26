@@ -42,7 +42,6 @@ namespace RatHabitat
         {
             HabitatCameraView.MaleEnclosure,
             HabitatCameraView.FemaleEnclosure,
-            HabitatCameraView.Nursery,
             HabitatCameraView.Breeding,
             HabitatCameraView.Pairing,
         };
@@ -55,7 +54,7 @@ namespace RatHabitat
         private float habitatSwipeLockUntil;
         private const float HabitatSwipeDebounceSeconds = 0.24f;
         private bool habitatPageSettling;
-        private int habitatSettledPageIndex = 4;
+        private int habitatSettledPageIndex = 3;
         private float habitatPageSettleUntil;
         private const float HabitatPageSettleSeconds = 0.48f;
         private float saveTimer;
@@ -67,6 +66,7 @@ namespace RatHabitat
         private BreedingParentSlot breedingSelectionSlot;
         private bool startupWarning;
         private bool uiUpdateErrorLogged;
+        private string saleEligibilitySignature;
         private string deleteConfirmationRatId;
         private string sellConfirmationRatId;
         private string euthanizeConfirmationRatId;
@@ -74,6 +74,7 @@ namespace RatHabitat
         private bool multipleSelectionMode;
         private bool groupMoveConfirmationPending;
         private RatEnclosure groupMoveConfirmationTarget;
+        private bool groupSellConfirmationPending;
         private bool pairingMoveAllConfirmationPending;
         private bool resetConfirmationPending;
         private Vector3 normalCameraPosition;
@@ -245,6 +246,7 @@ namespace RatHabitat
         public bool MultipleSelectionMode { get { return multipleSelectionMode; } }
         public int SelectedGroupCount { get { return selectedRatIds.Count; } }
         public bool GroupMoveConfirmationPending { get { return groupMoveConfirmationPending; } }
+        public bool GroupSellConfirmationPending { get { return groupSellConfirmationPending; } }
         public RatEnclosure GroupMoveConfirmationTarget { get { return groupMoveConfirmationTarget; } }
         public bool PairingMoveAllConfirmationPending { get { return pairingMoveAllConfirmationPending; } }
         public int PairingHabitatCapacity { get { return GameConfig.BasePairingHabitatCapacity; } }
@@ -254,6 +256,14 @@ namespace RatHabitat
         public string MovementDiagnostics { get { return RatHabitatBehavior.GetMovementDiagnosticReadout(); } }
         public bool ResetConfirmationPending { get { return resetConfirmationPending; } }
         public bool WelcomePopupPending { get { return Save != null && Save.welcomePopupPending; } }
+        public bool KeepScreenAwakeEnabled
+        {
+            get { return BrowserWakeLockSystem.IsEnabled(Save); }
+        }
+        public string KeepScreenAwakeStatusMessage
+        {
+            get { return BrowserWakeLockSystem.StatusMessage(Save); }
+        }
         public HabitatCameraView CameraView { get { return cameraView; } }
         public int HabitatPageCount { get { return HabitatPages.Length; } }
         public int HabitatPageIndex
@@ -602,6 +612,7 @@ namespace RatHabitat
                 : (startupWarning
                     ? "Startup warning — see the Unity Console."
                     : "3D scene ready — " + Save.rats.Count + " rats loaded.");
+            BrowserWakeLockSystem.Initialize(Save);
 
             try
             {
@@ -1375,6 +1386,8 @@ namespace RatHabitat
             UpdateWorldViewport();
             UpdateCameraPresentation();
             UpdateHabitatPageSettling();
+            bool wakeLockStatusChanged = BrowserWakeLockSystem.PollStatus();
+            if (wakeLockStatusChanged && ui != null) ui.RefreshWakeLockControls();
             if (Save == null) return;
 
             bool welcomePaused = ui != null && ui.IsWelcomeOpen;
@@ -1391,6 +1404,7 @@ namespace RatHabitat
             bool stageChanged = GrowthSystem.RefreshRatStages(Save);
             bool reproductiveStateChanged = BreedingSystem.RefreshReproductiveStates(Save, GameTime);
             bool storeChanged = StoreSystem.AdvanceRestock(Save, GameTime);
+            bool saleEligibilityChanged = UpdateSaleEligibilitySignature();
             UpdatePairingApproach();
             PruneGroupSelection();
             List<DedicatedBreedingSessionData> completedSessions;
@@ -1487,6 +1501,12 @@ namespace RatHabitat
                 SaveSystem.Save(Save);
                 if (rats != null && habitat != null) rats.Render(Save, habitat.NestPosition);
             }
+            // Start visible mother/pup care only after the presenter has a
+            // stable root for every newborn. NursingSystem persists each
+            // pup's turn and the mother's short interaction deadline.
+            bool nursingChanged = NursingSystem.Tick(Save, GameTime, rats);
+            activityChanged = activityChanged || nursingChanged;
+            if (nursingChanged) SaveSystem.Save(Save);
             if (storeChanged)
             {
                 StatusMessage = "Rat Market restocked.";
@@ -1501,7 +1521,7 @@ namespace RatHabitat
                     // ScrollRect content every frame. At the new accelerated
                     // simulation speeds that would destroy page buttons
                     // continuously and make them impossible to click.
-                    if (stageChanged || reproductiveStateChanged || enclosureChanged || activityChanged)
+                    if (stageChanged || reproductiveStateChanged || enclosureChanged || activityChanged || saleEligibilityChanged)
                         ui.Refresh(true);
                     else
                         ui.RefreshHeader();
@@ -1517,8 +1537,25 @@ namespace RatHabitat
             }
         }
 
+        private bool UpdateSaleEligibilitySignature()
+        {
+            if (Save == null || Save.rats == null) return false;
+            var builder = new System.Text.StringBuilder();
+            foreach (RatData rat in Save.rats)
+            {
+                if (rat == null) continue;
+                builder.Append(rat.id ?? string.Empty).Append('=')
+                    .Append(CanSellRat(rat) ? '1' : '0').Append(';');
+            }
+            string signature = builder.ToString();
+            bool changed = saleEligibilitySignature != null && saleEligibilitySignature != signature;
+            saleEligibilitySignature = signature;
+            return changed;
+        }
+
         public bool SelectEntity(SelectableEntity entity)
         {
+            BrowserWakeLockSystem.RequestFromUserGesture(Save);
             habitatZoomOffset = 0f;
             ClearPendingSelectionActions();
             if (entity == null)
@@ -1607,10 +1644,11 @@ namespace RatHabitat
         /// </summary>
         public void DeactivateMultipleSelection()
         {
-            if (!multipleSelectionMode && selectedRatIds.Count == 0 && !groupMoveConfirmationPending) return;
+            if (!multipleSelectionMode && selectedRatIds.Count == 0 && !groupMoveConfirmationPending && !groupSellConfirmationPending) return;
             multipleSelectionMode = false;
             selectedRatIds.Clear();
             groupMoveConfirmationPending = false;
+            groupSellConfirmationPending = false;
             if (rats != null) rats.SetSelected(selectedRatId);
         }
 
@@ -1682,6 +1720,7 @@ namespace RatHabitat
         /// </summary>
         public void FocusHabitatAtWorldPoint(Vector3 worldPoint)
         {
+            BrowserWakeLockSystem.RequestFromUserGesture(Save);
             if (breedingOpen)
             {
                 breedingOpen = false;
@@ -1729,7 +1768,6 @@ namespace RatHabitat
             switch (closest)
             {
                 case RatEnclosure.MaleColony: return HabitatCameraView.MaleEnclosure;
-                case RatEnclosure.Nursery: return HabitatCameraView.Nursery;
                 case RatEnclosure.Breeding: return HabitatCameraView.Breeding;
                 case RatEnclosure.Pairing: return HabitatCameraView.Pairing;
                 default: return HabitatCameraView.FemaleEnclosure;
@@ -1742,7 +1780,6 @@ namespace RatHabitat
             {
                 case HabitatCameraView.MaleEnclosure: return "Male Cage";
                 case HabitatCameraView.FemaleEnclosure: return "Female Cage";
-                case HabitatCameraView.Nursery: return "Nursery";
                 case HabitatCameraView.Breeding: return "Breeding";
                 case HabitatCameraView.Pairing: return "Pairing Habitat";
                 default: return "Overview";
@@ -1751,7 +1788,7 @@ namespace RatHabitat
 
         private static HabitatCameraView NormalizeHabitatView(HabitatCameraView view)
         {
-            return view == HabitatCameraView.Overview
+            return view == HabitatCameraView.Overview || view == HabitatCameraView.Nursery
                 ? HabitatCameraView.Pairing
                 : view;
         }
@@ -1916,6 +1953,7 @@ namespace RatHabitat
             sellConfirmationRatId = null;
             euthanizeConfirmationRatId = null;
             groupMoveConfirmationPending = false;
+            groupSellConfirmationPending = false;
             pairingMoveAllConfirmationPending = false;
             breedingOpen = false;
             parentAId = null;
@@ -1943,7 +1981,7 @@ namespace RatHabitat
                 return;
             }
             pairingMoveAllConfirmationPending = true;
-            StatusMessage = "Move every Pairing Habitat rat out? Pregnant and nursing families will go to the Nursery.";
+            StatusMessage = "Move every Pairing Habitat rat out? Mothers and pups will stay together in a normal habitat.";
             if (ui != null) ui.Refresh(true);
         }
 
@@ -1986,12 +2024,18 @@ namespace RatHabitat
 
         private RatEnclosure PairingEvacuationDestination(RatData rat)
         {
-            if (rat == null || rat.stage == RatStage.Pinkie) return RatEnclosure.Nursery;
-            if (rat.sex == RatSex.Male) return RatEnclosure.MaleColony;
-            return EnclosureSystem.IsPregnant(Save, rat) || rat.nursing ||
-                EnclosureSystem.HasDependentPinkies(Save, rat.id)
-                ? RatEnclosure.Nursery
-                : RatEnclosure.FemaleColony;
+            if (rat == null) return RatEnclosure.FemaleColony;
+            if (rat.stage == RatStage.Pinkie && !string.IsNullOrEmpty(rat.motherId))
+            {
+                RatData mother = BreedingSystem.FindRat(Save, rat.motherId);
+                if (mother != null && mother.enclosure != RatEnclosure.Pairing &&
+                    mother.enclosure != RatEnclosure.Nursery)
+                    return mother.enclosure;
+                // When the whole family is being evacuated, the mother will
+                // resolve to Female Cage below; keep every pup with her.
+                return RatEnclosure.FemaleColony;
+            }
+            return rat.sex == RatSex.Male ? RatEnclosure.MaleColony : RatEnclosure.FemaleColony;
         }
 
         public void RequestMoveSelectedRats(RatEnclosure target)
@@ -2009,7 +2053,7 @@ namespace RatHabitat
                 RatData rat = BreedingSystem.FindRat(Save, id);
                 if (rat == null) continue;
                 bool hasFamily = rat.nursing || EnclosureSystem.HasDependentPinkies(Save, rat.id) || HasSelectedMotherRelationship(rat.id);
-                bool separatesFamily = target != RatEnclosure.Pairing && target != RatEnclosure.Nursery;
+                bool separatesFamily = target != RatEnclosure.Pairing;
                 if ((separatesFamily && hasFamily) || HasUnselectedMotherRelationship(rat.id))
                 {
                     needsConfirmation = true;
@@ -2030,6 +2074,7 @@ namespace RatHabitat
         {
             if (!groupMoveConfirmationPending) return;
             groupMoveConfirmationPending = false;
+            groupSellConfirmationPending = false;
             MoveSelectedRatsToHabitat(groupMoveConfirmationTarget);
         }
 
@@ -2038,6 +2083,78 @@ namespace RatHabitat
             groupMoveConfirmationPending = false;
             StatusMessage = "Group move cancelled.";
             if (ui != null) ui.Refresh(true);
+        }
+
+        public void RequestSellSelectedRats()
+        {
+            if (!multipleSelectionMode || selectedRatIds.Count == 0)
+            {
+                StatusMessage = "Select at least one rat first.";
+                if (ui != null) ui.Refresh(false);
+                return;
+            }
+
+            foreach (string id in selectedRatIds)
+            {
+                RatData rat = BreedingSystem.FindRat(Save, id);
+                if (rat == null) continue;
+                if (!CanSellRat(rat))
+                {
+                    StatusMessage = ColonyFactory.DisplayName(rat) + ": " + SaleRestrictionReason(rat);
+                    if (ui != null) ui.Refresh(true);
+                    return;
+                }
+            }
+
+            groupSellConfirmationPending = true;
+            StatusMessage = "Sell " + selectedRatIds.Count + " selected rat" +
+                (selectedRatIds.Count == 1 ? string.Empty : "s") + "? This cannot be undone.";
+            if (ui != null) ui.Refresh(true);
+        }
+
+        public void CancelSellSelectedRats()
+        {
+            groupSellConfirmationPending = false;
+            StatusMessage = "Group sale cancelled.";
+            if (ui != null) ui.Refresh(true);
+        }
+
+        public void ConfirmSellSelectedRats()
+        {
+            if (!groupSellConfirmationPending || Save == null) return;
+            var ids = new List<string>(selectedRatIds);
+            foreach (string id in ids)
+            {
+                RatData rat = BreedingSystem.FindRat(Save, id);
+                if (rat != null && !CanSellRat(rat))
+                {
+                    groupSellConfirmationPending = false;
+                    StatusMessage = ColonyFactory.DisplayName(rat) + ": " + SaleRestrictionReason(rat);
+                    if (ui != null) ui.Refresh(true);
+                    return;
+                }
+            }
+
+            int sold = 0;
+            int dollars = 0;
+            foreach (string id in ids)
+            {
+                RatData rat = BreedingSystem.FindRat(Save, id);
+                if (rat == null) continue;
+                int value = SellValue(rat);
+                if (RetireActiveRat(rat, RatRemovalDisposition.Sold, true))
+                {
+                    sold++;
+                    dollars += value;
+                }
+            }
+            groupSellConfirmationPending = false;
+            multipleSelectionMode = false;
+            selectedRatIds.Clear();
+            StatusMessage = "Sold " + sold + " rat" + (sold == 1 ? string.Empty : "s") +
+                " for $" + dollars + ".";
+            SaveSystem.Save(Save);
+            RefreshWorldAndUi(true);
         }
 
         private bool HasSelectedMotherRelationship(string ratId)
@@ -2113,12 +2230,19 @@ namespace RatHabitat
                 }
                 else if (rat.stage == RatStage.Pinkie)
                 {
-                    rat.enclosure = RatEnclosure.Nursery;
+                    rat.enclosure = string.IsNullOrEmpty(rat.motherId)
+                        ? (rat.sex == RatSex.Male ? RatEnclosure.MaleColony : RatEnclosure.FemaleColony)
+                        : PairingEvacuationDestination(rat);
                     rat.pairingHabitatAssigned = false;
                 }
                 else if (target == RatEnclosure.Nursery)
                 {
-                    rat.enclosure = RatEnclosure.Nursery;
+                    // Compatibility callers may still pass the removed enum.
+                    // Treat it as an ordinary sex-based destination rather
+                    // than creating a new Nursery assignment.
+                    rat.enclosure = rat.sex == RatSex.Male
+                        ? RatEnclosure.MaleColony
+                        : RatEnclosure.FemaleColony;
                     rat.pairingHabitatAssigned = false;
                 }
                 else if (target == RatEnclosure.MaleColony && rat.sex == RatSex.Male)
@@ -2170,7 +2294,9 @@ namespace RatHabitat
 
         public void ViewNursery()
         {
-            SetHabitatCameraView(HabitatCameraView.Nursery);
+            // Compatibility entry point for old generated callbacks. There
+            // is no Nursery page anymore; the main habitat is Pairing.
+            SetHabitatCameraView(HabitatCameraView.Pairing);
         }
 
         public void ViewBreedingEnclosure()
@@ -2403,6 +2529,27 @@ namespace RatHabitat
         }
 
         /// <summary>
+        /// Changes only the inspected rat for the profile header arrows. This
+        /// deliberately does not close panels, toggle breeding, clear the
+        /// profile, or invoke any move/sale action; the UI owns the current
+        /// profile context and preserves its expanded/scroll state.
+        /// </summary>
+        public bool SelectRatForProfileNavigation(string id)
+        {
+            RatData rat = BreedingSystem.FindRat(Save, id);
+            if (rat == null) return false;
+            ClearPendingSelectionActions();
+            selectedRatId = rat.id;
+            selectedObjectId = null;
+            cameraView = CameraViewForRat(rat);
+            cameraFollowSelectedRat = true;
+            if (rats != null) rats.SetSelected(rat.id);
+            if (ui != null) ui.SuppressGeneratedUiActionsThisFrame();
+            if (ui != null) ui.Refresh(true);
+            return true;
+        }
+
+        /// <summary>
         /// Focuses an active rat for a profile or family-tree view without
         /// clearing an in-progress breeding selection/session. Family-history
         /// navigation is informational and must not mutate breeding state.
@@ -2429,7 +2576,6 @@ namespace RatHabitat
             switch (rat.enclosure)
             {
                 case RatEnclosure.MaleColony: return HabitatCameraView.MaleEnclosure;
-                case RatEnclosure.Nursery: return HabitatCameraView.Nursery;
                 case RatEnclosure.Breeding: return HabitatCameraView.Breeding;
                 case RatEnclosure.Pairing: return HabitatCameraView.Pairing;
                 default: return HabitatCameraView.FemaleEnclosure;
@@ -2564,9 +2710,9 @@ namespace RatHabitat
             parentBId = null;
             breedingSelectionSlot = BreedingParentSlot.None;
             SaveSystem.Save(Save);
-            // Pregnancy begins nursery care immediately. Reuse the stable
-            // presenter roots so the mother relocates without creating a
-            // second visual or changing selection identity.
+            // Pregnancy begins care in the mother's current habitat. Reuse
+            // the stable presenter roots without creating a second visual or
+            // changing selection identity.
             RefreshWorldAndUi(true);
         }
 
@@ -2753,6 +2899,7 @@ namespace RatHabitat
         public void SetSimulationSpeed(float speed)
         {
             if (Save == null || Save.clock == null) return;
+            BrowserWakeLockSystem.RequestFromUserGesture(Save);
             float normalized = GrowthSystem.NormalizeSpeed(speed);
             Save.clock.speed = normalized;
             // Apply the presentation multiplier in the same action as the
@@ -2766,12 +2913,17 @@ namespace RatHabitat
 
         public int SellValue(RatData rat)
         {
-            return StoreSystem.CalculateSaleValue(rat);
+            return StoreSystem.CalculateSaleValue(Save, rat, GameTime);
         }
 
         public bool CanSellRat(RatData rat)
         {
-            return StoreSystem.CanSellRat(rat);
+            return StoreSystem.CanSellRat(Save, rat, GameTime);
+        }
+
+        public string SaleRestrictionReason(RatData rat)
+        {
+            return StoreSystem.SaleRestrictionReason(Save, rat, GameTime);
         }
 
         public string SaleWarningsFor(RatData rat)
@@ -2786,8 +2938,11 @@ namespace RatHabitat
             if (rat.traits != null && rat.traits.health <= 40f) warnings.Add("Sick or injured");
             if (hasActiveLitter) warnings.Add("Has offspring");
             if (hasAnyLitter) warnings.Add("Parent of a litter");
-            if (rat.enclosure == RatEnclosure.Nursery || rat.enclosure == RatEnclosure.Breeding || rat.enclosure == RatEnclosure.Pairing)
+            if (rat.enclosure == RatEnclosure.Breeding || rat.enclosure == RatEnclosure.Pairing)
                 warnings.Add("Special habitat: " + EnclosureSystem.Label(rat.enclosure));
+
+            string restriction = SaleRestrictionReason(rat);
+            if (!string.IsNullOrEmpty(restriction) && !warnings.Contains(restriction)) warnings.Add(restriction);
 
             return warnings.Count == 0 ? "None" : string.Join(" • ", warnings.ToArray());
         }
@@ -2851,7 +3006,7 @@ namespace RatHabitat
             }
             if (!CanSellRat(rat))
             {
-                StatusMessage = "Elderly rats cannot be sold.";
+                StatusMessage = SaleRestrictionReason(rat);
                 if (ui != null) ui.Refresh(true);
                 return;
             }
@@ -2881,7 +3036,7 @@ namespace RatHabitat
             if (!CanSellRat(rat))
             {
                 sellConfirmationRatId = null;
-                StatusMessage = "Elderly rats cannot be sold.";
+                StatusMessage = SaleRestrictionReason(rat);
                 if (ui != null) ui.Refresh(true);
                 return;
             }
@@ -2943,7 +3098,7 @@ namespace RatHabitat
         {
             if (disposition == RatRemovalDisposition.Sold && !CanSellRat(rat))
             {
-                StatusMessage = "Elderly rats cannot be sold.";
+                StatusMessage = SaleRestrictionReason(rat);
                 sellConfirmationRatId = null;
                 if (ui != null) ui.Refresh(true);
                 return false;
@@ -3080,6 +3235,7 @@ namespace RatHabitat
             // object so no stale rats or selection rings survive the reset.
             if (rats != null) rats.Render(null, habitat == null ? Vector3.zero : habitat.NestPosition);
             Save = ColonyFactory.CreateNew(GameConfig.NowMs());
+            BrowserWakeLockSystem.Initialize(Save);
             if (habitat != null)
             {
                 habitat.Rebuild(Save);
@@ -3100,7 +3256,26 @@ namespace RatHabitat
             Save.welcomePopupPending = false;
             if (Save.clock != null) Save.clock.lastRealTimestamp = GameConfig.NowMs();
             GrowthSystem.SetSimulationPaused(false);
+            BrowserWakeLockSystem.RequestFromUserGesture(Save);
             SaveSystem.Save(Save);
+        }
+
+        public void ToggleKeepScreenAwake()
+        {
+            if (Save == null) return;
+            bool enabled = !KeepScreenAwakeEnabled;
+            BrowserWakeLockSystem.SetPreference(Save, enabled, enabled);
+            StatusMessage = enabled
+                ? "Keep Screen Awake enabled."
+                : "Keep Screen Awake disabled.";
+            SaveSystem.Save(Save);
+            if (ui != null) ui.RefreshWakeLockControls();
+        }
+
+        public void RequestScreenWakeLockFromUserGesture()
+        {
+            BrowserWakeLockSystem.RequestFromUserGesture(Save);
+            if (ui != null) ui.RefreshWakeLockControls();
         }
 
         public void ServiceSelectedObject()
@@ -3259,7 +3434,6 @@ namespace RatHabitat
                 switch (cameraView)
                 {
                     case HabitatCameraView.MaleEnclosure: enclosure = RatEnclosure.MaleColony; break;
-                    case HabitatCameraView.Nursery: enclosure = RatEnclosure.Nursery; break;
                     case HabitatCameraView.Breeding: enclosure = RatEnclosure.Breeding; break;
                     case HabitatCameraView.Pairing: enclosure = RatEnclosure.Pairing; break;
                     default: enclosure = RatEnclosure.FemaleColony; break;

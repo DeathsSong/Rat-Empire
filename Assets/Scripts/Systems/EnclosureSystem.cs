@@ -43,13 +43,16 @@ namespace RatHabitat
             RatEnclosure.FemaleColony, "Female Cage", HabitatColumnSpacing,
             new Color(0.58f, 0.68f, 0.51f), new Color(0.30f, 0.42f, 0.28f));
         private static readonly Definition NurseryDefinition = CreateFullHabitatDefinition(
-            RatEnclosure.Nursery, "Nursery", HabitatColumnSpacing * 2f,
+            // Kept only as a compatibility definition for old serialized
+            // coordinates. Nursery is no longer a player-facing enclosure
+            // and is never instantiated by HabitatBuilder.
+            RatEnclosure.Nursery, "Legacy Nursery", -HabitatColumnSpacing * 2f,
             new Color(0.72f, 0.62f, 0.48f), new Color(0.45f, 0.29f, 0.20f));
         private static readonly Definition BreedingDefinition = CreateFullHabitatDefinition(
-            RatEnclosure.Breeding, "Breeding", HabitatColumnSpacing * 3f,
+            RatEnclosure.Breeding, "Breeding", HabitatColumnSpacing * 2f,
             new Color(0.50f, 0.58f, 0.72f), new Color(0.25f, 0.32f, 0.52f));
         private static readonly Definition PairingDefinition = CreateFullHabitatDefinition(
-            RatEnclosure.Pairing, "Pairing Habitat", HabitatColumnSpacing * 4f,
+            RatEnclosure.Pairing, "Pairing Habitat", HabitatColumnSpacing * 3f,
             new Color(0.48f, 0.55f, 0.42f), new Color(0.23f, 0.34f, 0.25f));
 
         private static string activeBreedingMotherId;
@@ -59,7 +62,6 @@ namespace RatHabitat
         {
             RatEnclosure.MaleColony,
             RatEnclosure.FemaleColony,
-            RatEnclosure.Nursery,
             RatEnclosure.Breeding,
             RatEnclosure.Pairing,
         };
@@ -122,6 +124,8 @@ namespace RatHabitat
 
         public static string Label(RatEnclosure enclosure)
         {
+            if (enclosure == RatEnclosure.Nursery)
+                return "Female Cage";
             return GetDefinition(enclosure).label;
         }
 
@@ -190,12 +194,14 @@ namespace RatHabitat
 
         public static bool HasNest(RatEnclosure enclosure)
         {
-            return enclosure == RatEnclosure.Nursery || enclosure == RatEnclosure.Pairing;
+            return enclosure == RatEnclosure.FemaleColony || enclosure == RatEnclosure.Pairing;
         }
 
         public static Vector3 GetNestPosition(RatEnclosure enclosure)
         {
-            return enclosure == RatEnclosure.Pairing ? PairingNestPosition : NurseryNestPosition;
+            return enclosure == RatEnclosure.Pairing
+                ? PairingNestPosition
+                : PointInEnclosure(RatEnclosure.FemaleColony, 0f, 0f, NurseryNestY);
         }
 
         public static bool IsInsideAdultNestExclusion(RatEnclosure enclosure, Vector3 position)
@@ -316,7 +322,11 @@ namespace RatHabitat
         {
             if (save == null) return false;
             save.EnsureLists();
-            bool changed = false;
+            // Older saves used Nursery as both a visible habitat and an
+            // automatic destination for mothers and pups. Migrate those
+            // records before deriving any new assignment so no later pass can
+            // pull a family back into the removed habitat.
+            bool changed = MigrateLegacyNurseryAssignments(save);
             long gameTime = save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs;
             foreach (var rat in save.rats)
             {
@@ -395,20 +405,127 @@ namespace RatHabitat
             // and growth must not pull its residents into the normal Nursery
             // or colony zones; only an explicit remove action can do that.
             if (rat != null && (rat.pairingHabitatAssigned || rat.enclosure == RatEnclosure.Pairing)) return RatEnclosure.Pairing;
-            if (rat == null || rat.stage == RatStage.Pinkie) return RatEnclosure.Nursery;
+            if (rat == null) return RatEnclosure.FemaleColony;
+            if ((rat.stage == RatStage.Pinkie || rat.stage == RatStage.YoungRat) &&
+                (!string.IsNullOrEmpty(rat.motherId) || !string.IsNullOrEmpty(rat.litterId)))
+                return ResolveMotherHabitat(save, rat);
             if (rat.sex == RatSex.Male) return RatEnclosure.MaleColony;
-            if (hasDependentPinkies || rat.reproductiveState == ReproductiveState.Nursing || IsPregnant(save, rat))
-                return RatEnclosure.Nursery;
+            // Pregnancy, nursing, and weaning are relationship states, not a
+            // reason to move the mother to a separate enclosure. Keep her in
+            // the habitat she is already assigned to; Pairing/Breeding were
+            // handled above and ordinary females remain in Female Cage.
             return RatEnclosure.FemaleColony;
         }
 
         public static RatEnclosure StandardEnclosure(ColonySaveData save, RatData rat)
         {
-            if (rat == null || rat.stage == RatStage.Pinkie) return RatEnclosure.Nursery;
+            if (rat == null) return RatEnclosure.FemaleColony;
+            if (rat.stage == RatStage.Pinkie)
+            {
+                RatEnclosure motherHabitat = ResolveMotherHabitat(save, rat);
+                return motherHabitat == RatEnclosure.Pairing
+                    ? RatEnclosure.FemaleColony
+                    : motherHabitat;
+            }
             if (rat.sex == RatSex.Male) return RatEnclosure.MaleColony;
-            bool dependentPinkies = rat.sex == RatSex.Female && HasDependentPinkies(save, rat.id);
-            return dependentPinkies || rat.reproductiveState == ReproductiveState.Nursing || IsPregnant(save, rat)
-                ? RatEnclosure.Nursery
+            return RatEnclosure.FemaleColony;
+        }
+
+        /// <summary>
+        /// Converts the removed Nursery assignment into the mother's current
+        /// habitat. This is intentionally relationship-based: a male pup may
+        /// remain beside its mother until the player explicitly moves it, and
+        /// duplicate display names never affect the migration.
+        /// </summary>
+        public static bool MigrateLegacyNurseryAssignments(ColonySaveData save)
+        {
+            if (save == null || save.rats == null) return false;
+            var resolved = new Dictionary<string, RatEnclosure>();
+            bool changed = false;
+            foreach (RatData rat in save.rats)
+            {
+                if (rat == null || rat.enclosure != RatEnclosure.Nursery) continue;
+                RatEnclosure destination = ResolveLegacyNurseryHabitat(save, rat, resolved,
+                    new HashSet<string>());
+                if (destination == RatEnclosure.Nursery) destination = FallbackHabitat(rat);
+                if (rat.enclosure != destination)
+                {
+                    rat.enclosure = destination;
+                    changed = true;
+                }
+                bool pairingAssigned = destination == RatEnclosure.Pairing;
+                if (rat.pairingHabitatAssigned != pairingAssigned)
+                {
+                    rat.pairingHabitatAssigned = pairingAssigned;
+                    changed = true;
+                }
+                if (!string.IsNullOrEmpty(rat.id)) resolved[rat.id] = destination;
+            }
+            return changed;
+        }
+
+        private static RatEnclosure ResolveMotherHabitat(ColonySaveData save, RatData pup)
+        {
+            if (pup == null) return RatEnclosure.FemaleColony;
+            var resolved = new Dictionary<string, RatEnclosure>();
+            RatData recordedMother = FindRecordedMother(save, pup);
+            if (recordedMother != null)
+            {
+                RatEnclosure motherHabitat = recordedMother.enclosure == RatEnclosure.Nursery
+                    ? ResolveLegacyNurseryHabitat(save, recordedMother, resolved, new HashSet<string>())
+                    : recordedMother.enclosure;
+                return motherHabitat == RatEnclosure.Nursery
+                    ? FallbackHabitat(pup)
+                    : motherHabitat;
+            }
+            if (pup.enclosure != RatEnclosure.Nursery) return pup.enclosure;
+            return FallbackHabitat(pup);
+        }
+
+        private static RatEnclosure ResolveLegacyNurseryHabitat(ColonySaveData save, RatData rat,
+            Dictionary<string, RatEnclosure> resolved, HashSet<string> visiting)
+        {
+            if (rat == null) return RatEnclosure.FemaleColony;
+            if (rat.enclosure != RatEnclosure.Nursery) return rat.enclosure;
+            if (rat.pairingHabitatAssigned) return RatEnclosure.Pairing;
+            if (!string.IsNullOrEmpty(rat.id) && resolved.TryGetValue(rat.id, out RatEnclosure cached))
+                return cached;
+            if (!string.IsNullOrEmpty(rat.id) && !visiting.Add(rat.id))
+                return FallbackHabitat(rat);
+
+            RatData mother = FindRecordedMother(save, rat);
+
+            RatEnclosure destination = mother == null
+                ? FallbackHabitat(rat)
+                : ResolveLegacyNurseryHabitat(save, mother, resolved, visiting);
+            if (destination == RatEnclosure.Nursery) destination = FallbackHabitat(rat);
+            visiting.Remove(rat.id);
+            if (!string.IsNullOrEmpty(rat.id)) resolved[rat.id] = destination;
+            return destination;
+        }
+
+        private static RatData FindRecordedMother(ColonySaveData save, RatData pup)
+        {
+            if (save == null || save.rats == null || pup == null) return null;
+            if (!string.IsNullOrEmpty(pup.motherId))
+            {
+                foreach (RatData candidate in save.rats)
+                    if (candidate != null && candidate.id == pup.motherId) return candidate;
+            }
+            if (string.IsNullOrEmpty(pup.litterId) || save.litters == null) return null;
+            foreach (LitterData litter in save.litters)
+            {
+                if (litter == null || litter.id != pup.litterId || string.IsNullOrEmpty(litter.motherId)) continue;
+                foreach (RatData candidate in save.rats)
+                    if (candidate != null && candidate.id == litter.motherId) return candidate;
+            }
+            return null;
+        }
+
+        private static RatEnclosure FallbackHabitat(RatData rat)
+        {
+            return rat != null && rat.sex == RatSex.Male
+                ? RatEnclosure.MaleColony
                 : RatEnclosure.FemaleColony;
         }
 
@@ -532,7 +649,7 @@ namespace RatHabitat
         {
             Vector3 nest = enclosure == RatEnclosure.Pairing
                 ? PairingNestPosition
-                : (fallbackNestPosition == Vector3.zero ? NurseryNestPosition : fallbackNestPosition);
+                : PointInEnclosure(enclosure, 0f, 0f, NurseryNestY);
             string litterKey = string.IsNullOrEmpty(litterSeed)
                 ? (string.IsNullOrEmpty(ratId) ? "unassigned-litter" : ratId)
                 : litterSeed;

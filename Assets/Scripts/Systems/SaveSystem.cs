@@ -162,6 +162,12 @@ namespace RatHabitat
                 if (string.IsNullOrEmpty(rat.id)) rat.id = ColonyFactory.NewId("rat");
                 // Migrate older saves that only stored the enclosure enum.
                 if (rat.enclosure == RatEnclosure.Pairing) rat.pairingHabitatAssigned = true;
+                // Nursing fields were added after the original browser save
+                // schema. JsonUtility leaves them at their safe defaults;
+                // sanitize malformed negative values without touching valid
+                // per-pup rotation timestamps.
+                if (rat.lastNursedAt < 0L) rat.lastNursedAt = 0L;
+                if (rat.nursingInteractionUntil < 0L) rat.nursingInteractionUntil = 0L;
                 GrowthSystem.EnsureBiologyDefaults(rat);
                 GeneticsSystem.Normalize(rat.genotype);
                 GeneticsSystem.EnsureCoatAppearance(rat);

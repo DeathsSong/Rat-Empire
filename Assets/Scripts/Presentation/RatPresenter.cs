@@ -206,6 +206,15 @@ namespace RatHabitat
             return true;
         }
 
+        public bool BeginNursingInteraction(string motherId, string pupId, float durationSeconds)
+        {
+            RatHabitatBehavior behavior;
+            Transform pupRoot;
+            if (!TryGetRatBehavior(motherId, out behavior) || !TryGetRatRoot(pupId, out pupRoot) ||
+                pupRoot == null) return false;
+            return behavior.BeginNursingInteraction(pupRoot.position, durationSeconds);
+        }
+
         /// <summary>
         /// Places a mother beside her enclosure's nest for the birth frame.
         /// Pinkies remain on the nest; adults are routed through the same

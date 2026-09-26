@@ -101,6 +101,9 @@ namespace RatHabitat
         private readonly List<Vector3> nestDetourWaypoints = new List<Vector3>();
         private int nestDetourWaypointIndex;
         private float pairingInteractionRemaining;
+        private bool nursingInteractionActive;
+        private float nursingInteractionRemaining;
+        private Vector3 nursingFacingPoint;
         private float pairingSpeedMultiplier = 1f;
         private Vector3 diagnosticsPreviousPosition;
         private bool diagnosticsHavePreviousPosition;
@@ -159,6 +162,7 @@ namespace RatHabitat
         {
             get
             {
+                if (nursingInteractionActive) return "caring_for_pinkies";
                 if (pairingApproachActive) return "breeding";
                 if (state == RatBehaviorState.Dying) return "deceased";
                 if (currentTarget != null)
@@ -180,6 +184,7 @@ namespace RatHabitat
         {
             get
             {
+                if (nursingInteractionActive) return "Caring for pinkies";
                 if (pairingApproachActive) return "Breeding";
                 if (state == RatBehaviorState.Dying) return "Deceased";
                 if (currentTarget != null)
@@ -276,6 +281,8 @@ namespace RatHabitat
             {
                 configuredStage = rat.stage;
                 currentTarget = null;
+                nursingInteractionActive = false;
+                nursingInteractionRemaining = 0f;
                 deathPoseHeld = false;
                 if (animator != null) animator.speed = GrowthSystem.RuntimeSimulationSpeed;
                 EnterState(RatBehaviorState.Idle, NextIdleDuration(0.8f, 1.8f));
@@ -288,6 +295,8 @@ namespace RatHabitat
                 // it cannot continue toward the previous enclosure.
                 configuredEnclosure = rat.enclosure;
                 currentTarget = null;
+                nursingInteractionActive = false;
+                nursingInteractionRemaining = 0f;
                 transform.position = ClampToAssignedEnclosure(transform.position);
                 BeginTravel();
             }
@@ -316,7 +325,7 @@ namespace RatHabitat
         {
             if (!configured || rat == null ||
                 (rat.stage != RatStage.Adult && rat.stage != RatStage.Mature) ||
-                rat.enclosure != RatEnclosure.Pairing) return false;
+                rat.enclosure != RatEnclosure.Pairing || nursingInteractionActive) return false;
 
             pairingApproachActive = true;
             pairingApproachArrived = false;
@@ -348,6 +357,41 @@ namespace RatHabitat
             stateTimer = 60f;
             EnterState(RatBehaviorState.WalkToTarget, stateTimer);
             movementSpeed = Mathf.Max(0.15f, movementSpeed * pairingSpeedMultiplier);
+            return true;
+        }
+
+        /// <summary>
+        /// Takes over the same movement/interaction state used by normal
+        /// sniffing, but temporarily permits the recorded mother to cross the
+        /// nest exclusion. Only NursingSystem can call this with a real pup
+        /// target, so unrelated adults retain the normal solid obstacle.
+        /// </summary>
+        public bool BeginNursingInteraction(Vector3 pupPosition, float durationSeconds)
+        {
+            if (!configured || rat == null || rat.sex != RatSex.Female ||
+                rat.stage == RatStage.Pinkie || !EnclosureSystem.HasNest(rat.enclosure) ||
+                pairingApproachActive) return false;
+
+            nursingInteractionActive = true;
+            nursingInteractionRemaining = Mathf.Max(0.75f, durationSeconds);
+            pairingInteractionActive = false;
+            pairingApproachActive = false;
+            Vector3 fromPup = transform.position - pupPosition;
+            fromPup.y = 0f;
+            if (fromPup.sqrMagnitude <= 0.001f) fromPup = Vector3.right;
+            Vector3 nursingStandPoint = pupPosition + fromPup.normalized * 0.46f;
+            nursingStandPoint = EnclosureSystem.ClampToEnclosure(rat.enclosure, nursingStandPoint);
+            nursingFacingPoint = new Vector3(pupPosition.x, transform.position.y, pupPosition.z);
+            currentTarget = new RatBehaviorTarget
+            {
+                id = "nursing-pup",
+                label = "Nursing",
+                kind = RatBehaviorTargetKind.Nest,
+                position = new Vector3(nursingStandPoint.x, transform.position.y, nursingStandPoint.z),
+            };
+            targetPosition = currentTarget.position;
+            stateTimer = 60f;
+            EnterState(RatBehaviorState.WalkToTarget, stateTimer);
             return true;
         }
 
@@ -448,8 +492,11 @@ namespace RatHabitat
             // it can make an adult or young rat walk back into the nest.
             if (currentTarget != null && currentTarget.kind == RatBehaviorTargetKind.Nest)
             {
-                currentTarget = null;
-                BeginTravel();
+                if (!nursingInteractionActive)
+                {
+                    currentTarget = null;
+                    BeginTravel();
+                }
             }
 
             if (pairingApproachActive)
@@ -716,6 +763,11 @@ namespace RatHabitat
             toTarget.y = 0f;
             if (toTarget.sqrMagnitude <= ArrivalDistance * ArrivalDistance)
             {
+                if (nursingInteractionActive)
+                {
+                    EnterState(RatBehaviorState.Interact, nursingInteractionRemaining);
+                    return;
+                }
                 if (currentTarget == null)
                 {
                     if (ShouldStartAmbientInvestigation(0.42f)) BeginAmbientInvestigation();
@@ -910,6 +962,26 @@ namespace RatHabitat
                 return;
             }
 
+            if (nursingInteractionActive)
+            {
+                Vector3 toPup = nursingFacingPoint - transform.position;
+                toPup.y = 0f;
+                if (toPup.sqrMagnitude > 0.001f)
+                {
+                    Quaternion nursingFacing = RotationFacingWorldDirection(toPup.normalized);
+                    transform.rotation = Quaternion.RotateTowards(
+                        transform.rotation, nursingFacing, MovementTurnSpeed * Mathf.Max(0f, deltaTime));
+                }
+                if (stateTimer <= 0f)
+                {
+                    nursingInteractionActive = false;
+                    nursingInteractionRemaining = 0f;
+                    currentTarget = null;
+                    EnterState(RatBehaviorState.Recover, NextFloat(0.8f, 1.8f));
+                }
+                return;
+            }
+
             Vector3 toTarget = currentTarget.position - transform.position;
             toTarget.y = 0f;
             if (toTarget.sqrMagnitude > 0.001f)
@@ -944,7 +1016,7 @@ namespace RatHabitat
         private void ResolveSpacing()
         {
             if (rat == null || rat.stage == RatStage.Pinkie) return;
-            if (pairingApproachActive) return;
+            if (pairingApproachActive || nursingInteractionActive) return;
             bool adultSized = rat.stage == RatStage.Adult || rat.stage == RatStage.Mature ||
                 rat.stage == RatStage.Elderly;
             float minimum = adultSized ? MinimumRatSpacing : MinimumRatSpacing * 0.78f;
@@ -1228,6 +1300,7 @@ namespace RatHabitat
         private Vector3 MoveTowardAvoidingNest(Vector3 current, Vector3 desired)
         {
             RatEnclosure enclosure = rat == null ? RatEnclosure.FemaleColony : rat.enclosure;
+            if (nursingInteractionActive) return ClampToAssignedEnclosure(desired);
             if (!EnclosureSystem.HasNest(enclosure)) return ClampToAssignedEnclosure(desired);
 
             if (nestDetourWaypointIndex < nestDetourWaypoints.Count)

@@ -49,6 +49,8 @@ namespace RatHabitat
         private RectTransform welcomeCard;
         private RectTransform settingsOverlay;
         private RectTransform settingsCard;
+        private Button keepScreenAwakeButton;
+        private Text keepScreenAwakeStatusText;
         private RectTransform developerToolsOverlay;
         private RectTransform developerToolsViewport;
         private RectTransform developerToolsCard;
@@ -131,6 +133,12 @@ namespace RatHabitat
         private string familyTreeSubjectId;
         private string profileMoreInformationRatId;
         private bool profileMoreInformationExpanded;
+        // Profile arrows keep the same view open while changing only the
+        // subject. The context is captured when the profile is opened so
+        // My Rats uses its filtered/sorted list and habitat inspection uses
+        // the current enclosure.
+        private bool profileNavigationFromMyRats;
+        private bool profileNavigationPreserveState;
         private string ratProfileScrollRatId;
         private float ratProfileScrollNormalized = 1f;
         private bool profileScrollResetRequested;
@@ -563,7 +571,7 @@ namespace RatHabitat
             bool profileTargetChanged = ratProfileScroll != null &&
                 !string.IsNullOrEmpty(profileTargetId) &&
                 !string.Equals(ratProfileScrollRatId, profileTargetId, StringComparison.Ordinal);
-            if (profileScrollResetRequested || profileTargetChanged)
+            if ((profileScrollResetRequested || profileTargetChanged) && !profileNavigationPreserveState)
             {
                 // Only an intentional expansion or a different profile gets
                 // a fresh view. Live clock/activity/countdown refreshes keep
@@ -580,6 +588,11 @@ namespace RatHabitat
             float previousRosterNormalized = ratRosterScroll == null ? 1f : ratRosterScroll.verticalNormalizedPosition;
             float previousStoreNormalized = storeRatListScroll == null ? 1f : storeRatListScroll.verticalNormalizedPosition;
             RebuildContent();
+            // The one-shot flag is consumed by AddRatProfile during this
+            // rebuild. Future clock/activity refreshes use the ordinary
+            // profile-preservation path without unexpectedly carrying the
+            // navigation transition into another rebuild.
+            profileNavigationPreserveState = false;
             if (developerToolsOpen) RebuildDeveloperToolsContent();
             if (ratAnimationShowcaseOpen) RefreshAnimationShowcasePanel();
             lastSignature = signature;
@@ -974,10 +987,34 @@ namespace RatHabitat
             AddText(settingsCard, "Pairing Habitat: " + (GameConfig.PairingPregnancyChance * 100f).ToString("0") +
                 "% pregnancy chance per " + (GameConfig.PairingCheckIntervalMs / 1000L).ToString() + " real-time seconds.",
                 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
+            keepScreenAwakeButton = AddButtonTo(settingsCard, "Keep Screen Awake", true,
+                game.ToggleKeepScreenAwake, new Color(0.16f, 0.38f, 0.33f), 46f);
+            keepScreenAwakeStatusText = AddText(settingsCard, string.Empty, 12,
+                new Color(0.72f, 0.84f, 0.78f), TextAnchor.UpperLeft);
             AddButtonTo(settingsCard, "Save now", true, game.SaveNow, new Color(0.16f, 0.38f, 0.33f), 46f);
             AddButtonTo(settingsCard, "Developer Tools", true, OpenDeveloperTools, new Color(0.12f, 0.27f, 0.29f), 46f);
             AddButtonTo(settingsCard, "Close Settings", true, CloseSettings, new Color(0.14f, 0.22f, 0.25f), 46f);
+            RefreshWakeLockControls();
             SetOverlayVisibility();
+        }
+
+        public void RefreshWakeLockControls()
+        {
+            if (game == null) return;
+            if (keepScreenAwakeButton != null)
+            {
+                SetButtonLabel(keepScreenAwakeButton,
+                    game.KeepScreenAwakeEnabled ? "Keep Screen Awake: On" : "Keep Screen Awake: Off");
+                Image image = keepScreenAwakeButton.GetComponent<Image>();
+                if (image != null)
+                {
+                    image.color = game.KeepScreenAwakeEnabled
+                        ? new Color(0.16f, 0.38f, 0.33f)
+                        : new Color(0.18f, 0.25f, 0.27f);
+                }
+            }
+            if (keepScreenAwakeStatusText != null)
+                keepScreenAwakeStatusText.text = game.KeepScreenAwakeStatusMessage;
         }
 
         private void BuildDeveloperToolsPopup()
@@ -1548,7 +1585,12 @@ namespace RatHabitat
         private void CloseWelcome()
         {
             welcomeOpen = false;
-            if (game != null) game.DismissWelcomePopup();
+            if (game != null)
+            {
+                // The acknowledgement button is a real user gesture, so it
+                // is the first safe point to request the browser wake lock.
+                game.DismissWelcomePopup();
+            }
             developerToolsOpen = false;
             ratAnimationShowcaseOpen = false;
             eventLogOpen = false;
@@ -1628,6 +1670,8 @@ namespace RatHabitat
             if (game != null) game.DeactivateMultipleSelection();
             expandedMyRatsId = null;
             familyTreeSubjectId = null;
+            profileNavigationFromMyRats = false;
+            profileNavigationPreserveState = false;
             welcomeOpen = false;
             settingsOpen = false;
             developerToolsOpen = false;
@@ -2178,7 +2222,7 @@ namespace RatHabitat
                 12, Color.white, TextAnchor.UpperLeft);
             if (!actionInteractable)
             {
-                AddText(info, "Elderly rats cannot be sold.", 11,
+                AddText(info, game.SaleRestrictionReason(rat), 11,
                     new Color(1f, 0.63f, 0.42f), TextAnchor.UpperLeft);
             }
 
@@ -2313,7 +2357,7 @@ namespace RatHabitat
 
             if (game.PairingMoveAllConfirmationPending)
             {
-                AddText(card, "Move every rat out of Pairing Habitat? Pregnant and nursing families will be routed to Nursery.",
+                AddText(card, "Move every rat out of Pairing Habitat? Mothers and pups will stay together in a normal habitat.",
                     13, new Color(1f, 0.55f, 0.36f), TextAnchor.UpperLeft);
                 AddButtonTo(card, "CONFIRM MOVE ALL OUT", true, game.ConfirmMoveAllOutOfPairingHabitat,
                     new Color(0.65f, 0.22f, 0.16f), 46f);
@@ -2358,12 +2402,17 @@ namespace RatHabitat
             liveProfileRatId = rat == null ? null : rat.id;
             if (profileMoreInformationRatId != rat.id)
             {
+                bool preserveNavigationState = profileNavigationPreserveState;
                 profileMoreInformationRatId = rat.id;
-                profileMoreInformationExpanded = false;
-                // Selecting a different rat or opening a fresh profile is
-                // the only intentional top-of-profile reset.
+                if (!preserveNavigationState)
+                {
+                    profileMoreInformationExpanded = false;
+                    // Selecting a different rat normally opens a fresh
+                    // profile at the top. Arrow navigation is the deliberate
+                    // exception: it preserves the current profile layout.
+                    ratProfileScrollNormalized = 1f;
+                }
                 ratProfileScrollRatId = rat.id;
-                ratProfileScrollNormalized = 1f;
             }
 
             var card = CreateCard(string.Empty);
@@ -2497,8 +2546,7 @@ namespace RatHabitat
             detailsLayout.spacing = 3f;
             detailsLayout.padding = new RectOffset(12, 12, 10, 10);
 
-            Text nameText = AddText(details, ColonyFactory.DisplayName(rat), 18, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft);
-            nameText.fontStyle = FontStyle.Bold;
+            AddRatProfileHeader(details, rat);
             // Active rats do not need an "Alive" label. Keep status text only
             // for historical records where it communicates something useful.
             string historicalStatus = historical &&
@@ -2534,6 +2582,132 @@ namespace RatHabitat
             }
 
             liveProfileActivityHistorySignature = BuildRatActivityHistorySignature(rat);
+        }
+
+        private void AddRatProfileHeader(RectTransform parent, RatData rat)
+        {
+            if (parent == null || rat == null) return;
+            List<RatData> navigationRats = GetProfileNavigationRats(rat);
+            int currentIndex = -1;
+            for (int index = 0; index < navigationRats.Count; index++)
+            {
+                if (navigationRats[index] != null && navigationRats[index].id == rat.id)
+                {
+                    currentIndex = index;
+                    break;
+                }
+            }
+
+            var header = CreateRect("Rat Profile Header", parent);
+            var headerElement = header.gameObject.AddComponent<LayoutElement>();
+            headerElement.minHeight = 50f;
+            headerElement.preferredHeight = 50f;
+            var layout = header.gameObject.AddComponent<HorizontalLayoutGroup>();
+            layout.spacing = 7f;
+            layout.padding = new RectOffset(0, 0, 0, 0);
+            layout.childAlignment = TextAnchor.MiddleCenter;
+            layout.childControlWidth = true;
+            layout.childControlHeight = true;
+            layout.childForceExpandWidth = false;
+            layout.childForceExpandHeight = true;
+
+            bool hasPrevious = currentIndex > 0;
+            bool hasNext = currentIndex >= 0 && currentIndex < navigationRats.Count - 1;
+            Button previous = AddButtonTo(header, "←", hasPrevious,
+                hasPrevious ? (UnityEngine.Events.UnityAction)(() => NavigateProfile(-1)) : null,
+                hasPrevious ? new Color(0.18f, 0.38f, 0.40f) : new Color(0.14f, 0.16f, 0.17f), 50f);
+            Button next = null;
+            var previousLayout = previous.GetComponent<LayoutElement>();
+            if (previousLayout != null)
+            {
+                previousLayout.minWidth = 54f;
+                previousLayout.preferredWidth = 54f;
+                previousLayout.flexibleWidth = 0f;
+            }
+
+            var nameRoot = CreateRect("Rat Profile Header Name", header);
+            var nameLayout = nameRoot.gameObject.AddComponent<LayoutElement>();
+            nameLayout.minWidth = 80f;
+            nameLayout.flexibleWidth = 1f;
+            var nameText = AddTextTo(nameRoot, ColonyFactory.DisplayName(rat), 18,
+                new Color(0.98f, 0.78f, 0.32f), TextAnchor.MiddleCenter);
+            nameText.fontStyle = FontStyle.Bold;
+            nameText.rectTransform.anchorMin = Vector2.zero;
+            nameText.rectTransform.anchorMax = Vector2.one;
+            nameText.rectTransform.offsetMin = new Vector2(2f, 0f);
+            nameText.rectTransform.offsetMax = new Vector2(-2f, 0f);
+
+            next = AddButtonTo(header, "→", hasNext,
+                hasNext ? (UnityEngine.Events.UnityAction)(() => NavigateProfile(1)) : null,
+                hasNext ? new Color(0.18f, 0.38f, 0.40f) : new Color(0.14f, 0.16f, 0.17f), 50f);
+            var nextLayout = next.GetComponent<LayoutElement>();
+            if (nextLayout != null)
+            {
+                nextLayout.minWidth = 54f;
+                nextLayout.preferredWidth = 54f;
+                nextLayout.flexibleWidth = 0f;
+            }
+        }
+
+        private List<RatData> GetProfileNavigationRats(RatData current)
+        {
+            var result = new List<RatData>();
+            if (game == null || game.Save == null || game.Save.rats == null || current == null)
+                return result;
+
+            foreach (RatData rat in game.Save.rats)
+            {
+                if (rat == null || rat.removalDisposition != RatRemovalDisposition.None) continue;
+                if (profileNavigationFromMyRats)
+                {
+                    if (!IsRosterRatVisible(rat)) continue;
+                }
+                else if (rat.enclosure != current.enclosure)
+                {
+                    continue;
+                }
+                result.Add(rat);
+            }
+
+            if (profileNavigationFromMyRats)
+                result.Sort(CompareRosterRats);
+            else
+            {
+                result.Sort((left, right) =>
+                {
+                    int comparison = string.Compare(ColonyFactory.DisplayName(left),
+                        ColonyFactory.DisplayName(right), StringComparison.OrdinalIgnoreCase);
+                    if (comparison != 0) return comparison;
+                    return string.Compare(left.id, right.id, StringComparison.OrdinalIgnoreCase);
+                });
+            }
+            return result;
+        }
+
+        private void NavigateProfile(int direction)
+        {
+            if (game == null || game.SelectedRat == null || direction == 0) return;
+            List<RatData> navigationRats = GetProfileNavigationRats(game.SelectedRat);
+            int currentIndex = -1;
+            for (int index = 0; index < navigationRats.Count; index++)
+            {
+                if (navigationRats[index] != null && navigationRats[index].id == game.SelectedRat.id)
+                {
+                    currentIndex = index;
+                    break;
+                }
+            }
+            int nextIndex = currentIndex + (direction < 0 ? -1 : 1);
+            if (currentIndex < 0 || nextIndex < 0 || nextIndex >= navigationRats.Count) return;
+            RatData target = navigationRats[nextIndex];
+            if (target == null || string.IsNullOrEmpty(target.id)) return;
+
+            // Arrow navigation intentionally keeps the profile's expanded
+            // state and current nested-scroll position. The selected rat is
+            // changed by stable ID only; no world action or highlight is
+            // triggered by the navigation control.
+            profileNavigationPreserveState = true;
+            game.SelectRatForProfileNavigation(target.id);
         }
 
         private void AddRatProfileBasicInformation(RectTransform parent, RatData rat, int fontSize)
@@ -2601,7 +2775,7 @@ namespace RatHabitat
             }
             else if (liveRat)
             {
-                AddText(more, "Elderly rats cannot be sold.", 13,
+                AddText(more, game.SaleRestrictionReason(rat), 13,
                     new Color(1f, 0.63f, 0.42f), TextAnchor.UpperLeft);
             }
 
@@ -2685,6 +2859,8 @@ namespace RatHabitat
         {
             profileMoreInformationRatId = null;
             profileMoreInformationExpanded = false;
+            profileNavigationFromMyRats = false;
+            profileNavigationPreserveState = false;
             ratProfileScrollRatId = null;
             ratProfileScrollNormalized = 1f;
             profileScrollResetRequested = false;
@@ -3164,8 +3340,18 @@ namespace RatHabitat
                 groupLayout.childForceExpandHeight = false;
                 AddButtonTo(groupRow, "Male", true, () => game.RequestMoveSelectedRats(RatEnclosure.MaleColony), new Color(0.15f, 0.33f, 0.29f), 40f);
                 AddButtonTo(groupRow, "Female", true, () => game.RequestMoveSelectedRats(RatEnclosure.FemaleColony), new Color(0.15f, 0.33f, 0.29f), 40f);
-                AddButtonTo(groupRow, "Nursery", true, () => game.RequestMoveSelectedRats(RatEnclosure.Nursery), new Color(0.25f, 0.25f, 0.44f), 40f);
                 AddButtonTo(groupRow, "Pairing", true, () => game.RequestMoveSelectedRats(RatEnclosure.Pairing), new Color(0.25f, 0.38f, 0.24f), 40f);
+                AddButtonTo(card, "Sell selected rats", true, game.RequestSellSelectedRats,
+                    new Color(0.24f, 0.40f, 0.28f), 42f);
+                if (game.GroupSellConfirmationPending)
+                {
+                    AddText(card, "Confirm sale of the selected rats? Young pups must be 42 days old and fully weaned; Elderly rats cannot be sold.",
+                        12, new Color(1f, 0.72f, 0.38f), TextAnchor.UpperLeft);
+                    AddButtonTo(card, "CONFIRM GROUP SALE", true, game.ConfirmSellSelectedRats,
+                        new Color(0.20f, 0.46f, 0.29f), 44f);
+                    AddButtonTo(card, "Cancel group sale", true, game.CancelSellSelectedRats,
+                        new Color(0.20f, 0.30f, 0.34f), 40f);
+                }
                 if (game.GroupMoveConfirmationPending)
                 {
                     AddText(card, "A mother or dependent litter is included. Confirm only if separating them is intentional.",
@@ -3620,6 +3806,10 @@ namespace RatHabitat
             Text reproductiveStateText = AddText(parent, string.Empty, fontSize,
                 new Color(0.72f, 0.84f, 0.78f), TextAnchor.UpperLeft);
             BindLiveText(reproductiveStateText, () => "Reproductive state: " + ReproductiveStateLabel(rat));
+            string saleRestriction = game == null ? string.Empty : game.SaleRestrictionReason(rat);
+            if (!string.IsNullOrEmpty(saleRestriction))
+                AddText(parent, saleRestriction, fontSize - 1,
+                    new Color(1f, 0.63f, 0.42f), TextAnchor.UpperLeft);
         }
 
         private void AddRatActivityHistory(RectTransform parent, RatData rat)
@@ -3707,6 +3897,7 @@ namespace RatHabitat
             expandedMyRatsId = null;
             activeMainPanel = MainPanel.None;
             ResetProfileInformationExpansion();
+            profileNavigationFromMyRats = true;
 
             RatData liveRat = BreedingSystem.FindRat(game.Save, ratId);
             if (liveRat != null)

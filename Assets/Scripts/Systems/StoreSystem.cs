@@ -197,12 +197,62 @@ namespace RatHabitat
 
         /// <summary>
         /// Returns whether an active rat may be sold. This is intentionally
-        /// based on age and the persisted individual breeding cutoff rather
-        /// than on a possibly stale UI stage or low genetic fertility.
+        /// based on the authoritative saved age, litter weaning timestamp,
+        /// and individual breeding cutoff rather than on a UI label.
         /// </summary>
         public static bool CanSellRat(RatData rat)
         {
-            return rat != null && !GrowthSystem.IsElderly(rat);
+            // Legacy callers without a save context can still enforce the
+            // age/stage part of the rule. GameBootstrap uses the overload
+            // below so it can verify the persisted litter deadline as well.
+            return rat != null && !GrowthSystem.IsElderly(rat) &&
+                rat.ageDays >= GameConfig.PupSaleMinimumAgeDays;
+        }
+
+        public static bool CanSellRat(ColonySaveData save, RatData rat, long gameTime)
+        {
+            if (rat == null || GrowthSystem.IsElderly(rat)) return false;
+            if (!IsPup(rat)) return true;
+            if (rat.ageDays < GameConfig.PupSaleMinimumAgeDays) return false;
+            return IsFullyWeaned(save, rat, gameTime);
+        }
+
+        /// <summary>
+        /// Returns the player-facing reason for a blocked sale. This method is
+        /// shared by profile, Store, My Rats, and the underlying action guard
+        /// so a stale button cannot bypass the same restriction.
+        /// </summary>
+        public static string SaleRestrictionReason(ColonySaveData save, RatData rat, long gameTime)
+        {
+            if (rat == null) return "That rat is no longer available for sale.";
+            if (GrowthSystem.IsElderly(rat)) return "Elderly rats cannot be sold.";
+            if (!IsPup(rat)) return string.Empty;
+
+            LitterData litter = FindLitterForPup(save, rat);
+            long weaningAt = litter == null ? 0L : litter.weaningTimestamp;
+            bool weaned = IsFullyWeaned(save, rat, gameTime);
+            float ageRemaining = Mathf.Max(0f, GameConfig.PupSaleMinimumAgeDays - rat.ageDays);
+            float weaningRemaining = weaningAt > gameTime
+                ? Mathf.Max(0f, (weaningAt - gameTime) / (float)GameConfig.GameDayMs)
+                : 0f;
+
+            if (ageRemaining > 0f && weaningRemaining > 0f)
+            {
+                if (weaningRemaining >= ageRemaining)
+                    return "Too young to sell — weaning completes in " + FormatRemainingDays(weaningRemaining);
+                return "Too young to sell — available in " + FormatRemainingDays(ageRemaining);
+            }
+            if (ageRemaining > 0f)
+            {
+                return "Too young to sell — available in " + FormatRemainingDays(ageRemaining);
+            }
+            if (!weaned)
+            {
+                return weaningRemaining > 0f
+                    ? "Not fully weaned — weaning completes in " + FormatRemainingDays(weaningRemaining)
+                    : "Not fully weaned.";
+            }
+            return string.Empty;
         }
 
         /// <summary>
@@ -222,6 +272,62 @@ namespace RatHabitat
             float ageMultiplier = Mathf.Lerp(GameConfig.MatureSaleValueMinimumMultiplier, 1f,
                 BreedingSystem.AgeBreedingEffectiveness(rat));
             return Mathf.Max(1, Mathf.RoundToInt(baseValue * ageMultiplier));
+        }
+
+        public static int CalculateSaleValue(ColonySaveData save, RatData rat, long gameTime)
+        {
+            if (rat == null) return GameConfig.SellCreditBase;
+            if (!CanSellRat(save, rat, gameTime)) return 0;
+
+            TraitData traits = rat.traits;
+            if (traits == null) return GameConfig.SellCreditBase;
+            float quality = (traits.health + traits.fertility) * 0.5f;
+            float baseValue = GameConfig.SellCreditBase + quality * GameConfig.SellCreditTraitMultiplier;
+            float ageMultiplier = Mathf.Lerp(GameConfig.MatureSaleValueMinimumMultiplier, 1f,
+                BreedingSystem.AgeBreedingEffectiveness(rat));
+            return Mathf.Max(1, Mathf.RoundToInt(baseValue * ageMultiplier));
+        }
+
+        private static bool IsPup(RatData rat)
+        {
+            return rat != null && (rat.ageDays < GameConfig.PupSaleMinimumAgeDays ||
+                rat.stage == RatStage.Pinkie || rat.stage == RatStage.YoungRat);
+        }
+
+        private static bool IsFullyWeaned(ColonySaveData save, RatData rat, long gameTime)
+        {
+            LitterData litter = FindLitterForPup(save, rat);
+            if (litter == null || litter.weaningTimestamp <= 0L)
+            {
+                // Legacy records may have no litter row. Once the biological
+                // weaning age has passed, they are safe to treat as weaned;
+                // younger records remain blocked conservatively.
+                return rat != null && rat.ageDays >= GameConfig.WeaningDays;
+            }
+            return gameTime >= litter.weaningTimestamp;
+        }
+
+        private static LitterData FindLitterForPup(ColonySaveData save, RatData rat)
+        {
+            if (save == null || rat == null || save.litters == null) return null;
+            foreach (LitterData litter in save.litters)
+            {
+                if (litter == null) continue;
+                if (!string.IsNullOrEmpty(rat.litterId) && litter.id == rat.litterId) return litter;
+                if (litter.pupIds == null || string.IsNullOrEmpty(rat.id)) continue;
+                if (litter.pupIds.Contains(rat.id)) return litter;
+            }
+            return null;
+        }
+
+        private static string FormatRemainingDays(float days)
+        {
+            if (days <= 0.01f) return "less than 1 hour";
+            int wholeDays = Mathf.FloorToInt(days);
+            int hours = Mathf.Clamp(Mathf.CeilToInt((days - wholeDays) * 24f), 0, 23);
+            if (wholeDays > 0 && hours > 0) return wholeDays + " days, " + hours + " hours";
+            if (wholeDays > 0) return wholeDays + (wholeDays == 1 ? " day" : " days");
+            return hours + (hours == 1 ? " hour" : " hours");
         }
 
         private static void CreateInventory(ColonySaveData save, int seed, int cycle)

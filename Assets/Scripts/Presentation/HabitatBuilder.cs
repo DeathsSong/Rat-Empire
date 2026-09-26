@@ -10,7 +10,6 @@ namespace RatHabitat
         private Transform geometryRoot;
         private Transform maleCageRoot;
         private Transform femaleCageRoot;
-        private Transform nurseryRoot;
         private Transform breedingCageRoot;
         private Transform pairingCageRoot;
         private bool built;
@@ -25,7 +24,12 @@ namespace RatHabitat
         public bool TryGetNestSurfaceBounds(RatEnclosure enclosure, out Bounds surfaceBounds)
         {
             surfaceBounds = new Bounds();
-            Transform enclosureRoot = enclosure == RatEnclosure.Pairing ? pairingCageRoot : nurseryRoot;
+            // The removed Nursery has no runtime surface. Mothers and pups
+            // use the legacy saved nest in Female Cage, while Pairing uses
+            // the imported nest model.
+            Transform enclosureRoot = enclosure == RatEnclosure.Pairing
+                ? pairingCageRoot
+                : enclosure == RatEnclosure.FemaleColony ? femaleCageRoot : null;
             if (enclosureRoot == null) return false;
 
             string innerName = enclosure == RatEnclosure.Pairing
@@ -49,7 +53,7 @@ namespace RatHabitat
                 return surfaceBounds.size.sqrMagnitude > 0.0001f;
             }
 
-            // Keep the fallback for the legacy nursery nest hierarchy.
+            // Keep the fallback for older imported nest hierarchies.
             Renderer[] renderers = surface.GetComponentsInChildren<Renderer>(true);
             for (int index = 0; index < renderers.Length; index++)
             {
@@ -69,16 +73,13 @@ namespace RatHabitat
             geometryRoot.SetParent(transform, false);
 
             CreateEnclosureLayout();
-            NestPosition = EnclosureSystem.NurseryNestPosition;
+            NestPosition = EnclosureSystem.PairingNestPosition;
             CreateDecorativeTunnel(femaleCageRoot, "Mint Tunnel",
                 EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, -1.45f, 4.05f, 0.78f),
                 3.2f, 0.58f, new Color(0.23f, 0.68f, 0.64f));
             CreateDecorativeTunnel(femaleCageRoot, "Peach Tunnel",
                 EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, -1.10f, 1.00f, 0.62f),
                 2.45f, 0.46f, new Color(0.97f, 0.60f, 0.42f));
-            CreateDecorativeTunnel(nurseryRoot, "Nursery Tunnel",
-                EnclosureSystem.PointInEnclosure(RatEnclosure.Nursery, 1.15f, -1.60f, 0.56f),
-                2.0f, 0.40f, new Color(0.58f, 0.45f, 0.78f));
             CreateDecorativeTunnel(breedingCageRoot, "Breeding Tunnel",
                 EnclosureSystem.PointInEnclosure(RatEnclosure.Breeding, 1.05f, -1.50f, 0.56f),
                 2.0f, 0.40f, new Color(0.86f, 0.45f, 0.62f));
@@ -164,7 +165,6 @@ namespace RatHabitat
             // barrier, colliders, sign, and local behavior targets.
             maleCageRoot = CreateIndependentCage(enclosureRoot, RatEnclosure.MaleColony);
             femaleCageRoot = CreateIndependentCage(enclosureRoot, RatEnclosure.FemaleColony);
-            nurseryRoot = CreateIndependentCage(enclosureRoot, RatEnclosure.Nursery);
             breedingCageRoot = CreateIndependentCage(enclosureRoot, RatEnclosure.Breeding);
             pairingCageRoot = CreateIndependentCage(enclosureRoot, RatEnclosure.Pairing);
         }
@@ -321,9 +321,9 @@ namespace RatHabitat
                 definition.enclosure == RatEnclosure.Nursery ? "Nursery" : "Breeding";
             if (definition.enclosure == RatEnclosure.Pairing) signText = "Pairing Habitat";
             float signHeight = 1.82f;
-            // All five signs use the same plaque dimensions as the Pairing
-            // Habitat so every full-size enclosure reads as an equal page in
-            // the horizontal carousel.
+            // Every player-facing sign uses the same plaque dimensions as the
+            // Pairing Habitat so each full-size enclosure reads as an equal
+            // page in the horizontal carousel.
             float signWidth = 4.15f;
             const float signHeightSize = 0.551f;
             const float signDepth = 0.1296f;
@@ -407,6 +407,7 @@ namespace RatHabitat
 
         private void CreateObject(HabitatObjectData data)
         {
+            if (data == null) return;
             objectTypes[data.id] = data.type;
             if (data.type == HabitatObjectType.ExerciseWheel)
             {
@@ -438,13 +439,13 @@ namespace RatHabitat
                     color = new Color(0.22f, 0.62f, 0.94f);
                     break;
                 case HabitatObjectType.Nest:
-                    position = NestPosition;
+                    position = EnclosureSystem.GetNestPosition(RatEnclosure.FemaleColony);
                     scale = new Vector3(2.3f, 0.25f, 1.65f);
                     primitive = PrimitiveType.Cylinder;
                     color = new Color(0.78f, 0.52f, 0.25f);
                     break;
                 default:
-                    position = EnclosureSystem.PointInEnclosure(RatEnclosure.Nursery, 1.35f, 2.30f, 0.67f);
+                    position = EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, 1.35f, 2.30f, 0.67f);
                     scale = new Vector3(2.4f, 1.2f, 2.0f);
                     primitive = PrimitiveType.Cube;
                     color = new Color(0.64f, 0.39f, 0.24f);
@@ -503,8 +504,9 @@ namespace RatHabitat
                 case HabitatObjectType.Food:
                     return maleCageRoot;
                 case HabitatObjectType.Nest:
+                    return femaleCageRoot;
                 case HabitatObjectType.Hide:
-                    return nurseryRoot;
+                    return femaleCageRoot;
                 case HabitatObjectType.Water:
                 case HabitatObjectType.ExerciseWheel:
                     return femaleCageRoot;

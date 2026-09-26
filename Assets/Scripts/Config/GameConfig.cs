@@ -12,6 +12,12 @@ namespace RatHabitat
         public const float GestationDays = 22f;
         public const long PregnancyMs = 22L * GameDayMs;
         public const float WeaningDays = 21f;
+        // A pup must be both fully weaned and six weeks old before it can be
+        // sold.  Keep this separate from PinkieStageDays and WeaningDays so a
+        // visual growth transition cannot accidentally unlock a sale.
+        public const float PupSaleMinimumAgeDays = 42f;
+        public const float NursingInteractionCooldownHours = 6f;
+        public const float NursingInteractionDurationSeconds = 2.5f;
         public const float MaleSexualMaturityDays = 56f;
         public const float FemaleSexualMaturityDays = 70f;
         public const float MatureStartDays = 365f;
