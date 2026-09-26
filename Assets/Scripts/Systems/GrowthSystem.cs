@@ -211,6 +211,56 @@ namespace RatHabitat
                 rat.reproductiveState = ReproductiveState.Fertile;
         }
 
+        /// <summary>
+        /// Updates only the cheap, time-derived age value. The full stage,
+        /// phenotype, age-decline, and natural-death pass is intentionally
+        /// scheduled by GameBootstrap instead of being repeated every rendered
+        /// frame. The return value tells that scheduler when an age threshold
+        /// or lifespan boundary has actually been crossed.
+        /// </summary>
+        public static bool RefreshRatAges(ColonySaveData save, long gameTime)
+        {
+            if (save == null || save.rats == null) return false;
+
+            bool thresholdCrossed = false;
+            foreach (RatData rat in save.rats)
+            {
+                if (rat == null) continue;
+                rat.ageDays = AgeDaysAt(rat, gameTime);
+
+                RatStage currentStage = StageForAge(
+                    rat.ageDays, rat.sex, rat.breedingEndAgeDays);
+                if (currentStage != rat.stage ||
+                    (rat.expectedLifespanDays > 0f && rat.ageDays >= rat.expectedLifespanDays))
+                {
+                    thresholdCrossed = true;
+                }
+
+            }
+            return thresholdCrossed;
+        }
+
+        /// <summary>
+        /// Returns the authoritative age at a simulation timestamp without
+        /// requiring the full biological refresh pass. Action validation uses
+        /// this to remain exact even when the next maintenance tick has not
+        /// arrived yet.
+        /// </summary>
+        public static float AgeDaysAt(RatData rat, long gameTime)
+        {
+            if (rat == null) return 0f;
+            if (rat.developerGrowthOverride)
+            {
+                float anchorAge = rat.growthAnchorAgeDays;
+                float elapsedDays = rat.growthTimestamp > 0L
+                    ? Mathf.Max(0f, (gameTime - rat.growthTimestamp) / (float)GameConfig.GameDayMs)
+                    : 0f;
+                return Mathf.Max(0f, anchorAge + elapsedDays);
+            }
+
+            return Mathf.Max(0f, (gameTime - rat.birthTimestamp) / (float)GameConfig.GameDayMs);
+        }
+
         public static bool RefreshRatStages(ColonySaveData save)
         {
             if (save == null) return false;
@@ -224,18 +274,7 @@ namespace RatHabitat
                 if (rat == null) continue;
                 EnsureBiologyDefaults(rat);
                 RatStage oldStage = rat.stage;
-                if (rat.developerGrowthOverride)
-                {
-                    float anchorAge = rat.growthAnchorAgeDays;
-                    float elapsedDays = rat.growthTimestamp > 0L
-                        ? Mathf.Max(0f, (gameTime - rat.growthTimestamp) / (float)GameConfig.GameDayMs)
-                        : 0f;
-                    rat.ageDays = Mathf.Max(anchorAge, anchorAge + elapsedDays);
-                }
-                else
-                {
-                    rat.ageDays = Mathf.Max(0f, (gameTime - rat.birthTimestamp) / (float)GameConfig.GameDayMs);
-                }
+                rat.ageDays = AgeDaysAt(rat, gameTime);
 
                 if (rat.ageDays >= rat.expectedLifespanDays)
                 {

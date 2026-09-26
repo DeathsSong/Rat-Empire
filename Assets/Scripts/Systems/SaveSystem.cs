@@ -195,6 +195,9 @@ namespace RatHabitat
         public static bool Save(ColonySaveData save)
         {
             if (save == null) return false;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            UnityEngine.Profiling.Profiler.BeginSample("Rat Empire/Save/Serialize and Storage");
+#endif
             try
             {
                 save.EnsureLists();
@@ -218,11 +221,20 @@ namespace RatHabitat
                     // usable backup while recovery is being completed.
                     if (TryParse(previous) != null)
                         WriteBrowser(BrowserBackupKey, previous);
-                    if (!WriteBrowser(BrowserSaveKey, json)) return false;
+                    if (!WriteBrowser(BrowserSaveKey, json))
+                    {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                        UnityEngine.Profiling.Profiler.EndSample();
+#endif
+                        return false;
+                    }
                     WriteBrowser(BrowserStorageVersionKey, BrowserStorageVersion.ToString());
                     // localStorage writes are synchronous; this second call
                     // makes the intended flush explicit for pagehide/unload.
                     FlushBrowser(BrowserSaveKey);
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                    UnityEngine.Profiling.Profiler.EndSample();
+#endif
                     return true;
                 }
 
@@ -232,10 +244,16 @@ namespace RatHabitat
                     File.Copy(SavePath, backupPath, true);
                 }
                 File.WriteAllText(SavePath, json);
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                UnityEngine.Profiling.Profiler.EndSample();
+#endif
                 return true;
             }
             catch (Exception exception)
             {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                UnityEngine.Profiling.Profiler.EndSample();
+#endif
                 Debug.LogWarning("Rat Habitat save could not be written: " + exception.Message);
                 return false;
             }

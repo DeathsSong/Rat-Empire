@@ -193,6 +193,9 @@ namespace RatHabitat
 
             ClearLegacyMalePregnancyState(save, rat);
             GrowthSystem.EnsureBiologyDefaults(rat);
+            float currentAgeDays = GrowthSystem.AgeDaysAt(rat, gameTime);
+            RatStage currentStage = GrowthSystem.StageForAge(
+                currentAgeDays, rat.sex, rat.breedingEndAgeDays);
 
             DedicatedBreedingSessionData session = FindActiveDedicatedSession(save, rat.id);
             if (session != null)
@@ -224,17 +227,17 @@ namespace RatHabitat
             // Mature stage begins at one year, but mature rats can still
             // breed during the individualized decline period. Only the
             // persisted breeding-end age is the past-breeding cutoff.
-            if (rat.ageDays >= rat.breedingEndAgeDays)
+            if (currentAgeDays >= rat.breedingEndAgeDays)
             {
                 return Unavailable(ReproductiveState.Infertile, "Past breeding age", "Past breeding age.");
             }
 
             // The randomized sexualMaturityDays value is authoritative even
             // while the visual life stage already reads Adult.
-            if (rat.stage == RatStage.Pinkie || rat.stage == RatStage.YoungRat ||
-                rat.ageDays < rat.sexualMaturityDays)
+            if (currentStage == RatStage.Pinkie || currentStage == RatStage.YoungRat ||
+                currentAgeDays < rat.sexualMaturityDays)
             {
-                long remaining = Math.Max(0L, (long)((rat.sexualMaturityDays - rat.ageDays) * GameConfig.GameDayMs));
+                long remaining = Math.Max(0L, (long)((rat.sexualMaturityDays - currentAgeDays) * GameConfig.GameDayMs));
                 string label = "Immature — breeding available in " + FormatDuration(remaining);
                 return Unavailable(ReproductiveState.Immature, label, label + ".", gameTime + remaining);
             }
@@ -301,8 +304,11 @@ namespace RatHabitat
         {
             if (rat == null || rat.sex != RatSex.Female) return true;
             GrowthSystem.EnsureBiologyDefaults(rat);
-            if (rat.stage == RatStage.Pinkie || rat.stage == RatStage.YoungRat ||
-                rat.ageDays < rat.sexualMaturityDays || rat.ageDays >= rat.breedingEndAgeDays) return false;
+            float currentAgeDays = GrowthSystem.AgeDaysAt(rat, gameTime);
+            RatStage currentStage = GrowthSystem.StageForAge(
+                currentAgeDays, rat.sex, rat.breedingEndAgeDays);
+            if (currentStage == RatStage.Pinkie || currentStage == RatStage.YoungRat ||
+                currentAgeDays < rat.sexualMaturityDays || currentAgeDays >= rat.breedingEndAgeDays) return false;
             long cycleMs = Math.Max(1L, (long)(GameConfig.EstrousCycleDays * GameConfig.GameDayMs));
             long windowMs = Math.Max(1L, (long)(GameConfig.EstrousFertileWindowDays * GameConfig.GameDayMs));
             long elapsed = gameTime - rat.estrousCycleAnchorGameTime;

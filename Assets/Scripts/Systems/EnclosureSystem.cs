@@ -328,11 +328,13 @@ namespace RatHabitat
             // pull a family back into the removed habitat.
             bool changed = MigrateLegacyNurseryAssignments(save);
             long gameTime = save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs;
+            HashSet<string> mothersWithDependentPinkies = BuildDependentPinkieMotherIds(save);
             foreach (var rat in save.rats)
             {
                 if (rat == null) continue;
 
-                bool hasDependentPinkies = rat.sex == RatSex.Female && HasDependentPinkies(save, rat.id);
+                bool hasDependentPinkies = rat.sex == RatSex.Female &&
+                    !string.IsNullOrEmpty(rat.id) && mothersWithDependentPinkies.Contains(rat.id);
                 // Live dependent-pinkie records are authoritative. Do not let
                 // a stale serialized Nursing enum keep a mother nursing after
                 // the last pinkie has grown, been moved, or been removed.
@@ -359,6 +361,46 @@ namespace RatHabitat
                 }
             }
             return changed;
+        }
+
+        /// <summary>
+        /// Builds the dependent-mother index once for an assignment pass.
+        /// The previous implementation called HasDependentPinkies for every
+        /// rat, which rescanned all live pups and litter records for each
+        /// candidate and made the cost grow quadratically during repeated
+        /// reconciliation.
+        /// </summary>
+        private static HashSet<string> BuildDependentPinkieMotherIds(ColonySaveData save)
+        {
+            var result = new HashSet<string>();
+            if (save == null || save.rats == null) return result;
+
+            var litterMothers = new Dictionary<string, string>();
+            if (save.litters != null)
+            {
+                foreach (LitterData litter in save.litters)
+                {
+                    if (litter == null || string.IsNullOrEmpty(litter.id) ||
+                        string.IsNullOrEmpty(litter.motherId)) continue;
+                    litterMothers[litter.id] = litter.motherId;
+                }
+            }
+
+            foreach (RatData pup in save.rats)
+            {
+                if (pup == null || pup.stage != RatStage.Pinkie) continue;
+                if (!string.IsNullOrEmpty(pup.motherId))
+                {
+                    result.Add(pup.motherId);
+                    continue;
+                }
+
+                string motherId;
+                if (!string.IsNullOrEmpty(pup.litterId) &&
+                    litterMothers.TryGetValue(pup.litterId, out motherId))
+                    result.Add(motherId);
+            }
+            return result;
         }
 
         public static bool HasDependentPinkies(ColonySaveData save, string motherId)

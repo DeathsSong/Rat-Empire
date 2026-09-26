@@ -116,6 +116,8 @@ namespace RatHabitat
         private readonly List<Text> animationShowcaseRowLabels = new List<Text>();
         private readonly List<Button> animationShowcaseRowButtons = new List<Button>();
         private readonly List<Action> liveTimedTextUpdates = new List<Action>();
+        private const float LiveUiRefreshIntervalSeconds = 0.15f;
+        private float liveUiRefreshTimer;
         private readonly Dictionary<MainPanel, Button> topNavigationButtons = new Dictionary<MainPanel, Button>();
         private readonly Dictionary<int, Button> simulationSpeedButtons = new Dictionary<int, Button>();
         // A generated page control can be reached by both Unity's normal
@@ -153,6 +155,7 @@ namespace RatHabitat
         private RectTransform liveProfileActivityHistoryPanel;
         private LayoutElement liveProfileActivityHistoryLayout;
         private string liveProfileActivityHistorySignature;
+        private string liveActivityHistoryRatId;
         private bool profileActivityHistoryDeferred;
 
         private enum MainPanel
@@ -386,28 +389,34 @@ namespace RatHabitat
 
         private void RefreshLiveRatProfile()
         {
-            if (game == null || string.IsNullOrEmpty(liveProfileRatId)) return;
-            RatData rat = BreedingSystem.FindHistoricalRat(game.Save, liveProfileRatId);
-            if (rat == null) return;
+            if (game == null) return;
+            RatData rat = string.IsNullOrEmpty(liveProfileRatId)
+                ? null
+                : BreedingSystem.FindHistoricalRat(game.Save, liveProfileRatId);
+            RatData historyRat = string.IsNullOrEmpty(liveActivityHistoryRatId)
+                ? rat
+                : BreedingSystem.FindHistoricalRat(game.Save, liveActivityHistoryRatId);
+            if (rat == null && historyRat == null) return;
 
-            if (liveProfileActivityText != null)
+            if (rat != null && liveProfileActivityText != null)
                 liveProfileActivityText.text = "Current activity: " + game.CurrentRatActivityLabel(rat);
-            if (liveProfileAgeText != null)
+            if (rat != null && liveProfileAgeText != null)
                 liveProfileAgeText.text = "Age: " + GrowthSystem.FormatAge(rat.ageDays);
-            if (liveProfileStatsText != null)
+            if (rat != null && liveProfileStatsText != null)
             {
                 TraitData traits = rat.traits ?? new TraitData();
                 liveProfileStatsText.text = "Size " + traits.size.ToString("0") +
                     "  •  Health " + traits.health.ToString("0") +
                     "  •  Fertility " + traits.fertility.ToString("0");
             }
-            if (liveProfileHabitatText != null)
+            if (rat != null && liveProfileHabitatText != null)
                 liveProfileHabitatText.text = "Current habitat: " + EnclosureSystem.Label(rat.enclosure);
-            if (liveProfileReproductiveText != null)
+            if (rat != null && liveProfileReproductiveText != null)
                 liveProfileReproductiveText.text = "Reproductive state: " + ReproductiveStateLabel(rat);
 
-            string historySignature = BuildRatActivityHistorySignature(rat);
-            if (liveProfileActivityHistoryPanel != null && historySignature != liveProfileActivityHistorySignature)
+            string historySignature = BuildRatActivityHistorySignature(historyRat);
+            if (historyRat != null && liveProfileActivityHistoryPanel != null &&
+                historySignature != liveProfileActivityHistorySignature)
             {
                 if (IsRatProfileScrollMoving())
                 {
@@ -415,7 +424,7 @@ namespace RatHabitat
                     return;
                 }
 
-                RebuildRatActivityHistoryRows(liveProfileActivityHistoryPanel, rat);
+                RebuildRatActivityHistoryRows(liveProfileActivityHistoryPanel, historyRat);
                 liveProfileActivityHistorySignature = historySignature;
                 profileActivityHistoryDeferred = false;
             }
@@ -660,11 +669,21 @@ namespace RatHabitat
             string eventLogSignature = game.EventLogSignature;
             if (eventLogOpen && eventLogSignature != lastEventLogSignature)
                 RefreshEventLogPanel();
-            for (int index = 0; index < liveTimedTextUpdates.Count; index++)
+            // These labels are simulation-time displays, not render-time
+            // displays. Updating every bound roster/profile label every frame
+            // caused repeated reproductive-status calculations and text/layout
+            // work in late colonies. Keep the header clock live, but refresh
+            // the detailed live labels on a short bounded interval.
+            liveUiRefreshTimer -= Time.unscaledDeltaTime;
+            if (liveUiRefreshTimer <= 0f)
             {
-                liveTimedTextUpdates[index]?.Invoke();
+                for (int index = 0; index < liveTimedTextUpdates.Count; index++)
+                {
+                    liveTimedTextUpdates[index]?.Invoke();
+                }
+                RefreshLiveRatProfile();
+                liveUiRefreshTimer = LiveUiRefreshIntervalSeconds;
             }
-            RefreshLiveRatProfile();
             RefreshTopNavigationState();
         }
 
@@ -1864,12 +1883,14 @@ namespace RatHabitat
             liveProfileActivityHistoryPanel = null;
             liveProfileActivityHistoryLayout = null;
             liveProfileActivityHistorySignature = null;
+            liveActivityHistoryRatId = null;
             profileActivityHistoryDeferred = false;
             familyTreeScroll = null;
             familyTreeViewport = null;
             familyTreeContent = null;
             familyTreePinching = false;
             liveTimedTextUpdates.Clear();
+            liveUiRefreshTimer = 0f;
             for (int i = content.childCount - 1; i >= 0; i--)
             {
                 // Destroy is deferred during Play Mode. Disable the old page
@@ -2875,6 +2896,7 @@ namespace RatHabitat
             liveProfileActivityHistoryPanel = null;
             liveProfileActivityHistoryLayout = null;
             liveProfileActivityHistorySignature = null;
+            liveActivityHistoryRatId = null;
             lastProfileStructureSignature = null;
         }
 
@@ -3832,6 +3854,7 @@ namespace RatHabitat
             var historyElement = historyPanel.gameObject.AddComponent<LayoutElement>();
             liveProfileActivityHistoryPanel = historyPanel;
             liveProfileActivityHistoryLayout = historyElement;
+            liveActivityHistoryRatId = rat.id;
             historyElement.minHeight = 28f;
             historyElement.preferredHeight = 28f + Mathf.Min(
                 RatActivitySystem.MaximumHistoryEntries,
@@ -4541,6 +4564,7 @@ namespace RatHabitat
             AddText(developerToolsCard, "Developer Tools", 22, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
             AddText(developerToolsCard, "Developer-only controls. Test rats use real saved genotype and phenotype data; regular growth and inheritance rules are unchanged.", 13, new Color(0.7f, 0.78f, 0.74f), TextAnchor.UpperLeft);
             AddText(developerToolsCard, "Movement diagnostic: " + game.MovementDiagnostics, 12, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
+            AddText(developerToolsCard, "Simulation diagnostic: " + game.SimulationPerformanceDiagnostics, 12, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
             AddText(developerToolsCard, "Spawn adult test rats", 17, Color.white, TextAnchor.UpperLeft);
             AddButton(developerToolsCard, "Solid Black  •  B/B C/C D/D s/s", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.SolidBlack));
             AddButton(developerToolsCard, "Solid Brown  •  b/b C/C D/D s/s", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.SolidBrown));

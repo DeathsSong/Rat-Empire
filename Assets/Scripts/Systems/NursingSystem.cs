@@ -14,6 +14,51 @@ namespace RatHabitat
         private static readonly long NursingCooldownMs =
             (long)(GameConfig.NursingInteractionCooldownHours * 60f * 60f * 1000f);
 
+        /// <summary>
+        /// Returns the next simulation timestamp at which a nursing pass can
+        /// change anything. This lets the main loop sleep between the short
+        /// interaction deadline and the per-pup cooldown instead of allocating
+        /// and sorting nursing candidates every rendered frame.
+        /// </summary>
+        public static long NextOpportunityGameTime(ColonySaveData save, long gameTime)
+        {
+            if (save == null || save.rats == null) return long.MaxValue;
+            long next = long.MaxValue;
+
+            foreach (RatData mother in save.rats)
+            {
+                if (!IsMotherCandidate(save, mother)) continue;
+                if (mother.nursingInteractionUntil > gameTime)
+                {
+                    next = Math.Min(next, mother.nursingInteractionUntil);
+                    continue;
+                }
+
+                bool hasEligiblePup = false;
+                foreach (RatData pup in save.rats)
+                {
+                    if (pup == null || pup.stage != RatStage.Pinkie ||
+                        pup.removalDisposition != RatRemovalDisposition.None ||
+                        pup.enclosure != mother.enclosure ||
+                        !IsRecordedPup(save, mother, pup)) continue;
+
+                    hasEligiblePup = true;
+                    long availableAt = pup.lastNursedAt <= 0L
+                        ? gameTime
+                        : pup.lastNursedAt + NursingCooldownMs;
+                    if (availableAt <= gameTime) return gameTime;
+                    next = Math.Min(next, availableAt);
+                }
+
+                // A valid mother with no current pup candidate will be woken
+                // by a later stage/relationship pass rather than polled each
+                // frame. The local flag documents that this is intentional.
+                if (!hasEligiblePup && next == long.MaxValue) continue;
+            }
+
+            return next;
+        }
+
         public static bool Tick(ColonySaveData save, long gameTime, RatPresenter presenter)
         {
             if (save == null || presenter == null || save.rats == null) return false;
