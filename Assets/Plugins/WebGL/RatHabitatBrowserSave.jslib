@@ -1,119 +1,24 @@
-// Browser-only bridge for the stable Rat Empire save record and the optional
-// Screen Wake Lock. None of the browser callbacks call back into Unity. The
-// bridge is intentionally synchronous for localStorage and one-way for the
-// asynchronous Wake Lock Promise so it cannot form a Unity/JavaScript loop.
-function ratHabitatSaveBridgeState() {
-    if (!window.__ratHabitatSaveBridgeState) {
-        window.__ratHabitatSaveBridgeState = {
-            readInProgress: false,
-            writeInProgress: false,
-            removeInProgress: false,
-            flushInProgress: false
-        };
-    }
-    return window.__ratHabitatSaveBridgeState;
-}
-
-function ratHabitatWakeLockState() {
-    var state = window.__ratHabitatWakeLockState;
-    if (!state) {
-        state = window.__ratHabitatWakeLockState = {
-            enabled: true,
-            sentinel: null,
-            pending: false,
-            releaseInProgress: false,
-            reacquireTimer: null,
-            reacquireOnVisible: false,
-            status: 5,
-            listenersInstalled: false
-        };
-    }
-    return state;
-}
-
-function ratHabitatReleaseWakeLock(state) {
-    if (!state || !state.sentinel || state.releaseInProgress) return;
-    var sentinel = state.sentinel;
-    state.sentinel = null;
-    state.releaseInProgress = true;
-    try {
-        var releaseResult = sentinel.release();
-        // A browser may return a Promise here. Handle rejection locally; it
-        // must never re-enter Unity or create another request.
-        if (releaseResult && typeof releaseResult.catch === "function") {
-            releaseResult.catch(function () { });
-        }
-    } catch (error) {
-    } finally {
-        state.releaseInProgress = false;
-    }
-}
-
-function ratHabitatInstallWakeLockRequest() {
-    var state = ratHabitatWakeLockState();
-    if (typeof window.__ratHabitatRequestWakeLock === "function") return state;
-
-    window.__ratHabitatRequestWakeLock = function () {
-        var current = ratHabitatWakeLockState();
-        try {
-            if (!current.enabled) {
-                current.status = 4;
-                return false;
-            }
-            if (!navigator.wakeLock || typeof navigator.wakeLock.request !== "function") {
-                current.status = 2;
-                return false;
-            }
-            if (document.visibilityState !== "visible") {
-                current.status = 5;
-                return false;
-            }
-            if (current.sentinel || current.pending) return true;
-
-            current.pending = true;
-            current.status = 5;
-            navigator.wakeLock.request("screen").then(function (sentinel) {
-                current.pending = false;
-                if (!current.enabled || document.visibilityState !== "visible") {
-                    // The request completed after the tab became hidden or
-                    // the preference was disabled. Release only this sentinel.
-                    try {
-                        var result = sentinel.release();
-                        if (result && typeof result.catch === "function") result.catch(function () { });
-                    } catch (releaseError) { }
-                    current.status = current.enabled ? 5 : 4;
-                    return;
-                }
-                current.sentinel = sentinel;
-                current.reacquireOnVisible = true;
-                current.status = 1;
-                sentinel.addEventListener("release", function () {
-                    current.sentinel = null;
-                    current.pending = false;
-                    current.status = current.enabled ? 3 : 4;
-                    // A browser revocation is reported, not immediately
-                    // retried. The next user gesture or visibility transition
-                    // is the safe retry point.
-                }, false);
-            }, function () {
-                current.pending = false;
-                current.sentinel = null;
-                current.status = 3;
-            });
-            return true;
-        } catch (error) {
-            current.pending = false;
-            current.sentinel = null;
-            current.status = 3;
-            return false;
-        }
-    };
-    return state;
-}
+// Browser-only bridge for the stable Rat Empire save record and optional
+// Screen Wake Lock. Unity/Emscripten may omit top-level .jslib declarations,
+// so every exported entry point lazily installs the helpers it uses onto a
+// uniquely named window namespace before calling them.
 
 mergeInto(LibraryManager.library, {
     RatHabitatBrowserRead: function (keyPtr) {
-        var bridge = ratHabitatSaveBridgeState();
+        if (!window.__ratHabitatGetSaveBridgeState) {
+            window.__ratHabitatGetSaveBridgeState = function () {
+                if (!window.__ratHabitatSaveBridgeState) {
+                    window.__ratHabitatSaveBridgeState = {
+                        readInProgress: false,
+                        writeInProgress: false,
+                        removeInProgress: false,
+                        flushInProgress: false
+                    };
+                }
+                return window.__ratHabitatSaveBridgeState;
+            };
+        }
+        var bridge = window.__ratHabitatGetSaveBridgeState();
         if (bridge.readInProgress) return allocateUTF8("");
         bridge.readInProgress = true;
         try {
@@ -129,7 +34,20 @@ mergeInto(LibraryManager.library, {
     },
 
     RatHabitatBrowserWrite: function (keyPtr, valuePtr) {
-        var bridge = ratHabitatSaveBridgeState();
+        if (!window.__ratHabitatGetSaveBridgeState) {
+            window.__ratHabitatGetSaveBridgeState = function () {
+                if (!window.__ratHabitatSaveBridgeState) {
+                    window.__ratHabitatSaveBridgeState = {
+                        readInProgress: false,
+                        writeInProgress: false,
+                        removeInProgress: false,
+                        flushInProgress: false
+                    };
+                }
+                return window.__ratHabitatSaveBridgeState;
+            };
+        }
+        var bridge = window.__ratHabitatGetSaveBridgeState();
         if (bridge.writeInProgress) return 0;
         bridge.writeInProgress = true;
         try {
@@ -146,7 +64,20 @@ mergeInto(LibraryManager.library, {
     },
 
     RatHabitatBrowserRemove: function (keyPtr) {
-        var bridge = ratHabitatSaveBridgeState();
+        if (!window.__ratHabitatGetSaveBridgeState) {
+            window.__ratHabitatGetSaveBridgeState = function () {
+                if (!window.__ratHabitatSaveBridgeState) {
+                    window.__ratHabitatSaveBridgeState = {
+                        readInProgress: false,
+                        writeInProgress: false,
+                        removeInProgress: false,
+                        flushInProgress: false
+                    };
+                }
+                return window.__ratHabitatSaveBridgeState;
+            };
+        }
+        var bridge = window.__ratHabitatGetSaveBridgeState();
         if (bridge.removeInProgress) return;
         bridge.removeInProgress = true;
         try {
@@ -160,14 +91,26 @@ mergeInto(LibraryManager.library, {
     },
 
     RatHabitatBrowserFlush: function (keyPtr) {
-        var bridge = ratHabitatSaveBridgeState();
+        if (!window.__ratHabitatGetSaveBridgeState) {
+            window.__ratHabitatGetSaveBridgeState = function () {
+                if (!window.__ratHabitatSaveBridgeState) {
+                    window.__ratHabitatSaveBridgeState = {
+                        readInProgress: false,
+                        writeInProgress: false,
+                        removeInProgress: false,
+                        flushInProgress: false
+                    };
+                }
+                return window.__ratHabitatSaveBridgeState;
+            };
+        }
+        var bridge = window.__ratHabitatGetSaveBridgeState();
         if (bridge.flushInProgress) return;
         bridge.flushInProgress = true;
         try {
             var key = UTF8ToString(keyPtr);
-            // localStorage is synchronous. Re-setting the last serialized
-            // payload makes the requested flush explicit without invoking
-            // another Unity save or relying on sessionStorage.
+            // localStorage is synchronous. Re-setting the current payload
+            // makes the flush explicit without re-entering Unity.
             var value = window.localStorage.getItem(key);
             if (value !== null) window.localStorage.setItem(key, value);
         } catch (error) {
@@ -178,6 +121,19 @@ mergeInto(LibraryManager.library, {
     },
 
     RatHabitatBrowserRegisterLifecycle: function (keyPtr) {
+        if (!window.__ratHabitatGetSaveBridgeState) {
+            window.__ratHabitatGetSaveBridgeState = function () {
+                if (!window.__ratHabitatSaveBridgeState) {
+                    window.__ratHabitatSaveBridgeState = {
+                        readInProgress: false,
+                        writeInProgress: false,
+                        removeInProgress: false,
+                        flushInProgress: false
+                    };
+                }
+                return window.__ratHabitatSaveBridgeState;
+            };
+        }
         var key = UTF8ToString(keyPtr);
         try {
             if (!window.__ratHabitatSaveLifecycleKeys) window.__ratHabitatSaveLifecycleKeys = {};
@@ -185,7 +141,7 @@ mergeInto(LibraryManager.library, {
             window.__ratHabitatSaveLifecycleKeys[key] = true;
 
             var flush = function () {
-                var bridge = ratHabitatSaveBridgeState();
+                var bridge = window.__ratHabitatGetSaveBridgeState();
                 if (bridge.flushInProgress) return;
                 bridge.flushInProgress = true;
                 try {
@@ -208,11 +164,101 @@ mergeInto(LibraryManager.library, {
         }
     },
 
-    // The Unity side receives only compact status integers. Promise handlers
-    // update browser state and never invoke a Unity callback.
     RatHabitatBrowserWakeLockSetDesired: function (enabled) {
+        if (!window.__ratHabitatGetWakeLockState) {
+            window.__ratHabitatGetWakeLockState = function () {
+                var state = window.__ratHabitatWakeLockState;
+                if (!state) {
+                    state = window.__ratHabitatWakeLockState = {
+                        enabled: true,
+                        sentinel: null,
+                        pending: false,
+                        releaseInProgress: false,
+                        reacquireTimer: null,
+                        reacquireOnVisible: false,
+                        status: 5,
+                        listenersInstalled: false
+                    };
+                }
+                return state;
+            };
+        }
+        if (!window.__ratHabitatReleaseWakeLock) {
+            window.__ratHabitatReleaseWakeLock = function (state) {
+                if (!state || !state.sentinel || state.releaseInProgress) return;
+                var sentinel = state.sentinel;
+                state.sentinel = null;
+                state.releaseInProgress = true;
+                try {
+                    var result = sentinel.release();
+                    if (result && typeof result.catch === "function") result.catch(function () { });
+                } catch (error) {
+                } finally {
+                    state.releaseInProgress = false;
+                }
+            };
+        }
+        if (!window.__ratHabitatInstallWakeLockRequest) {
+            window.__ratHabitatInstallWakeLockRequest = function () {
+                var state = window.__ratHabitatGetWakeLockState();
+                if (window.__ratHabitatWakeLockBridgeVersion === 2 &&
+                    typeof window.__ratHabitatRequestWakeLock === "function") return state;
+                window.__ratHabitatRequestWakeLock = function () {
+                    var current = window.__ratHabitatGetWakeLockState();
+                    try {
+                        if (!current.enabled) {
+                            current.status = 4;
+                            return false;
+                        }
+                        if (!navigator.wakeLock || typeof navigator.wakeLock.request !== "function") {
+                            current.status = 2;
+                            return false;
+                        }
+                        if (document.visibilityState !== "visible") {
+                            current.status = 5;
+                            return false;
+                        }
+                        if (current.sentinel || current.pending) return true;
+
+                        current.pending = true;
+                        current.status = 5;
+                        navigator.wakeLock.request("screen").then(function (sentinel) {
+                            current.pending = false;
+                            if (!current.enabled || document.visibilityState !== "visible") {
+                                try {
+                                    var result = sentinel.release();
+                                    if (result && typeof result.catch === "function") result.catch(function () { });
+                                } catch (releaseError) { }
+                                current.status = current.enabled ? 5 : 4;
+                                return;
+                            }
+                            current.sentinel = sentinel;
+                            current.reacquireOnVisible = true;
+                            current.status = 1;
+                            sentinel.addEventListener("release", function () {
+                                current.sentinel = null;
+                                current.pending = false;
+                                current.status = current.enabled ? 3 : 4;
+                            }, false);
+                        }, function () {
+                            current.pending = false;
+                            current.sentinel = null;
+                            current.status = 3;
+                        });
+                        return true;
+                    } catch (error) {
+                        current.pending = false;
+                        current.sentinel = null;
+                        current.status = 3;
+                        return false;
+                    }
+                };
+                window.__ratHabitatWakeLockBridgeVersion = 2;
+                return state;
+            };
+        }
         try {
-            var state = ratHabitatWakeLockState();
+            var state = window.__ratHabitatGetWakeLockState();
             state.enabled = !!enabled;
             if (!state.enabled) {
                 if (state.reacquireTimer !== null) {
@@ -222,7 +268,7 @@ mergeInto(LibraryManager.library, {
                 state.pending = false;
                 state.reacquireOnVisible = false;
                 state.status = 4;
-                ratHabitatReleaseWakeLock(state);
+                window.__ratHabitatReleaseWakeLock(state);
                 return;
             }
             if (!navigator.wakeLock || typeof navigator.wakeLock.request !== "function") {
@@ -230,7 +276,6 @@ mergeInto(LibraryManager.library, {
             } else if (document.visibilityState !== "visible") {
                 state.status = 5;
             } else if (!state.sentinel && !state.pending) {
-                // Initial acquisition remains user-gesture driven.
                 state.status = 5;
             }
         } catch (error) {
@@ -238,22 +283,89 @@ mergeInto(LibraryManager.library, {
     },
 
     RatHabitatBrowserWakeLockRequest: function () {
+        // Install the same namespaced helpers here too: this export can be
+        // the first bridge entry point on a fresh page.
+        if (!window.__ratHabitatGetWakeLockState) {
+            window.__ratHabitatGetWakeLockState = function () {
+                var state = window.__ratHabitatWakeLockState;
+                if (!state) {
+                    state = window.__ratHabitatWakeLockState = {
+                        enabled: true, sentinel: null, pending: false,
+                        releaseInProgress: false, reacquireTimer: null,
+                        reacquireOnVisible: false, status: 5,
+                        listenersInstalled: false
+                    };
+                }
+                return state;
+            };
+        }
+        if (!window.__ratHabitatReleaseWakeLock) {
+            window.__ratHabitatReleaseWakeLock = function (state) {
+                if (!state || !state.sentinel || state.releaseInProgress) return;
+                var sentinel = state.sentinel;
+                state.sentinel = null;
+                state.releaseInProgress = true;
+                try {
+                    var result = sentinel.release();
+                    if (result && typeof result.catch === "function") result.catch(function () { });
+                } catch (error) {
+                } finally {
+                    state.releaseInProgress = false;
+                }
+            };
+        }
+        if (!window.__ratHabitatInstallWakeLockRequest) {
+            window.__ratHabitatInstallWakeLockRequest = function () {
+                var state = window.__ratHabitatGetWakeLockState();
+                if (window.__ratHabitatWakeLockBridgeVersion === 2 && typeof window.__ratHabitatRequestWakeLock === "function") return state;
+                window.__ratHabitatRequestWakeLock = function () {
+                    var current = window.__ratHabitatGetWakeLockState();
+                    try {
+                        if (!current.enabled) { current.status = 4; return false; }
+                        if (!navigator.wakeLock || typeof navigator.wakeLock.request !== "function") { current.status = 2; return false; }
+                        if (document.visibilityState !== "visible") { current.status = 5; return false; }
+                        if (current.sentinel || current.pending) return true;
+                        current.pending = true;
+                        current.status = 5;
+                        navigator.wakeLock.request("screen").then(function (sentinel) {
+                            current.pending = false;
+                            if (!current.enabled || document.visibilityState !== "visible") {
+                                try { var result = sentinel.release(); if (result && typeof result.catch === "function") result.catch(function () { }); } catch (error) { }
+                                current.status = current.enabled ? 5 : 4;
+                                return;
+                            }
+                            current.sentinel = sentinel;
+                            current.reacquireOnVisible = true;
+                            current.status = 1;
+                            sentinel.addEventListener("release", function () { current.sentinel = null; current.pending = false; current.status = current.enabled ? 3 : 4; }, false);
+                        }, function () { current.pending = false; current.sentinel = null; current.status = 3; });
+                        return true;
+                    } catch (error) { current.pending = false; current.sentinel = null; current.status = 3; return false; }
+                };
+                window.__ratHabitatWakeLockBridgeVersion = 2;
+                return state;
+            };
+        }
         try {
-            ratHabitatInstallWakeLockRequest();
+            window.__ratHabitatInstallWakeLockRequest();
             return window.__ratHabitatRequestWakeLock() ? 1 : 0;
         } catch (error) {
             var state = window.__ratHabitatWakeLockState;
-            if (state) {
-                state.pending = false;
-                state.status = 3;
-            }
+            if (state) { state.pending = false; state.status = 3; }
             return 0;
         }
     },
 
     RatHabitatBrowserWakeLockGetStatus: function () {
+        if (!window.__ratHabitatGetWakeLockState) {
+            window.__ratHabitatGetWakeLockState = function () {
+                var state = window.__ratHabitatWakeLockState;
+                if (!state) state = window.__ratHabitatWakeLockState = { enabled: true, sentinel: null, pending: false, releaseInProgress: false, reacquireTimer: null, reacquireOnVisible: false, status: 5, listenersInstalled: false };
+                return state;
+            };
+        }
         try {
-            var state = window.__ratHabitatWakeLockState;
+            var state = window.__ratHabitatGetWakeLockState();
             return state ? (state.status || 4) : 4;
         } catch (error) {
             return 3;
@@ -261,30 +373,67 @@ mergeInto(LibraryManager.library, {
     },
 
     RatHabitatBrowserWakeLockRegisterLifecycle: function () {
+        // Install all wake helpers here too: lifecycle registration normally
+        // happens before SetDesired and before a user-gesture request.
+        if (!window.__ratHabitatGetWakeLockState) {
+            window.__ratHabitatGetWakeLockState = function () {
+                var state = window.__ratHabitatWakeLockState;
+                if (!state) state = window.__ratHabitatWakeLockState = { enabled: true, sentinel: null, pending: false, releaseInProgress: false, reacquireTimer: null, reacquireOnVisible: false, status: 5, listenersInstalled: false };
+                return state;
+            };
+        }
+        if (!window.__ratHabitatReleaseWakeLock) {
+            window.__ratHabitatReleaseWakeLock = function (state) {
+                if (!state || !state.sentinel || state.releaseInProgress) return;
+                var sentinel = state.sentinel;
+                state.sentinel = null;
+                state.releaseInProgress = true;
+                try { var result = sentinel.release(); if (result && typeof result.catch === "function") result.catch(function () { }); } catch (error) { } finally { state.releaseInProgress = false; }
+            };
+        }
+        if (!window.__ratHabitatInstallWakeLockRequest) {
+            window.__ratHabitatInstallWakeLockRequest = function () {
+                var state = window.__ratHabitatGetWakeLockState();
+                if (window.__ratHabitatWakeLockBridgeVersion === 2 && typeof window.__ratHabitatRequestWakeLock === "function") return state;
+                window.__ratHabitatRequestWakeLock = function () {
+                    var current = window.__ratHabitatGetWakeLockState();
+                    try {
+                        if (!current.enabled) { current.status = 4; return false; }
+                        if (!navigator.wakeLock || typeof navigator.wakeLock.request !== "function") { current.status = 2; return false; }
+                        if (document.visibilityState !== "visible") { current.status = 5; return false; }
+                        if (current.sentinel || current.pending) return true;
+                        current.pending = true; current.status = 5;
+                        navigator.wakeLock.request("screen").then(function (sentinel) {
+                            current.pending = false;
+                            if (!current.enabled || document.visibilityState !== "visible") {
+                                try { var result = sentinel.release(); if (result && typeof result.catch === "function") result.catch(function () { }); } catch (error) { }
+                                current.status = current.enabled ? 5 : 4; return;
+                            }
+                            current.sentinel = sentinel; current.reacquireOnVisible = true; current.status = 1;
+                            sentinel.addEventListener("release", function () { current.sentinel = null; current.pending = false; current.status = current.enabled ? 3 : 4; }, false);
+                        }, function () { current.pending = false; current.sentinel = null; current.status = 3; });
+                        return true;
+                    } catch (error) { current.pending = false; current.sentinel = null; current.status = 3; return false; }
+                };
+                window.__ratHabitatWakeLockBridgeVersion = 2;
+                return state;
+            };
+        }
         try {
-            var state = ratHabitatInstallWakeLockRequest();
+            var state = window.__ratHabitatInstallWakeLockRequest();
             if (state.listenersInstalled) return;
             state.listenersInstalled = true;
-
             document.addEventListener("visibilitychange", function () {
-                var current = ratHabitatWakeLockState();
+                var current = window.__ratHabitatGetWakeLockState();
                 if (document.visibilityState === "hidden") {
-                    if (current.reacquireTimer !== null) {
-                        window.clearTimeout(current.reacquireTimer);
-                        current.reacquireTimer = null;
-                    }
+                    if (current.reacquireTimer !== null) { window.clearTimeout(current.reacquireTimer); current.reacquireTimer = null; }
                     current.reacquireOnVisible = !!current.sentinel || current.reacquireOnVisible;
-                    ratHabitatReleaseWakeLock(current);
-                    current.pending = false;
-                    current.status = current.enabled ? 5 : 4;
+                    window.__ratHabitatReleaseWakeLock(current);
+                    current.pending = false; current.status = current.enabled ? 5 : 4;
                 } else if (current.enabled && current.reacquireOnVisible && current.reacquireTimer === null) {
-                    // Wait briefly for the page to become fully visible. The
-                    // guard allows at most one pending reacquisition.
                     current.reacquireTimer = window.setTimeout(function () {
                         current.reacquireTimer = null;
-                        if (current.enabled && document.visibilityState === "visible") {
-                            window.__ratHabitatRequestWakeLock();
-                        }
+                        if (current.enabled && document.visibilityState === "visible") window.__ratHabitatRequestWakeLock();
                     }, 150);
                 }
             }, false);
