@@ -67,6 +67,8 @@ namespace RatHabitat
         private ScrollRect pageScroll;
         private ScrollRect mateListScroll;
         private ScrollRect ratRosterScroll;
+        private RectTransform ratRosterContent;
+        private string lastRosterSortSignature;
         private ScrollRect storeRatListScroll;
         private ScrollRect familyTreeScroll;
         private ScrollRect ratProfileScroll;
@@ -681,6 +683,7 @@ namespace RatHabitat
                 {
                     liveTimedTextUpdates[index]?.Invoke();
                 }
+                RefreshRosterSortIfNeeded();
                 RefreshLiveRatProfile();
                 liveUiRefreshTimer = LiveUiRefreshIntervalSeconds;
             }
@@ -1873,6 +1876,8 @@ namespace RatHabitat
         private void RebuildContent()
         {
             ratRosterScroll = null;
+            ratRosterContent = null;
+            lastRosterSortSignature = null;
             ratProfileScroll = null;
             liveProfileRatId = null;
             liveProfileActivityText = null;
@@ -2748,6 +2753,9 @@ namespace RatHabitat
             liveProfileReproductiveText = AddText(parent, string.Empty, fontSize,
                 new Color(0.72f, 0.84f, 0.78f), TextAnchor.UpperLeft);
             BindLiveText(liveProfileReproductiveText, () => ReproductiveStateLabel(rat));
+            PregnancyData pregnancy = FindPregnancyForFemale(rat);
+            if (pregnancy != null)
+                AddPregnancyProgress(parent, pregnancy, false);
         }
 
         private void AddBasicRatProfileInformation(RectTransform parent, RatData rat, int fontSize)
@@ -2821,7 +2829,7 @@ namespace RatHabitat
             PregnancyData pregnancy = liveRat ? FindPregnancyForFemale(rat) : null;
             if (pregnancy != null)
             {
-                AddPregnancyProgress(more, pregnancy);
+                AddPregnancyProgress(more, pregnancy, false);
             }
             else if (liveRat)
             {
@@ -3339,8 +3347,11 @@ namespace RatHabitat
 
             int ratCount = CountVisibleColonyRats();
             var card = CreateCard("My Rats");
-            AddText(card, ratCount + " shown of " + CountColonyRats() + " colony rats  •  " +
-                RosterSexFilterLabel() + "  •  Sort: " + RosterSortLabel(), 13,
+            string countSummary = rosterSortField == RosterSortField.Pregnancy
+                ? ratCount + " pregnant rats shown"
+                : ratCount + " shown of " + CountColonyRats() + " colony rats";
+            AddText(card, countSummary + "  •  " + RosterSexFilterLabel() +
+                "  •  Sort: " + RosterSortLabel(), 13,
                 new Color(0.78f, 0.9f, 0.82f), TextAnchor.UpperLeft);
             AddButtonTo(card, "Close My Rats", true, () => ToggleTopPanel(MainPanel.MyRats),
                 new Color(0.14f, 0.22f, 0.25f), 40f);
@@ -3425,6 +3436,7 @@ namespace RatHabitat
             var fitter = listContent.gameObject.AddComponent<ContentSizeFitter>();
             fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
             list.content = listContent;
+            ratRosterContent = listContent;
 
             var roster = new List<RatData>();
             foreach (var rat in game.Save.rats)
@@ -3434,11 +3446,15 @@ namespace RatHabitat
             roster.Sort(CompareRosterRats);
             if (roster.Count == 0)
             {
-                AddTextTo(listContent, "No rats are currently in the colony.", 14, new Color(1f, 0.72f, 0.42f), TextAnchor.UpperLeft);
+                AddTextTo(listContent,
+                    rosterSortField == RosterSortField.Pregnancy ? "No pregnant rats." : "No rats are currently in the colony.",
+                    14, new Color(1f, 0.72f, 0.42f), TextAnchor.UpperLeft);
+                lastRosterSortSignature = BuildRosterSortSignature(roster);
                 return;
             }
 
             foreach (var rat in roster) AddRatRosterRow(listContent, rat);
+            lastRosterSortSignature = BuildRosterSortSignature(roster);
         }
 
         private int CountColonyRats()
@@ -3464,12 +3480,17 @@ namespace RatHabitat
         private bool IsRosterRatVisible(RatData rat)
         {
             if (rat == null) return false;
+            bool sexVisible;
             switch (rosterSexFilter)
             {
-                case RosterSexFilter.Males: return rat.sex == RatSex.Male;
-                case RosterSexFilter.Females: return rat.sex == RatSex.Female;
-                default: return true;
+                case RosterSexFilter.Males: sexVisible = rat.sex == RatSex.Male; break;
+                case RosterSexFilter.Females: sexVisible = rat.sex == RatSex.Female; break;
+                default: sexVisible = true; break;
             }
+            if (!sexVisible) return false;
+            if (rosterSortField == RosterSortField.Pregnancy)
+                return BreedingSystem.FindActivePregnancyForMother(game.Save, rat) != null;
+            return true;
         }
 
         private void AddRosterSexFilters(RectTransform parent)
@@ -3559,7 +3580,11 @@ namespace RatHabitat
                     RosterSortField field = fields[index + offset];
                     bool active = rosterSortField == field;
                     Color color = active ? new Color(0.3f, 0.48f, 0.32f) : new Color(0.14f, 0.25f, 0.24f);
-                    AddButtonTo(row, RosterFieldLabel(field) + (active ? (rosterSortAscending ? " ↑" : " ↓") : string.Empty), true,
+                    bool fixedDirection = field == RosterSortField.Fertility || field == RosterSortField.Pregnancy;
+                    string direction = active && !fixedDirection
+                        ? (rosterSortAscending ? " ↑" : " ↓")
+                        : string.Empty;
+                    AddButtonTo(row, RosterFieldLabel(field) + direction, true,
                         () => SetRosterSort(field), color, 34f);
                 }
             }
@@ -3567,7 +3592,12 @@ namespace RatHabitat
 
         private void SetRosterSort(RosterSortField field)
         {
-            if (rosterSortField == field) rosterSortAscending = !rosterSortAscending;
+            if (field == RosterSortField.Fertility || field == RosterSortField.Pregnancy)
+            {
+                rosterSortField = field;
+                rosterSortAscending = true;
+            }
+            else if (rosterSortField == field) rosterSortAscending = !rosterSortAscending;
             else
             {
                 rosterSortField = field;
@@ -3578,6 +3608,8 @@ namespace RatHabitat
 
         private string RosterSortLabel()
         {
+            if (rosterSortField == RosterSortField.Pregnancy) return "Pregnancy (soonest first)";
+            if (rosterSortField == RosterSortField.Fertility) return "Fertility (next opportunity)";
             return RosterFieldLabel(rosterSortField) + (rosterSortAscending ? " ascending" : " descending");
         }
 
@@ -3604,7 +3636,13 @@ namespace RatHabitat
                 case RosterSortField.Age: result = AgeValue(first).CompareTo(AgeValue(second)); break;
                 case RosterSortField.Size: result = TraitValue(first, 0).CompareTo(TraitValue(second, 0)); break;
                 case RosterSortField.Health: result = TraitValue(first, 1).CompareTo(TraitValue(second, 1)); break;
-                case RosterSortField.Fertility: result = TraitValue(first, 2).CompareTo(TraitValue(second, 2)); break;
+                case RosterSortField.Fertility:
+                    result = BreedingSystem.CompareFertilitySort(
+                        game == null ? null : game.Save,
+                        first,
+                        second,
+                        game == null ? 0L : game.GameTime);
+                    break;
                 case RosterSortField.Sex: result = first.sex.CompareTo(second.sex); break;
                 case RosterSortField.Pregnancy:
                     result = BreedingSystem.ComparePregnancySort(
@@ -3612,17 +3650,91 @@ namespace RatHabitat
                         first,
                         second,
                         game == null ? 0L : game.GameTime,
-                        rosterSortAscending);
+                        true);
                     break;
                 case RosterSortField.Generation: result = first.generation.CompareTo(second.generation); break;
                 default: result = string.Compare(first.name, second.name, StringComparison.OrdinalIgnoreCase); break;
             }
-            if (!rosterSortAscending && rosterSortField != RosterSortField.Pregnancy) result = -result;
+            if (!rosterSortAscending && rosterSortField != RosterSortField.Pregnancy &&
+                rosterSortField != RosterSortField.Fertility) result = -result;
             if (result != 0) return result;
 
             result = string.Compare(first.name, second.name, StringComparison.OrdinalIgnoreCase);
             if (result != 0) return result;
             return string.Compare(first.id, second.id, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private string BuildRosterSortSignature(List<RatData> sortedRoster)
+        {
+            if (sortedRoster == null) return string.Empty;
+            var signature = new System.Text.StringBuilder();
+            signature.Append(rosterSexFilter).Append('|').Append(rosterSortField).Append(';');
+            foreach (RatData rat in sortedRoster)
+            {
+                if (rat == null) continue;
+                signature.Append(rat.id ?? string.Empty).Append(':');
+                if (rosterSortField == RosterSortField.Pregnancy)
+                {
+                    PregnancyData pregnancy = FindPregnancyForFemale(rat);
+                    signature.Append(pregnancy == null ? 0L : pregnancy.dueAt);
+                }
+                else if (rosterSortField == RosterSortField.Fertility)
+                {
+                    BreedingSystem.BreedingOpportunitySortInfo opportunity =
+                        BreedingSystem.GetBreedingOpportunitySortInfo(game.Save, rat, game.GameTime);
+                    signature.Append(opportunity.availableNow ? '1' : '0')
+                        .Append(opportunity.upcoming ? '1' : '0')
+                        .Append(opportunity.nextAvailableAt)
+                        .Append(':').Append(opportunity.state);
+                }
+                signature.Append(';');
+            }
+            return signature.ToString();
+        }
+
+        private void RefreshRosterSortIfNeeded()
+        {
+            if (game == null || game.Save == null || activeMainPanel != MainPanel.MyRats ||
+                ratRosterScroll == null || ratRosterContent == null ||
+                (rosterSortField != RosterSortField.Pregnancy && rosterSortField != RosterSortField.Fertility))
+                return;
+
+            var roster = new List<RatData>();
+            foreach (RatData rat in game.Save.rats)
+            {
+                if (rat != null && IsRosterRatVisible(rat)) roster.Add(rat);
+            }
+            roster.Sort(CompareRosterRats);
+            string signature = BuildRosterSortSignature(roster);
+            if (signature == lastRosterSortSignature) return;
+
+            float previousNormalized = ratRosterScroll.verticalNormalizedPosition;
+            // Keep the existing My Rats ScrollRect and viewport. Only the row
+            // children are refreshed when a pregnancy/opportunity ordering or
+            // membership actually changes, so live labels and scroll state do
+            // not reset on every simulation-clock update.
+            liveTimedTextUpdates.Clear();
+            for (int index = ratRosterContent.childCount - 1; index >= 0; index--)
+            {
+                GameObject oldRow = ratRosterContent.GetChild(index).gameObject;
+                oldRow.SetActive(false);
+                Destroy(oldRow);
+            }
+
+            if (roster.Count == 0)
+            {
+                AddTextTo(ratRosterContent,
+                    rosterSortField == RosterSortField.Pregnancy ? "No pregnant rats." : "No rats are currently in the colony.",
+                    14, new Color(1f, 0.72f, 0.42f), TextAnchor.UpperLeft);
+            }
+            else
+            {
+                foreach (RatData rat in roster) AddRatRosterRow(ratRosterContent, rat);
+            }
+
+            lastRosterSortSignature = signature;
+            Canvas.ForceUpdateCanvases();
+            ratRosterScroll.verticalNormalizedPosition = previousNormalized;
         }
 
         private static float AgeValue(RatData rat)
@@ -3740,9 +3852,17 @@ namespace RatHabitat
             BindLiveText(ageText, () => BuildRatRosterAge(rat));
             Text stageText = AddTextTo(infoRoot, BuildRatRosterStage(rat), 13, Color.white, TextAnchor.MiddleLeft);
             BindLiveText(stageText, () => BuildRatRosterStage(rat));
-            Text availabilityText = AddTextTo(infoRoot, BuildRatRosterAvailability(rat), 13,
-                new Color(0.95f, 0.83f, 0.55f), TextAnchor.MiddleLeft);
-            BindLiveText(availabilityText, () => BuildRatRosterAvailability(rat));
+            PregnancyData pregnancy = FindPregnancyForFemale(rat);
+            if (pregnancy != null)
+            {
+                AddPregnancyProgress(infoRoot, pregnancy);
+            }
+            else
+            {
+                Text availabilityText = AddTextTo(infoRoot, BuildRatRosterAvailability(rat), 13,
+                    new Color(0.95f, 0.83f, 0.55f), TextAnchor.MiddleLeft);
+                BindLiveText(availabilityText, () => BuildRatRosterAvailability(rat));
+            }
 
             if (expanded)
             {
@@ -3774,6 +3894,13 @@ namespace RatHabitat
             {
                 if (text != null) text.text = valueProvider();
             };
+            liveTimedTextUpdates.Add(update);
+            update();
+        }
+
+        private void BindLiveAction(Action update)
+        {
+            if (update == null) return;
             liveTimedTextUpdates.Add(update);
             update();
         }
@@ -3945,6 +4072,12 @@ namespace RatHabitat
 
         private string ReproductiveStateLabel(RatData rat)
         {
+            PregnancyData pregnancy = FindPregnancyForFemale(rat);
+            if (pregnancy != null)
+                return BreedingSystem.PregnancyProgressLabel(
+                    game == null ? null : game.Save,
+                    rat,
+                    game == null ? 0L : game.GameTime);
             return BreedingSystem.ReproductiveStateLabel(game == null ? null : game.Save, rat, game == null ? 0L : game.GameTime);
         }
 
@@ -3991,21 +4124,16 @@ namespace RatHabitat
             return "—";
         }
 
-        private void AddPregnancyProgress(RectTransform parent, PregnancyData pregnancy)
+        private void AddPregnancyProgress(RectTransform parent, PregnancyData pregnancy, bool includeLabel = true)
         {
             if (parent == null || pregnancy == null || game == null) return;
 
-            long durationMs = pregnancy.dueAt - pregnancy.startedAt;
-            if (durationMs <= 0L) return;
-            long elapsedMs = game.GameTime - pregnancy.startedAt;
-            float rawProgress = Mathf.Clamp01(elapsedMs / (float)durationMs);
-            // A pending pregnancy is represented as 1% at its starting instant so
-            // the bar visibly runs from 1% through 100% rather than appearing empty.
-            float progress = Mathf.Clamp(rawProgress, 0.01f, 1f);
-
-            Text pregnancyText = AddText(parent, string.Empty, 14,
-                new Color(1f, 0.73f, 0.34f), TextAnchor.UpperLeft);
-            BindLiveText(pregnancyText, () => PregnancyProgressLabel(pregnancy));
+            if (includeLabel)
+            {
+                Text pregnancyText = AddText(parent, string.Empty, 14,
+                    new Color(1f, 0.73f, 0.34f), TextAnchor.UpperLeft);
+                BindLiveText(pregnancyText, () => PregnancyProgressLabel(pregnancy));
+            }
             var track = CreateRect("Pregnancy Progress Track", parent);
             var trackElement = track.gameObject.AddComponent<LayoutElement>();
             trackElement.preferredHeight = 14f;
@@ -4016,21 +4144,25 @@ namespace RatHabitat
 
             var fill = CreateRect("Pregnancy Progress Fill", track);
             fill.anchorMin = Vector2.zero;
-            fill.anchorMax = new Vector2(progress, 1f);
+            fill.anchorMax = new Vector2(BreedingSystem.PregnancyProgress01(pregnancy, game.GameTime), 1f);
             fill.offsetMin = Vector2.zero;
             fill.offsetMax = Vector2.zero;
             var fillImage = fill.gameObject.AddComponent<Image>();
             fillImage.color = new Color(0.95f, 0.55f, 0.28f, 1f);
             fillImage.raycastTarget = false;
+            BindLiveAction(() =>
+            {
+                if (fill == null || game == null) return;
+                fill.anchorMax = new Vector2(
+                    BreedingSystem.PregnancyProgress01(pregnancy, game.GameTime), 1f);
+            });
         }
 
         private string PregnancyProgressLabel(PregnancyData pregnancy)
         {
             if (pregnancy == null || game == null) return string.Empty;
-            long durationMs = pregnancy.dueAt - pregnancy.startedAt;
-            if (durationMs <= 0L) return "Pregnancy";
-            float progress = Mathf.Clamp01((game.GameTime - pregnancy.startedAt) / (float)durationMs);
-            int percentage = Mathf.Clamp(Mathf.RoundToInt(progress * 100f), 1, 100);
+            int percentage = Mathf.Clamp(Mathf.RoundToInt(
+                BreedingSystem.PregnancyProgress01(pregnancy, game.GameTime) * 100f), 0, 100);
             long remainingMs = Math.Max(0L, pregnancy.dueAt - game.GameTime);
             return "Pregnancy  " + percentage + "%  •  " + FormatRemainingTime(remainingMs);
         }

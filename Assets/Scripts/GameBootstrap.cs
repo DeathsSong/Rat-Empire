@@ -639,11 +639,12 @@ namespace RatHabitat
             {
                 GrowthSystem.AdvanceClock(Save, GameConfig.NowMs());
                 GrowthSystem.RefreshRatStages(Save);
-                BreedingSystem.RefreshReproductiveStates(Save, GameTime);
-                    StoreSystem.AdvanceRestock(Save, GameTime);
-                    EnclosureSystem.ClearBreedingPair();
-                    RestoreDedicatedBreedingPair();
-                    EnclosureSystem.RecalculateAssignments(Save);
+                bool startupReproductiveChanged = BreedingSystem.RefreshReproductiveStates(Save, GameTime);
+                StoreSystem.AdvanceRestock(Save, GameTime);
+                EnclosureSystem.ClearBreedingPair();
+                RestoreDedicatedBreedingPair();
+                EnclosureSystem.RecalculateAssignments(Save);
+                if (startupReproductiveChanged) SaveSystem.Save(Save);
             }
             catch (Exception exception)
             {

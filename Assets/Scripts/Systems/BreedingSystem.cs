@@ -20,6 +20,18 @@ namespace RatHabitat
             public long nextAvailableAt;
         }
 
+        /// <summary>
+        /// Stable, data-only ordering information for the My Rats Fertility
+        /// sort. The UI must not derive this from a localized/display label.
+        /// </summary>
+        public struct BreedingOpportunitySortInfo
+        {
+            public bool availableNow;
+            public bool upcoming;
+            public long nextAvailableAt;
+            public ReproductiveState state;
+        }
+
         public static RatData FindRat(ColonySaveData save, string id)
         {
             if (save == null || string.IsNullOrEmpty(id)) return null;
@@ -48,7 +60,11 @@ namespace RatHabitat
             foreach (var pregnancy in save.pregnancies)
             {
                 if (pregnancy != null && pregnancy.status == "pending" &&
-                    (pregnancy.motherId == ratId || pregnancy.fatherId == ratId)) return pregnancy;
+                    (pregnancy.motherId == ratId || pregnancy.fatherId == ratId))
+                {
+                    EnsurePregnancyTiming(pregnancy);
+                    return pregnancy;
+                }
             }
             return null;
         }
@@ -62,7 +78,10 @@ namespace RatHabitat
             foreach (var pregnancy in save.pregnancies)
             {
                 if (pregnancy != null && pregnancy.status == "pending" && pregnancy.motherId == ratId)
+                {
+                    EnsurePregnancyTiming(pregnancy);
                     return pregnancy;
+                }
             }
             return null;
         }
@@ -85,7 +104,10 @@ namespace RatHabitat
                 {
                     if (pregnancy != null && pregnancy.status == "pending" &&
                         pregnancy.id == rat.pregnancyId && pregnancy.motherId == rat.id)
+                    {
+                        EnsurePregnancyTiming(pregnancy);
                         return pregnancy;
+                    }
                 }
             }
 
@@ -93,6 +115,59 @@ namespace RatHabitat
             // no active ID on the RatData object yet. This remains record-based
             // rather than trusting a stale ReproductiveState/display label.
             return FindPendingPregnancyForMother(save, rat.id);
+        }
+
+        /// <summary>
+        /// Migrates legacy pending pregnancies that did not persist a start
+        /// time. The due timestamp remains authoritative; the configured
+        /// gestation duration supplies the missing origin safely.
+        /// </summary>
+        public static bool EnsurePregnancyTiming(PregnancyData pregnancy)
+        {
+            if (pregnancy == null) return false;
+            bool changed = false;
+            long duration = pregnancy.gestationDurationMs > 0L
+                ? pregnancy.gestationDurationMs
+                : GameConfig.PregnancyMs;
+            if (pregnancy.gestationDurationMs <= 0L)
+            {
+                pregnancy.gestationDurationMs = duration;
+                changed = true;
+            }
+            if (pregnancy.startedAt <= 0L && pregnancy.dueAt > 0L)
+            {
+                pregnancy.startedAt = Math.Max(0L, pregnancy.dueAt - duration);
+                changed = true;
+            }
+            else if (pregnancy.dueAt <= 0L && pregnancy.startedAt > 0L)
+            {
+                pregnancy.dueAt = pregnancy.startedAt + duration;
+                changed = true;
+            }
+            return changed;
+        }
+
+        public static float PregnancyProgress01(PregnancyData pregnancy, long gameTime)
+        {
+            if (pregnancy == null) return 0f;
+            EnsurePregnancyTiming(pregnancy);
+            long duration = pregnancy.gestationDurationMs > 0L
+                ? pregnancy.gestationDurationMs
+                : GameConfig.PregnancyMs;
+            if (duration <= 0L || pregnancy.dueAt <= pregnancy.startedAt) return 0f;
+            return Mathf.Clamp01((gameTime - pregnancy.startedAt) / (float)duration);
+        }
+
+        public static string PregnancyProgressLabel(
+            ColonySaveData save,
+            RatData rat,
+            long gameTime)
+        {
+            PregnancyData pregnancy = FindActivePregnancyForMother(save, rat);
+            if (pregnancy == null) return string.Empty;
+            int percentage = Mathf.Clamp(Mathf.RoundToInt(PregnancyProgress01(pregnancy, gameTime) * 100f), 0, 100);
+            long remainingMs = Math.Max(0L, pregnancy.dueAt - gameTime);
+            return "Pregnancy " + percentage + "%  •  " + FormatDuration(remainingMs);
         }
 
         public static PregnancyData FindPregnancyForLitter(ColonySaveData save, string litterId)
@@ -207,7 +282,7 @@ namespace RatHabitat
             PregnancyData pregnancy = FindActivePregnancyForMother(save, rat);
             if (pregnancy != null)
             {
-                string label = "Pregnant — birth in " + FormatDuration(Math.Max(0L, pregnancy.dueAt - gameTime));
+                string label = PregnancyProgressLabel(save, rat, gameTime);
                 return Unavailable(ReproductiveState.Pregnant, label, "Currently pregnant.", pregnancy.dueAt);
             }
 
@@ -445,7 +520,7 @@ namespace RatHabitat
             switch (status.state)
             {
                 case ReproductiveState.Pregnant:
-                    return "Breeding unavailable — pregnant";
+                    return PregnancyProgressLabel(save, rat, gameTime);
                 case ReproductiveState.Nursing:
                     return "Breeding unavailable — nursing";
                 case ReproductiveState.Recovery:
@@ -461,11 +536,10 @@ namespace RatHabitat
         }
 
         /// <summary>
-        /// Compares two My Rats entries for the Pregnancy sort. Ascending puts
-        /// active pregnancies first and orders them by soonest due date. The
-        /// remaining rats use the authoritative reproductive state order so
-        /// they remain grouped consistently instead of being classified from
-        /// a display string or stale saved label.
+        /// Compares two My Rats entries for the Pregnancy sort. The caller
+        /// filters the list to active pregnancies; this comparator defensively
+        /// keeps any accidental non-pregnant entries after them. Pregnancy
+        /// ordering is always soonest due date first.
         /// </summary>
         public static int ComparePregnancySort(
             ColonySaveData save,
@@ -476,28 +550,82 @@ namespace RatHabitat
         {
             bool firstPregnant = FindActivePregnancyForMother(save, first) != null;
             bool secondPregnant = FindActivePregnancyForMother(save, second) != null;
-            int result;
+            if (firstPregnant != secondPregnant) return firstPregnant ? -1 : 1;
+            if (firstPregnant)
+            {
+                int dueComparison = PregnancyDueSortValue(FindActivePregnancyForMother(save, first))
+                    .CompareTo(PregnancyDueSortValue(FindActivePregnancyForMother(save, second)));
+                if (dueComparison != 0) return dueComparison;
+            }
+            return CompareStableRatId(first, second);
+        }
 
-            if (firstPregnant != secondPregnant)
+        /// <summary>
+        /// Orders by the next real breeding opportunity: available now,
+        /// then an upcoming fertile/cooldown opportunity, then temporarily or
+        /// permanently unavailable rats. It uses GetReproductiveStatus so
+        /// pregnancy, nursing, recovery, maturity, cooldown, age cutoff, and
+        /// fertile-window rules stay in one place.
+        /// </summary>
+        public static int CompareFertilitySort(
+            ColonySaveData save,
+            RatData first,
+            RatData second,
+            long gameTime)
+        {
+            BreedingOpportunitySortInfo firstInfo = GetBreedingOpportunitySortInfo(save, first, gameTime);
+            BreedingOpportunitySortInfo secondInfo = GetBreedingOpportunitySortInfo(save, second, gameTime);
+            int firstRank = OpportunityRank(firstInfo, gameTime);
+            int secondRank = OpportunityRank(secondInfo, gameTime);
+            int result = firstRank.CompareTo(secondRank);
+            if (result != 0) return result;
+
+            if (firstRank == 1)
             {
-                // Ascending means pregnant rats have priority at the top.
-                result = firstPregnant ? -1 : 1;
+                result = firstInfo.nextAvailableAt.CompareTo(secondInfo.nextAvailableAt);
+                if (result != 0) return result;
             }
-            else if (firstPregnant)
+            else if (firstRank == 2)
             {
-                long firstDue = PregnancyDueSortValue(FindActivePregnancyForMother(save, first));
-                long secondDue = PregnancyDueSortValue(FindActivePregnancyForMother(save, second));
-                result = firstDue.CompareTo(secondDue);
-            }
-            else
-            {
-                ReproductiveState firstState = GetReproductiveStatus(save, first, gameTime).state;
-                ReproductiveState secondState = GetReproductiveStatus(save, second, gameTime).state;
-                result = PregnancyStateSortRank(firstState).CompareTo(PregnancyStateSortRank(secondState));
+                long firstNext = firstInfo.nextAvailableAt > gameTime ? firstInfo.nextAvailableAt : long.MaxValue;
+                long secondNext = secondInfo.nextAvailableAt > gameTime ? secondInfo.nextAvailableAt : long.MaxValue;
+                result = firstNext.CompareTo(secondNext);
+                if (result != 0) return result;
+                result = PregnancyStateSortRank(firstInfo.state).CompareTo(PregnancyStateSortRank(secondInfo.state));
+                if (result != 0) return result;
             }
 
-            if (!ascending) result = -result;
-            return result;
+            return CompareStableRatId(first, second);
+        }
+
+        public static BreedingOpportunitySortInfo GetBreedingOpportunitySortInfo(
+            ColonySaveData save,
+            RatData rat,
+            long gameTime)
+        {
+            ReproductiveStatus status = GetReproductiveStatus(save, rat, gameTime);
+            return new BreedingOpportunitySortInfo
+            {
+                availableNow = status.canBreed,
+                upcoming = !status.canBreed && status.state == ReproductiveState.Fertile &&
+                    status.nextAvailableAt > gameTime,
+                nextAvailableAt = status.nextAvailableAt,
+                state = status.state,
+            };
+        }
+
+        private static int OpportunityRank(BreedingOpportunitySortInfo info, long gameTime)
+        {
+            if (info.availableNow) return 0;
+            if (info.upcoming) return 1;
+            return 2;
+        }
+
+        private static int CompareStableRatId(RatData first, RatData second)
+        {
+            return string.Compare(first == null ? string.Empty : first.id,
+                second == null ? string.Empty : second.id,
+                System.StringComparison.Ordinal);
         }
 
         private static long PregnancyDueSortValue(PregnancyData pregnancy)
@@ -532,6 +660,13 @@ namespace RatHabitat
             if (save == null) return false;
             save.EnsureLists();
             bool changed = false;
+            if (save.pregnancies != null)
+            {
+                foreach (PregnancyData pregnancy in save.pregnancies)
+                {
+                    if (pregnancy != null && EnsurePregnancyTiming(pregnancy)) changed = true;
+                }
+            }
             foreach (var rat in save.rats)
             {
                 if (rat == null) continue;
