@@ -56,11 +56,8 @@
         updateBannerVisibility();
       }
 
-      // Keep all Unity payload URLs on the same immutable cache-busted revision.
-      // GitHub Pages can otherwise serve a cached .data file alongside a newer
-      // framework/wasm pair after a deployment.
       var buildUrl = "Build";
-      var buildRevision = "lategame-coat-20260927";
+      var buildRevision = "desktop-responsive-20260927";
       var buildAsset = function(name) { return buildUrl + "/" + name + "?v=" + buildRevision; };
       var loaderUrl = buildAsset("WebGL.loader.js");
       var config = {
@@ -97,10 +94,12 @@
 
 
       } else {
-        // Desktop style: Render the game canvas in a window that can be maximized to fullscreen:
-
-        canvas.style.width = "960px";
-        canvas.style.height = "600px";
+        // Desktop style: the responsive stylesheet gives Unity a centered,
+        // height-driven canvas. Do not write fixed pixel dimensions here;
+        // Unity must receive the actual resized canvas aspect ratio so its
+        // CanvasScaler and habitat camera can reframe the world naturally.
+        container.className = "unity-desktop";
+        canvas.className = "unity-canvas";
       }
 
       loadingBar.style.display = "block";

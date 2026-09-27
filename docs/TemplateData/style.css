@@ -1,16 +1,87 @@
-body { padding: 0; margin: 0 }
-#unity-container { position: absolute }
-#unity-container.unity-desktop { left: 50%; top: 50%; transform: translate(-50%, -50%) }
-#unity-container.unity-mobile { position: fixed; width: 100%; height: 100% }
-#unity-canvas { background: #101713 }
+html, body { width: 100%; min-height: 100%; padding: 0; margin: 0 }
+body {
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow: hidden;
+  background: #07151a;
+  color: #f5f7f3;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Desktop uses the available height instead of the old fixed 960x600
+   phone-sized surface. The canvas gets a real responsive render target, so
+   Unity's live Screen dimensions and camera aspect stay honest; nothing is
+   non-uniformly stretched by CSS. */
+#unity-container {
+  position: relative;
+  box-sizing: border-box;
+}
+#unity-container.unity-desktop {
+  display: flex;
+  flex-direction: column;
+  width: min(92vw, 1280px);
+  height: min(90vh, calc(100vh - 24px));
+  height: min(90dvh, calc(100dvh - 24px));
+  min-height: 360px;
+  max-height: calc(100dvh - 24px);
+  margin: 0 auto;
+}
+#unity-container.unity-mobile {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  height: 100dvh;
+}
+#unity-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: #101713;
+}
+.unity-desktop #unity-canvas {
+  flex: 1 1 auto;
+  width: 100%;
+  height: auto;
+}
 .unity-mobile #unity-canvas { width: 100%; height: 100% }
 #unity-loading-bar { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: none }
 #unity-logo { width: 154px; height: 130px; background: url('unity-logo-dark.png') no-repeat center }
 #unity-progress-bar-empty { width: 141px; height: 18px; margin-top: 10px; margin-left: 6.5px; background: url('progress-bar-empty-dark.png') no-repeat center }
 #unity-progress-bar-full { width: 0%; height: 18px; margin-top: 10px; background: url('progress-bar-full-dark.png') no-repeat center }
-#unity-footer { position: relative }
+#unity-footer {
+  position: relative;
+  flex: 0 0 38px;
+  height: 38px;
+  box-sizing: border-box;
+  background: #101713;
+}
 .unity-mobile #unity-footer { display: none }
 #unity-webgl-logo { float:left; width: 204px; height: 38px; background: url('webgl-logo.png') no-repeat center }
 #unity-build-title { float: right; margin-right: 10px; line-height: 38px; font-family: arial; font-size: 18px }
 #unity-fullscreen-button { cursor:pointer; float: right; width: 38px; height: 38px; background: url('fullscreen-button.png') no-repeat center }
 #unity-warning { position: absolute; left: 50%; top: 5%; transform: translate(-50%); background: white; padding: 10px; display: none }
+
+/* A short laptop window should still use the available height while keeping
+   the canvas and footer inside the viewport. */
+@media (min-width: 769px) and (max-height: 700px) {
+  #unity-container.unity-desktop {
+    width: min(94vw, 1280px);
+    height: calc(100dvh - 12px);
+    max-height: calc(100dvh - 12px);
+  }
+}
+
+/* Unity's browser fullscreen path may fullscreen either the container or the
+   canvas depending on browser/version. Support both without changing the
+   mobile layout. */
+#unity-container:fullscreen,
+#unity-canvas:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+}
+#unity-container:fullscreen { display: flex }
