@@ -25,6 +25,17 @@ namespace RatHabitat
         private const string BrowserStorageVersionKey = "rat-habitat-save-v1-storage-version";
         private const int BrowserStorageVersion = 1;
 
+        // Browser lifecycle callbacks can arrive while a Unity callback is
+        // already saving. Keep the managed side one-shot and re-entrant safe
+        // so a pagehide/visibility transition cannot recursively enter the
+        // JSON and JS interop path.
+        private static bool saveInProgress;
+        private static bool browserLifecycleRegistered;
+        private static bool browserReadInProgress;
+        private static bool browserWriteInProgress;
+        private static bool browserRemoveInProgress;
+        private static bool browserFlushInProgress;
+
 #if UNITY_WEBGL && !UNITY_EDITOR
         [DllImport("__Internal")]
         private static extern string RatHabitatBrowserRead(string key);
@@ -198,6 +209,22 @@ namespace RatHabitat
         }
 
         public static bool Save(ColonySaveData save)
+        {
+            if (save == null) return false;
+            if (saveInProgress) return true;
+
+            saveInProgress = true;
+            try
+            {
+                return SaveInternal(save);
+            }
+            finally
+            {
+                saveInProgress = false;
+            }
+        }
+
+        private static bool SaveInternal(ColonySaveData save)
         {
             if (save == null) return false;
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
@@ -401,14 +428,38 @@ namespace RatHabitat
         private static void RegisterBrowserLifecycle()
         {
 #if UNITY_WEBGL && !UNITY_EDITOR
-            RatHabitatBrowserRegisterLifecycle(BrowserSaveKey);
+            if (browserLifecycleRegistered) return;
+            browserLifecycleRegistered = true;
+            try
+            {
+                RatHabitatBrowserRegisterLifecycle(BrowserSaveKey);
+            }
+            catch
+            {
+                // A missing/unsupported browser bridge must never make the
+                // save path re-enter or break game startup.
+                browserLifecycleRegistered = false;
+            }
 #endif
         }
 
         private static string ReadBrowser(string key)
         {
 #if UNITY_WEBGL && !UNITY_EDITOR
-            return RatHabitatBrowserRead(key);
+            if (browserReadInProgress) return string.Empty;
+            browserReadInProgress = true;
+            try
+            {
+                return RatHabitatBrowserRead(key);
+            }
+            catch
+            {
+                return string.Empty;
+            }
+            finally
+            {
+                browserReadInProgress = false;
+            }
 #else
             return string.Empty;
 #endif
@@ -417,7 +468,20 @@ namespace RatHabitat
         private static bool WriteBrowser(string key, string value)
         {
 #if UNITY_WEBGL && !UNITY_EDITOR
-            return RatHabitatBrowserWrite(key, value) != 0;
+            if (browserWriteInProgress) return false;
+            browserWriteInProgress = true;
+            try
+            {
+                return RatHabitatBrowserWrite(key, value) != 0;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                browserWriteInProgress = false;
+            }
 #else
             return false;
 #endif
@@ -426,14 +490,38 @@ namespace RatHabitat
         private static void RemoveBrowser(string key)
         {
 #if UNITY_WEBGL && !UNITY_EDITOR
-            RatHabitatBrowserRemove(key);
+            if (browserRemoveInProgress) return;
+            browserRemoveInProgress = true;
+            try
+            {
+                RatHabitatBrowserRemove(key);
+            }
+            catch
+            {
+            }
+            finally
+            {
+                browserRemoveInProgress = false;
+            }
 #endif
         }
 
         private static void FlushBrowser(string key)
         {
 #if UNITY_WEBGL && !UNITY_EDITOR
-            RatHabitatBrowserFlush(key);
+            if (browserFlushInProgress) return;
+            browserFlushInProgress = true;
+            try
+            {
+                RatHabitatBrowserFlush(key);
+            }
+            catch
+            {
+            }
+            finally
+            {
+                browserFlushInProgress = false;
+            }
 #endif
         }
 

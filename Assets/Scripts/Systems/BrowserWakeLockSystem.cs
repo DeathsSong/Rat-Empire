@@ -20,6 +20,9 @@ namespace RatHabitat
         private static bool initialized;
         private static bool desiredEnabled = true;
         private static int lastStatus = StatusUnknown;
+        private static bool lifecycleRegistered;
+        private static bool wakeRequestInProgress;
+        private static bool nativeBridgeUnavailable;
 
 #if UNITY_WEBGL && !UNITY_EDITOR
         [DllImport("__Internal")]
@@ -54,9 +57,9 @@ namespace RatHabitat
             }
             initialized = true;
 #if UNITY_WEBGL && !UNITY_EDITOR
-            RatHabitatBrowserWakeLockRegisterLifecycle();
-            RatHabitatBrowserWakeLockSetDesired(desiredEnabled ? 1 : 0);
-            lastStatus = RatHabitatBrowserWakeLockGetStatus();
+            RegisterNativeLifecycle();
+            SetNativeDesired(desiredEnabled);
+            lastStatus = GetNativeStatus();
 #else
             // Native builds do not expose the browser API. The game remains
             // fully playable; Settings simply explains that this is a WebGL
@@ -73,9 +76,9 @@ namespace RatHabitat
             desiredEnabled = enabled;
             initialized = true;
 #if UNITY_WEBGL && !UNITY_EDITOR
-            RatHabitatBrowserWakeLockSetDesired(enabled ? 1 : 0);
-            if (enabled && requestNow) RatHabitatBrowserWakeLockRequest();
-            lastStatus = RatHabitatBrowserWakeLockGetStatus();
+            SetNativeDesired(enabled);
+            if (enabled && requestNow) RequestNativeWakeLock();
+            lastStatus = GetNativeStatus();
 #else
             lastStatus = enabled ? StatusUnsupported : StatusDisabled;
 #endif
@@ -91,8 +94,8 @@ namespace RatHabitat
             if (!initialized) Initialize(save);
             if (!IsEnabled(save)) return;
 #if UNITY_WEBGL && !UNITY_EDITOR
-            RatHabitatBrowserWakeLockRequest();
-            lastStatus = RatHabitatBrowserWakeLockGetStatus();
+            RequestNativeWakeLock();
+            lastStatus = GetNativeStatus();
 #else
             lastStatus = StatusUnsupported;
 #endif
@@ -107,7 +110,7 @@ namespace RatHabitat
             if (!initialized) return false;
             int status = lastStatus;
 #if UNITY_WEBGL && !UNITY_EDITOR
-            status = RatHabitatBrowserWakeLockGetStatus();
+            status = GetNativeStatus();
 #endif
             if (status == lastStatus) return false;
             lastStatus = status;
@@ -131,5 +134,70 @@ namespace RatHabitat
                     return "Screen wake lock will start after you tap the game.";
             }
         }
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+        private static void RegisterNativeLifecycle()
+        {
+            if (lifecycleRegistered || nativeBridgeUnavailable) return;
+            lifecycleRegistered = true;
+            try
+            {
+                RatHabitatBrowserWakeLockRegisterLifecycle();
+            }
+            catch
+            {
+                lifecycleRegistered = false;
+                nativeBridgeUnavailable = true;
+                lastStatus = StatusUnsupported;
+            }
+        }
+
+        private static void SetNativeDesired(bool enabled)
+        {
+            if (nativeBridgeUnavailable) return;
+            try
+            {
+                RatHabitatBrowserWakeLockSetDesired(enabled ? 1 : 0);
+            }
+            catch
+            {
+                nativeBridgeUnavailable = true;
+                lastStatus = StatusUnsupported;
+            }
+        }
+
+        private static int GetNativeStatus()
+        {
+            if (nativeBridgeUnavailable) return StatusUnsupported;
+            try
+            {
+                return RatHabitatBrowserWakeLockGetStatus();
+            }
+            catch
+            {
+                nativeBridgeUnavailable = true;
+                return StatusUnsupported;
+            }
+        }
+
+        private static void RequestNativeWakeLock()
+        {
+            if (nativeBridgeUnavailable || wakeRequestInProgress) return;
+            wakeRequestInProgress = true;
+            try
+            {
+                RatHabitatBrowserWakeLockRequest();
+            }
+            catch
+            {
+                nativeBridgeUnavailable = true;
+                lastStatus = StatusUnsupported;
+            }
+            finally
+            {
+                wakeRequestInProgress = false;
+            }
+        }
+#endif
     }
 }

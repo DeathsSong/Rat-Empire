@@ -1,46 +1,179 @@
+// Browser-only bridge for the stable Rat Empire save record and the optional
+// Screen Wake Lock. None of the browser callbacks call back into Unity. The
+// bridge is intentionally synchronous for localStorage and one-way for the
+// asynchronous Wake Lock Promise so it cannot form a Unity/JavaScript loop.
+function ratHabitatSaveBridgeState() {
+    if (!window.__ratHabitatSaveBridgeState) {
+        window.__ratHabitatSaveBridgeState = {
+            readInProgress: false,
+            writeInProgress: false,
+            removeInProgress: false,
+            flushInProgress: false
+        };
+    }
+    return window.__ratHabitatSaveBridgeState;
+}
+
+function ratHabitatWakeLockState() {
+    var state = window.__ratHabitatWakeLockState;
+    if (!state) {
+        state = window.__ratHabitatWakeLockState = {
+            enabled: true,
+            sentinel: null,
+            pending: false,
+            releaseInProgress: false,
+            reacquireTimer: null,
+            reacquireOnVisible: false,
+            status: 5,
+            listenersInstalled: false
+        };
+    }
+    return state;
+}
+
+function ratHabitatReleaseWakeLock(state) {
+    if (!state || !state.sentinel || state.releaseInProgress) return;
+    var sentinel = state.sentinel;
+    state.sentinel = null;
+    state.releaseInProgress = true;
+    try {
+        var releaseResult = sentinel.release();
+        // A browser may return a Promise here. Handle rejection locally; it
+        // must never re-enter Unity or create another request.
+        if (releaseResult && typeof releaseResult.catch === "function") {
+            releaseResult.catch(function () { });
+        }
+    } catch (error) {
+    } finally {
+        state.releaseInProgress = false;
+    }
+}
+
+function ratHabitatInstallWakeLockRequest() {
+    var state = ratHabitatWakeLockState();
+    if (typeof window.__ratHabitatRequestWakeLock === "function") return state;
+
+    window.__ratHabitatRequestWakeLock = function () {
+        var current = ratHabitatWakeLockState();
+        try {
+            if (!current.enabled) {
+                current.status = 4;
+                return false;
+            }
+            if (!navigator.wakeLock || typeof navigator.wakeLock.request !== "function") {
+                current.status = 2;
+                return false;
+            }
+            if (document.visibilityState !== "visible") {
+                current.status = 5;
+                return false;
+            }
+            if (current.sentinel || current.pending) return true;
+
+            current.pending = true;
+            current.status = 5;
+            navigator.wakeLock.request("screen").then(function (sentinel) {
+                current.pending = false;
+                if (!current.enabled || document.visibilityState !== "visible") {
+                    // The request completed after the tab became hidden or
+                    // the preference was disabled. Release only this sentinel.
+                    try {
+                        var result = sentinel.release();
+                        if (result && typeof result.catch === "function") result.catch(function () { });
+                    } catch (releaseError) { }
+                    current.status = current.enabled ? 5 : 4;
+                    return;
+                }
+                current.sentinel = sentinel;
+                current.reacquireOnVisible = true;
+                current.status = 1;
+                sentinel.addEventListener("release", function () {
+                    current.sentinel = null;
+                    current.pending = false;
+                    current.status = current.enabled ? 3 : 4;
+                    // A browser revocation is reported, not immediately
+                    // retried. The next user gesture or visibility transition
+                    // is the safe retry point.
+                }, false);
+            }, function () {
+                current.pending = false;
+                current.sentinel = null;
+                current.status = 3;
+            });
+            return true;
+        } catch (error) {
+            current.pending = false;
+            current.sentinel = null;
+            current.status = 3;
+            return false;
+        }
+    };
+    return state;
+}
+
 mergeInto(LibraryManager.library, {
     RatHabitatBrowserRead: function (keyPtr) {
-        var key = UTF8ToString(keyPtr);
+        var bridge = ratHabitatSaveBridgeState();
+        if (bridge.readInProgress) return allocateUTF8("");
+        bridge.readInProgress = true;
         try {
+            var key = UTF8ToString(keyPtr);
             var value = window.localStorage.getItem(key);
             return allocateUTF8(value === null ? "" : value);
         } catch (error) {
             console.warn("Rat Habitat browser save read failed", error);
             return allocateUTF8("");
+        } finally {
+            bridge.readInProgress = false;
         }
     },
 
     RatHabitatBrowserWrite: function (keyPtr, valuePtr) {
-        var key = UTF8ToString(keyPtr);
-        var value = UTF8ToString(valuePtr);
+        var bridge = ratHabitatSaveBridgeState();
+        if (bridge.writeInProgress) return 0;
+        bridge.writeInProgress = true;
         try {
+            var key = UTF8ToString(keyPtr);
+            var value = UTF8ToString(valuePtr);
             window.localStorage.setItem(key, value);
             return 1;
         } catch (error) {
             console.error("Rat Habitat browser save write failed", error);
             return 0;
+        } finally {
+            bridge.writeInProgress = false;
         }
     },
 
     RatHabitatBrowserRemove: function (keyPtr) {
-        var key = UTF8ToString(keyPtr);
+        var bridge = ratHabitatSaveBridgeState();
+        if (bridge.removeInProgress) return;
+        bridge.removeInProgress = true;
         try {
+            var key = UTF8ToString(keyPtr);
             window.localStorage.removeItem(key);
         } catch (error) {
             console.warn("Rat Habitat browser save remove failed", error);
+        } finally {
+            bridge.removeInProgress = false;
         }
     },
 
     RatHabitatBrowserFlush: function (keyPtr) {
-        var key = UTF8ToString(keyPtr);
+        var bridge = ratHabitatSaveBridgeState();
+        if (bridge.flushInProgress) return;
+        bridge.flushInProgress = true;
         try {
+            var key = UTF8ToString(keyPtr);
             // localStorage is synchronous. Re-setting the last serialized
-            // payload makes the requested flush explicit for pagehide and
-            // browser unload handlers without requiring sessionStorage.
+            // payload makes the requested flush explicit without invoking
+            // another Unity save or relying on sessionStorage.
             var value = window.localStorage.getItem(key);
             if (value !== null) window.localStorage.setItem(key, value);
         } catch (error) {
             console.warn("Rat Habitat browser save flush failed", error);
+        } finally {
+            bridge.flushInProgress = false;
         }
     },
 
@@ -52,12 +185,16 @@ mergeInto(LibraryManager.library, {
             window.__ratHabitatSaveLifecycleKeys[key] = true;
 
             var flush = function () {
+                var bridge = ratHabitatSaveBridgeState();
+                if (bridge.flushInProgress) return;
+                bridge.flushInProgress = true;
                 try {
                     var value = window.localStorage.getItem(key);
                     if (value !== null) window.localStorage.setItem(key, value);
                 } catch (error) {
-                    // The normal save path already reports write failures;
-                    // unload handlers must never block page navigation.
+                    // Unload handlers must never block page navigation.
+                } finally {
+                    bridge.flushInProgress = false;
                 }
             };
 
@@ -71,108 +208,44 @@ mergeInto(LibraryManager.library, {
         }
     },
 
-    // Screen Wake Lock is deliberately kept outside the Unity main loop. The
-    // request returns a Promise and the browser can revoke the sentinel when
-    // the tab is hidden, the battery is low, or power-saving mode is active.
-    // Unity polls only the compact integer status below.
+    // The Unity side receives only compact status integers. Promise handlers
+    // update browser state and never invoke a Unity callback.
     RatHabitatBrowserWakeLockSetDesired: function (enabled) {
         try {
-            var state = window.__ratHabitatWakeLockState;
-            if (!state) {
-                state = window.__ratHabitatWakeLockState = {
-                    enabled: false,
-                    sentinel: null,
-                    pending: false,
-                    status: 4,
-                    listenersInstalled: false
-                };
-            }
+            var state = ratHabitatWakeLockState();
             state.enabled = !!enabled;
             if (!state.enabled) {
-                state.pending = false;
-                state.status = 4; // disabled
-                if (state.sentinel) {
-                    var sentinel = state.sentinel;
-                    state.sentinel = null;
-                    try { sentinel.release(); } catch (releaseError) { }
+                if (state.reacquireTimer !== null) {
+                    window.clearTimeout(state.reacquireTimer);
+                    state.reacquireTimer = null;
                 }
+                state.pending = false;
+                state.reacquireOnVisible = false;
+                state.status = 4;
+                ratHabitatReleaseWakeLock(state);
                 return;
             }
             if (!navigator.wakeLock || typeof navigator.wakeLock.request !== "function") {
-                state.status = 2; // unsupported
+                state.status = 2;
             } else if (document.visibilityState !== "visible") {
-                state.status = 5; // waiting for a visible page
+                state.status = 5;
             } else if (!state.sentinel && !state.pending) {
-                state.status = 5; // awaiting a user-gesture request
+                // Initial acquisition remains user-gesture driven.
+                state.status = 5;
             }
         } catch (error) {
-            // A browser integration failure must never affect the game loop.
         }
     },
 
     RatHabitatBrowserWakeLockRequest: function () {
         try {
-            var state = window.__ratHabitatWakeLockState;
-            if (!state) {
-                state = window.__ratHabitatWakeLockState = {
-                    enabled: true,
-                    sentinel: null,
-                    pending: false,
-                    status: 5,
-                    listenersInstalled: false
-                };
-            }
-            if (!state.enabled) {
-                state.status = 4;
-                return 0;
-            }
-            if (!navigator.wakeLock || typeof navigator.wakeLock.request !== "function") {
-                state.status = 2;
-                return 0;
-            }
-            if (document.visibilityState !== "visible") {
-                state.status = 5;
-                return 0;
-            }
-            if (state.sentinel || state.pending) return 1;
-
-            state.pending = true;
-            state.status = 5;
-            navigator.wakeLock.request("screen").then(function (sentinel) {
-                state.pending = false;
-                if (!state.enabled || document.visibilityState !== "visible") {
-                    try { sentinel.release(); } catch (releaseError) { }
-                    state.status = state.enabled ? 5 : 4;
-                    return;
-                }
-                state.sentinel = sentinel;
-                state.status = 1; // active
-                sentinel.addEventListener("release", function () {
-                    state.sentinel = null;
-                    state.pending = false;
-                    if (!state.enabled) {
-                        state.status = 4;
-                    } else if (document.visibilityState === "visible") {
-                        // Surface the revocation without retrying in a tight
-                        // loop. The next real user gesture or visibility
-                        // transition is the safe retry point, especially when
-                        // the browser revoked the lock for low-battery mode.
-                        state.status = 3;
-                    } else {
-                        state.status = 5;
-                    }
-                }, false);
-            }).catch(function () {
-                state.pending = false;
-                state.sentinel = null;
-                state.status = 3; // denied/revoked/error
-            });
-            return 1;
+            ratHabitatInstallWakeLockRequest();
+            return window.__ratHabitatRequestWakeLock() ? 1 : 0;
         } catch (error) {
-            var failedState = window.__ratHabitatWakeLockState;
-            if (failedState) {
-                failedState.pending = false;
-                failedState.status = 3;
+            var state = window.__ratHabitatWakeLockState;
+            if (state) {
+                state.pending = false;
+                state.status = 3;
             }
             return 0;
         }
@@ -181,8 +254,7 @@ mergeInto(LibraryManager.library, {
     RatHabitatBrowserWakeLockGetStatus: function () {
         try {
             var state = window.__ratHabitatWakeLockState;
-            if (!state) return 4;
-            return state.status || 4;
+            return state ? (state.status || 4) : 4;
         } catch (error) {
             return 3;
         }
@@ -190,65 +262,33 @@ mergeInto(LibraryManager.library, {
 
     RatHabitatBrowserWakeLockRegisterLifecycle: function () {
         try {
-            var state = window.__ratHabitatWakeLockState;
-            if (!state) {
-                state = window.__ratHabitatWakeLockState = {
-                    enabled: true,
-                    sentinel: null,
-                    pending: false,
-                    status: 5,
-                    listenersInstalled: false
-                };
-            }
+            var state = ratHabitatInstallWakeLockRequest();
             if (state.listenersInstalled) return;
             state.listenersInstalled = true;
-            window.__ratHabitatRequestWakeLock = function () {
-                try {
-                    if (window.__ratHabitatWakeLockState &&
-                        window.__ratHabitatWakeLockState.enabled &&
-                        document.visibilityState === "visible") {
-                        // Invoke the bridge function without requiring a fake
-                        // input event. This is used only to reacquire a lock
-                        // that the browser revoked after visibility changed.
-                        var current = window.__ratHabitatWakeLockState;
-                        if (!current.sentinel && !current.pending && navigator.wakeLock && navigator.wakeLock.request) {
-                            current.pending = true;
-                            current.status = 5;
-                            navigator.wakeLock.request("screen").then(function (sentinel) {
-                                current.pending = false;
-                                if (!current.enabled || document.visibilityState !== "visible") {
-                                    try { sentinel.release(); } catch (releaseError) { }
-                                    current.status = current.enabled ? 5 : 4;
-                                    return;
-                                }
-                                current.sentinel = sentinel;
-                                current.status = 1;
-                                sentinel.addEventListener("release", function () {
-                                    current.sentinel = null;
-                                    current.pending = false;
-                                    current.status = current.enabled ? 5 : 4;
-                                }, false);
-                            }).catch(function () {
-                                current.pending = false;
-                                current.sentinel = null;
-                                current.status = 3;
-                            });
-                        }
-                    }
-                } catch (error) { }
-            };
+
             document.addEventListener("visibilitychange", function () {
+                var current = ratHabitatWakeLockState();
                 if (document.visibilityState === "hidden") {
-                    if (state.sentinel) {
-                        try { state.sentinel.release(); } catch (releaseError) { }
-                        state.sentinel = null;
+                    if (current.reacquireTimer !== null) {
+                        window.clearTimeout(current.reacquireTimer);
+                        current.reacquireTimer = null;
                     }
-                    state.pending = false;
-                    state.status = state.enabled ? 5 : 4;
-                } else if (state.enabled) {
-                    window.setTimeout(window.__ratHabitatRequestWakeLock, 150);
+                    current.reacquireOnVisible = !!current.sentinel || current.reacquireOnVisible;
+                    ratHabitatReleaseWakeLock(current);
+                    current.pending = false;
+                    current.status = current.enabled ? 5 : 4;
+                } else if (current.enabled && current.reacquireOnVisible && current.reacquireTimer === null) {
+                    // Wait briefly for the page to become fully visible. The
+                    // guard allows at most one pending reacquisition.
+                    current.reacquireTimer = window.setTimeout(function () {
+                        current.reacquireTimer = null;
+                        if (current.enabled && document.visibilityState === "visible") {
+                            window.__ratHabitatRequestWakeLock();
+                        }
+                    }, 150);
                 }
             }, false);
-        } catch (error) { }
+        } catch (error) {
+        }
     }
 });
