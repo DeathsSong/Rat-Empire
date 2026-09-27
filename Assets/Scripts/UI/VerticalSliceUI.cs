@@ -5085,7 +5085,7 @@ namespace RatHabitat
             return button;
         }
 
-        private sealed class DirectUiClickRelay : MonoBehaviour
+        private sealed class DirectUiClickRelay : MonoBehaviour, IPointerClickHandler
         {
             private Button button;
             private UnityEngine.Events.UnityAction action;
@@ -5103,6 +5103,17 @@ namespace RatHabitat
             private void HandleButtonClick()
             {
                 InvokeOnce();
+            }
+
+            // Button.onClick can be skipped when a parent ScrollRect owns the
+            // pointer sequence. Receive the completed pointer click directly
+            // on the relay as well so one mouse/touch tap still reaches the
+            // intended page control. InvokeOnce keeps this path and the
+            // normal Button path from running the action twice in one frame.
+            public void OnPointerClick(PointerEventData eventData)
+            {
+                if (eventData == null || eventData.button == PointerEventData.InputButton.Left)
+                    InvokeOnce();
             }
 
             public bool IsFallbackInteractable
