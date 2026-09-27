@@ -202,6 +202,7 @@ namespace RatHabitat
 
         public ColonySaveData Save { get; private set; }
         private string liveEventMessage;
+        private string liveEventCategory;
         private long liveEventExpiresAt;
         private string cachedEventLogSignature;
         private int cachedEventLogCount = -1;
@@ -221,14 +222,40 @@ namespace RatHabitat
             get
             {
                 if (string.IsNullOrEmpty(liveEventMessage)) return string.Empty;
+                if (!EventLogPolicy.IsCategoryEnabled(Save, liveEventCategory ??
+                    EventLogPolicy.CategoryForMessage(liveEventMessage)))
+                {
+                    liveEventMessage = null;
+                    liveEventCategory = null;
+                    liveEventExpiresAt = 0L;
+                    return string.Empty;
+                }
                 if (GameTime >= liveEventExpiresAt)
                 {
                     liveEventMessage = null;
+                    liveEventCategory = null;
                     liveEventExpiresAt = 0L;
                     return string.Empty;
                 }
                 return liveEventMessage;
             }
+        }
+        public string LatestEnabledEventMessage
+        {
+            get
+            {
+                if (Save == null || Save.eventLog == null) return string.Empty;
+                for (int index = 0; index < Save.eventLog.Count; index++)
+                {
+                    ColonyEventData entry = Save.eventLog[index];
+                    if (EventLogPolicy.IsAlertEnabled(Save, entry)) return entry.message ?? string.Empty;
+                }
+                return string.Empty;
+            }
+        }
+        public bool AllAlertCategoriesDisabled
+        {
+            get { return EventLogPolicy.AllCategoriesDisabled(Save); }
         }
         public int RecentEventCount
         {
@@ -292,7 +319,10 @@ namespace RatHabitat
         {
             get
             {
-                return "Maintenance passes: " + maintenancePassCount +
+                return "Clock: " + GrowthSystem.GameHoursPerRealSecond(SimulationSpeed).ToString("0.#") +
+                    " game h/real s (" + GrowthSystem.RealSecondsPerGameHour(SimulationSpeed).ToString("0.###") +
+                    " real s/game h) | movement/animation/actions: " + SimulationSpeed.ToString("0.#") + "x | " +
+                    "Maintenance passes: " + maintenancePassCount +
                     "  last " + lastMaintenanceDurationMs.ToString("0.00") + " ms" +
                     "  UI " + lastUiRefreshDurationMs.ToString("0.00") + " ms" +
                     "  tick: " + (ColonyMaintenanceIntervalGameMs / (60L * 1000L)) + " game minutes";
@@ -307,6 +337,11 @@ namespace RatHabitat
         public string KeepScreenAwakeStatusMessage
         {
             get { return BrowserWakeLockSystem.StatusMessage(Save); }
+        }
+
+        public bool IsAlertCategoryEnabled(string category)
+        {
+            return EventLogPolicy.IsCategoryEnabled(Save, category);
         }
         public HabitatCameraView CameraView { get { return cameraView; } }
         public int HabitatPageCount { get { return HabitatPages.Length; } }
@@ -494,19 +529,27 @@ namespace RatHabitat
         {
             if (Save == null || string.IsNullOrWhiteSpace(value)) return false;
             string compact = CompactEventMessage(value);
-            if (!EventLogPolicy.IsAllowed(compact)) return false;
+            string category = EventLogPolicy.CategoryForMessage(compact);
+            if (string.IsNullOrEmpty(category)) return false;
 
             Save.EnsureLists();
             Save.eventLog.Insert(0, new ColonyEventData
             {
                 gameTimeMs = GameTime,
                 message = compact,
+                category = category,
             });
             while (Save.eventLog.Count > MaximumEventLogEntries)
                 Save.eventLog.RemoveAt(Save.eventLog.Count - 1);
 
-            liveEventMessage = compact;
-            liveEventExpiresAt = GameTime + LiveEventDurationGameMs();
+            // History is always retained for an approved category. The
+            // preference only controls the transient top-screen alert.
+            if (EventLogPolicy.IsCategoryEnabled(Save, category))
+            {
+                liveEventMessage = compact;
+                liveEventCategory = category;
+                liveEventExpiresAt = GameTime + LiveEventDurationGameMs();
+            }
             return true;
         }
 
@@ -828,8 +871,16 @@ namespace RatHabitat
                 {
                     double simulatedMillisecondsPerRealSecond =
                         GrowthSystem.SimulationMillisecondsPerRealSecond(SimulationSpeed);
-                    yield return new WaitForSecondsRealtime(Mathf.Max(0.10f,
-                        (float)(remainingGameMs / simulatedMillisecondsPerRealSecond)));
+                    float waitSeconds = (float)(remainingGameMs / simulatedMillisecondsPerRealSecond);
+                    // Do not impose a 100 ms real-time floor: at the
+                    // documented clock rate a short in-game cooldown can be
+                    // less than one frame, and the next frame is the safest
+                    // bounded catch-up point. The persisted game timestamp
+                    // remains authoritative, so this never double-advances.
+                    if (waitSeconds > 0.001f)
+                        yield return new WaitForSecondsRealtime(waitSeconds);
+                    else
+                        yield return null;
                     continue;
                 }
 
@@ -1534,6 +1585,7 @@ namespace RatHabitat
             bool enclosureChanged = false;
             bool nursingChanged = false;
             bool nursingPassDue = false;
+            bool alertAnnouncementStateChanged = false;
             int completedSessionCount = 0;
             int births = 0;
             List<DedicatedBreedingSessionData> completedSessions = null;
@@ -1548,6 +1600,7 @@ namespace RatHabitat
                 BeginPerformanceSample("Rat Empire/Simulation Maintenance");
                 BeginPerformanceSample("Rat Empire/Simulation/Growth and Biology");
                 stageChanged = GrowthSystem.RefreshRatStages(Save);
+                alertAnnouncementStateChanged |= AnnounceNewNaturalDeaths();
                 EndPerformanceSample();
                 BeginPerformanceSample("Rat Empire/Simulation/Reproductive State");
                 reproductiveStateChanged = BreedingSystem.RefreshReproductiveStates(Save, GameTime);
@@ -1593,6 +1646,7 @@ namespace RatHabitat
                     stageChanged = true;
                     nextNursingTickGameTime = GameTime;
                 }
+                alertAnnouncementStateChanged |= AnnounceCompletedWeanings();
                 EndPerformanceSample();
 
                 BeginPerformanceSample("Rat Empire/Simulation/Activity and Enclosures");
@@ -1673,7 +1727,7 @@ namespace RatHabitat
 
             bool stateNeedsSave = activityChanged || nursingChanged || stageChanged ||
                 reproductiveStateChanged || enclosureChanged || storeChanged ||
-                births > 0 || completedSessionCount > 0;
+                births > 0 || completedSessionCount > 0 || alertAnnouncementStateChanged;
             if (stateNeedsSave)
             {
                 SaveSystem.Save(Save);
@@ -2918,6 +2972,44 @@ namespace RatHabitat
             if (ui != null) ui.Refresh(true);
         }
 
+        private bool AnnounceNewNaturalDeaths()
+        {
+            if (Save == null || Save.retiredRats == null) return false;
+            bool changed = false;
+            foreach (RatData rat in Save.retiredRats)
+            {
+                if (rat == null || rat.removalDisposition != RatRemovalDisposition.NaturalDeath ||
+                    rat.naturalDeathAnnouncementLogged) continue;
+
+                // Mark the retired record before exposing the event. The
+                // guard is serialized in the same save pass as the history
+                // entry, so a refresh cannot replay a death announcement.
+                rat.naturalDeathAnnouncementLogged = true;
+                StatusMessage = ColonyFactory.DisplayName(rat) + " died.";
+                changed = true;
+            }
+            return changed;
+        }
+
+        private bool AnnounceCompletedWeanings()
+        {
+            if (Save == null || Save.litters == null) return false;
+            bool changed = false;
+            foreach (LitterData litter in Save.litters)
+            {
+                if (litter == null || litter.weaningAnnouncementLogged ||
+                    litter.weaningTimestamp <= 0L || GameTime < litter.weaningTimestamp) continue;
+
+                litter.weaningAnnouncementLogged = true;
+                RatData mother = BreedingSystem.FindHistoricalRat(Save, litter.motherId);
+                StatusMessage = mother == null
+                    ? "A litter is fully weaned."
+                    : ColonyFactory.DisplayName(mother) + "'s litter is fully weaned.";
+                changed = true;
+            }
+            return changed;
+        }
+
         private bool AnnounceBirth(LitterData litter)
         {
             if (Save == null || litter == null || litter.birthAnnouncementLogged) return false;
@@ -3454,6 +3546,37 @@ namespace RatHabitat
         {
             BrowserWakeLockSystem.RequestFromUserGesture(Save);
             if (ui != null) ui.RefreshWakeLockControls();
+        }
+
+        public void ToggleAlertCategory(string category)
+        {
+            if (Save == null || string.IsNullOrEmpty(category)) return;
+            bool enabled = !EventLogPolicy.IsCategoryEnabled(Save, category);
+            EventLogPolicy.SetCategoryEnabled(Save, category, enabled);
+            if (!enabled && string.Equals(liveEventCategory, category, StringComparison.Ordinal))
+            {
+                liveEventMessage = null;
+                liveEventCategory = null;
+                liveEventExpiresAt = 0L;
+            }
+            SaveSystem.Save(Save);
+            if (ui != null)
+            {
+                ui.RefreshAlertPreferenceControls();
+                ui.RefreshHeader();
+            }
+        }
+
+        public void ResetAlertPreferences()
+        {
+            if (Save == null) return;
+            EventLogPolicy.ResetPreferences(Save);
+            SaveSystem.Save(Save);
+            if (ui != null)
+            {
+                ui.RefreshAlertPreferenceControls();
+                ui.RefreshHeader();
+            }
         }
 
         public void ServiceSelectedObject()

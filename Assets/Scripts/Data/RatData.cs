@@ -261,6 +261,10 @@ namespace RatHabitat
         // but are no longer active in the habitat simulation.
         public RatRemovalDisposition removalDisposition = RatRemovalDisposition.None;
         public long removedAt;
+        // Natural death is detected by the scheduled growth pass. Keep the
+        // announcement guard on the retired rat so it cannot replay after a
+        // save/load or browser refresh.
+        public bool naturalDeathAnnouncementLogged;
         // Persisted per-pup rotation marker. Zero means the pup has not yet
         // received a nursing turn in this colony cycle.
         public long lastNursedAt;
@@ -327,6 +331,10 @@ namespace RatHabitat
         // Keeping it on the litter prevents a reload or UI refresh from
         // replaying the same birth message.
         public bool birthAnnouncementLogged;
+        // Persisted guard for the single colony-wide fully-weaned alert.
+        // The litter remains in history after weaning, so this prevents a
+        // reload or a later UI refresh from replaying the same event.
+        public bool weaningAnnouncementLogged;
     }
 
     [Serializable]
@@ -358,6 +366,16 @@ namespace RatHabitat
     {
         public long gameTimeMs;
         public string message;
+        // Stable data-driven category used to filter the live top alert.
+        // Older saves leave this empty and are migrated from the message.
+        public string category;
+    }
+
+    [Serializable]
+    public class AlertPreferenceData
+    {
+        public string category;
+        public bool enabled = true;
     }
 
     [Serializable]
@@ -399,6 +417,9 @@ namespace RatHabitat
         public long storeNextRestockGameTime;
         public int storeRestockCycle;
         public List<string> usedLitterNames = new List<string>();
+        // Top-alert preferences are separate from event history. Disabling a
+        // category hides its live banner but never removes its history row.
+        public List<AlertPreferenceData> alertPreferences = new List<AlertPreferenceData>();
         // Absolute real-time deadline for the next automatic Pairing Habitat
         // evaluation. Persisting the deadline keeps save/load from resetting
         // the 30-second cadence.
@@ -429,6 +450,7 @@ namespace RatHabitat
             habitatObjects ??= new List<HabitatObjectData>();
             storeRatListings ??= new List<StoreRatListingData>();
             usedLitterNames ??= new List<string>();
+            alertPreferences ??= new List<AlertPreferenceData>();
             eventLog ??= new List<ColonyEventData>();
         }
     }

@@ -11,11 +11,10 @@ namespace RatHabitat
     /// </summary>
     public static class GrowthSystem
     {
-        // Presentation behavior has its own small real-time delta because
-        // movement and animation should be 1x/2x/3x faster, while biological
-        // deadlines continue to use the authoritative simulated game clock
-        // below (1 minute/hour/day per real second). Keeping this value here
-        // prevents individual behaviors from inventing their own speed path.
+        // Presentation behavior consumes this same normalized multiplier as
+        // the authoritative clock. Movement, animation, and action timers
+        // therefore all advance at the same 1x/2x/3x rate.
+        private const double BaseGameMillisecondsPerRealSecond = 60d * 60d * 1000d;
         private static float runtimeSimulationSpeed = 1f;
         private static bool simulationPaused;
         private static float lastMovementRealDeltaSeconds;
@@ -108,27 +107,35 @@ namespace RatHabitat
 
         /// <summary>
         /// Converts a visible simulation mode into simulated milliseconds per
-        /// real millisecond. The three modes intentionally use stepped
-        /// biological rates rather than a linear multiplier:
-        /// 1x = one game minute/real second, 2x = one game hour/real second,
-        /// and 3x = one game day/real second.
+        /// real millisecond. This is the single clock contract used by every
+        /// time-based system:
+        ///
+        ///   1x = 1 in-game hour per real-world second
+        ///   2x = 2 in-game hours per real-world second
+        ///   3x = 3 in-game hours per real-world second
+        ///
+        /// In other words, the exact conversion is 3,600,000 simulated
+        /// milliseconds per real second at 1x, multiplied by the selected
+        /// speed. Do not add another speed multiplier at call sites.
         /// </summary>
         public static double SimulationMillisecondsPerRealMillisecond(float speed)
         {
-            switch ((int)NormalizeSpeed(speed))
-            {
-                case 2:
-                    return 60d * 60d;
-                case 3:
-                    return 24d * 60d * 60d;
-                default:
-                    return 60d;
-            }
+            return (BaseGameMillisecondsPerRealSecond / 1000d) * NormalizeSpeed(speed);
         }
 
         public static double SimulationMillisecondsPerRealSecond(float speed)
         {
             return SimulationMillisecondsPerRealMillisecond(speed) * 1000d;
+        }
+
+        public static double GameHoursPerRealSecond(float speed)
+        {
+            return NormalizeSpeed(speed);
+        }
+
+        public static double RealSecondsPerGameHour(float speed)
+        {
+            return 1d / Math.Max(0.0001d, GameHoursPerRealSecond(speed));
         }
 
         public static bool IsSupportedSpeed(float speed)

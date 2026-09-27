@@ -49,8 +49,12 @@ namespace RatHabitat
         private RectTransform welcomeCard;
         private RectTransform settingsOverlay;
         private RectTransform settingsCard;
+        private RectTransform settingsViewport;
+        private ScrollRect settingsScroll;
         private Button keepScreenAwakeButton;
         private Text keepScreenAwakeStatusText;
+        private readonly Dictionary<string, Button> alertPreferenceButtons = new Dictionary<string, Button>();
+        private Text alertPreferencesStatusText;
         private RectTransform developerToolsOverlay;
         private RectTransform developerToolsViewport;
         private RectTransform developerToolsCard;
@@ -649,13 +653,9 @@ namespace RatHabitat
                 // has expired. Do not repeat the habitat name and page count.
                 string liveMessage = game.LiveEventMessage;
                 if (string.IsNullOrEmpty(liveMessage))
-                {
-                    List<ColonyEventData> recentEvents = game.RecentEvents;
-                    if (recentEvents != null && recentEvents.Count > 0 && recentEvents[0] != null)
-                    {
-                        liveMessage = recentEvents[0].message;
-                    }
-                }
+                    liveMessage = game.LatestEnabledEventMessage;
+                if (string.IsNullOrEmpty(liveMessage) && game.AllAlertCategoriesDisabled)
+                    liveMessage = "Alerts muted";
                 liveEventText.text = liveMessage;
             }
             if (eventLogToggleButton != null)
@@ -951,7 +951,9 @@ namespace RatHabitat
             }
             if (settingsCard != null)
             {
-                settingsCard.sizeDelta = new Vector2(modalWidth, 0f);
+                settingsCard.sizeDelta = settingsViewport == null
+                    ? new Vector2(modalWidth, 0f)
+                    : Vector2.zero;
             }
             if (developerToolsCard != null)
             {
@@ -971,6 +973,11 @@ namespace RatHabitat
             {
                 float viewportHeight = Mathf.Min(720f, Mathf.Max(360f, safeRoot.rect.height - 40f));
                 developerToolsViewport.sizeDelta = new Vector2(modalWidth, viewportHeight);
+            }
+            if (settingsViewport != null)
+            {
+                float viewportHeight = Mathf.Min(760f, Mathf.Max(360f, safeRoot.rect.height - 40f));
+                settingsViewport.sizeDelta = new Vector2(modalWidth, viewportHeight);
             }
             if (contentLayout != null)
             {
@@ -1007,17 +1014,88 @@ namespace RatHabitat
             AddText(settingsCard, "Local save", 17, Color.white, TextAnchor.UpperLeft);
             AddText(settingsCard, "Save the colony, pregnancy state, litters, growth, genes, traits, and timestamps locally on this device.", 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
             AddText(settingsCard, "Pairing Habitat: " + (GameConfig.PairingPregnancyChance * 100f).ToString("0") +
-                "% pregnancy chance per " + (GameConfig.PairingCheckIntervalMs / 1000L).ToString() + " real-time seconds.",
+                "% pregnancy chance per " + (GameConfig.PairingCheckIntervalMs / 1000L).ToString() + " in-game seconds.",
                 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
             keepScreenAwakeButton = AddButtonTo(settingsCard, "Keep Screen Awake", true,
                 game.ToggleKeepScreenAwake, new Color(0.16f, 0.38f, 0.33f), 46f);
             keepScreenAwakeStatusText = AddText(settingsCard, string.Empty, 12,
                 new Color(0.72f, 0.84f, 0.78f), TextAnchor.UpperLeft);
+            AddText(settingsCard, "Top Screen Alerts", 17, Color.white, TextAnchor.UpperLeft);
+            AddText(settingsCard, "Choose which important colony events appear near the header. The full Events history is kept separately.",
+                13, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
+            alertPreferenceButtons.Clear();
+            for (int index = 0; index < EventLogPolicy.CategoryIds.Length; index++)
+                AddAlertPreferenceButton(settingsCard, EventLogPolicy.CategoryIds[index]);
+            alertPreferencesStatusText = AddText(settingsCard, string.Empty, 12,
+                new Color(0.72f, 0.84f, 0.78f), TextAnchor.UpperLeft);
+            AddButtonTo(settingsCard, "Reset Alert Preferences", true,
+                game.ResetAlertPreferences, new Color(0.12f, 0.27f, 0.29f), 40f);
             AddButtonTo(settingsCard, "Save now", true, game.SaveNow, new Color(0.16f, 0.38f, 0.33f), 46f);
             AddButtonTo(settingsCard, "Developer Tools", true, OpenDeveloperTools, new Color(0.12f, 0.27f, 0.29f), 46f);
             AddButtonTo(settingsCard, "Close Settings", true, CloseSettings, new Color(0.14f, 0.22f, 0.25f), 46f);
+
+            // Settings owns its own scroll surface so the data-driven alert
+            // list remains usable on phone layouts without clipping the
+            // lower controls. The modal blocker still covers the full screen.
+            settingsViewport = CreateRect("Settings Viewport", settingsOverlay);
+            settingsViewport.anchorMin = new Vector2(0.5f, 0.5f);
+            settingsViewport.anchorMax = new Vector2(0.5f, 0.5f);
+            settingsViewport.pivot = new Vector2(0.5f, 0.5f);
+            var viewportImage = settingsViewport.gameObject.AddComponent<Image>();
+            viewportImage.color = new Color(0f, 0f, 0f, 0f);
+            viewportImage.raycastTarget = true;
+            settingsViewport.gameObject.AddComponent<RectMask2D>();
+            settingsScroll = settingsViewport.gameObject.AddComponent<ScrollRect>();
+            settingsScroll.horizontal = false;
+            settingsScroll.vertical = true;
+            settingsScroll.inertia = true;
+            settingsScroll.movementType = ScrollRect.MovementType.Clamped;
+            settingsScroll.scrollSensitivity = 30f;
+            settingsScroll.viewport = settingsViewport;
+            settingsCard.SetParent(settingsViewport, false);
+            settingsCard.anchorMin = new Vector2(0f, 1f);
+            settingsCard.anchorMax = new Vector2(1f, 1f);
+            settingsCard.pivot = new Vector2(0.5f, 1f);
+            settingsCard.anchoredPosition = Vector2.zero;
+            settingsCard.sizeDelta = new Vector2(0f, 0f);
+            settingsScroll.content = settingsCard;
             RefreshWakeLockControls();
+            RefreshAlertPreferenceControls();
             SetOverlayVisibility();
+        }
+
+        private void AddAlertPreferenceButton(Transform parent, string category)
+        {
+            if (string.IsNullOrEmpty(category)) return;
+            Button button = AddButtonTo(parent, EventLogPolicy.CategoryLabel(category), true,
+                () => game.ToggleAlertCategory(category), new Color(0.16f, 0.38f, 0.33f), 38f);
+            button.gameObject.name = "Alert Preference " + category;
+            alertPreferenceButtons[category] = button;
+        }
+
+        public void RefreshAlertPreferenceControls()
+        {
+            if (game == null) return;
+            foreach (string category in EventLogPolicy.CategoryIds)
+            {
+                Button button;
+                if (!alertPreferenceButtons.TryGetValue(category, out button) || button == null) continue;
+                bool enabled = game.IsAlertCategoryEnabled(category);
+                SetButtonLabel(button, (enabled ? "On  " : "Off  ") + EventLogPolicy.CategoryLabel(category));
+                Image image = button.GetComponent<Image>();
+                if (image != null)
+                {
+                    image.color = enabled
+                        ? new Color(0.16f, 0.38f, 0.33f)
+                        : new Color(0.18f, 0.25f, 0.27f);
+                }
+            }
+            if (alertPreferencesStatusText != null)
+            {
+                alertPreferencesStatusText.text = game.AllAlertCategoriesDisabled
+                    ? "Alerts muted. Events history is still saved."
+                    : "Top alerts update immediately and are saved locally.";
+            }
         }
 
         public void RefreshWakeLockControls()

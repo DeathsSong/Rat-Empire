@@ -145,16 +145,18 @@ namespace RatHabitat
                     candidate.rat.stage == RatStage.Pinkie) continue;
 
                 return string.Format(
-                "Rat {0}: simulation {1:0.#}x | actual {2:0.00} u/s | target {3:0.00} u/s | time=scaled movement delta",
+                "Rat {0}: simulation {1:0.#}x | clock {4:0.###} real s/game h | actual {2:0.00} u/s | target {3:0.00} u/s | movement/animation/actions=simulation delta",
                 ColonyFactory.DisplayName(candidate.rat),
                     GrowthSystem.RuntimeSimulationSpeed,
                     candidate.ActualWorldMovementSpeed,
-                    candidate.TargetWorldMovementSpeed);
+                    candidate.TargetWorldMovementSpeed,
+                    GrowthSystem.RealSecondsPerGameHour(GrowthSystem.RuntimeSimulationSpeed));
             }
 
             return string.Format(
-                "No moving rat sampled | simulation {0:0.#}x | time=scaled movement delta",
-                GrowthSystem.RuntimeSimulationSpeed);
+                "No moving rat sampled | simulation {0:0.#}x | clock {1:0.###} real s/game h | movement/animation/actions=simulation delta",
+                GrowthSystem.RuntimeSimulationSpeed,
+                GrowthSystem.RealSecondsPerGameHour(GrowthSystem.RuntimeSimulationSpeed));
         }
 
         /// <summary>

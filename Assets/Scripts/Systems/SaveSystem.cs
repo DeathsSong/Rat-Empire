@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using UnityEngine;
@@ -441,22 +442,156 @@ namespace RatHabitat
     /// </summary>
     public static class EventLogPolicy
     {
-        public static bool IsAllowed(string message)
+        public const string StoreRestocked = "store_restocked";
+        public const string Pregnancy = "pregnancy";
+        public const string Birth = "birth";
+        public const string NaturalDeath = "natural_death";
+        public const string Euthanasia = "euthanasia";
+        public const string Sale = "sale";
+        public const string FullyWeaned = "fully_weaned";
+        public const string OtherImportant = "other_important";
+
+        // Keep this list as the single source of truth for the Settings UI,
+        // preference migration, and message categorization. New categories
+        // can be added here without changing the alert controls.
+        public static readonly string[] CategoryIds =
         {
-            if (string.IsNullOrWhiteSpace(message)) return false;
+            StoreRestocked,
+            Pregnancy,
+            Birth,
+            NaturalDeath,
+            Euthanasia,
+            Sale,
+            FullyWeaned,
+            OtherImportant,
+        };
+
+        public static string CategoryLabel(string category)
+        {
+            switch (category)
+            {
+                case StoreRestocked: return "Store restocked";
+                case Pregnancy: return "Rat became pregnant";
+                case Birth: return "Rat gave birth";
+                case NaturalDeath: return "Rat died naturally";
+                case Euthanasia: return "Rat was euthanized";
+                case Sale: return "Rat was sold";
+                case FullyWeaned: return "Rat became fully weaned";
+                case OtherImportant: return "Other important colony events";
+                default: return "Important colony event";
+            }
+        }
+
+        public static void EnsureAlertPreferences(ColonySaveData save)
+        {
+            if (save == null) return;
+            if (save.alertPreferences == null)
+                save.alertPreferences = new List<AlertPreferenceData>();
+
+            for (int index = 0; index < CategoryIds.Length; index++)
+            {
+                string category = CategoryIds[index];
+                bool found = false;
+                for (int preferenceIndex = 0; preferenceIndex < save.alertPreferences.Count; preferenceIndex++)
+                {
+                    AlertPreferenceData preference = save.alertPreferences[preferenceIndex];
+                    if (preference == null || !string.Equals(preference.category, category, StringComparison.Ordinal)) continue;
+                    found = true;
+                    break;
+                }
+
+                // New and old saves receive the important-alert defaults. A
+                // later explicit toggle is preserved because it already has
+                // a preference entry.
+                if (!found)
+                {
+                    save.alertPreferences.Add(new AlertPreferenceData
+                    {
+                        category = category,
+                        enabled = true,
+                    });
+                }
+            }
+        }
+
+        public static bool IsCategoryEnabled(ColonySaveData save, string category)
+        {
+            if (save == null || string.IsNullOrEmpty(category)) return false;
+            EnsureAlertPreferences(save);
+            for (int index = 0; index < save.alertPreferences.Count; index++)
+            {
+                AlertPreferenceData preference = save.alertPreferences[index];
+                if (preference != null && string.Equals(preference.category, category, StringComparison.Ordinal))
+                    return preference.enabled;
+            }
+            return true;
+        }
+
+        public static void SetCategoryEnabled(ColonySaveData save, string category, bool enabled)
+        {
+            if (save == null || string.IsNullOrEmpty(category)) return;
+            EnsureAlertPreferences(save);
+            for (int index = 0; index < save.alertPreferences.Count; index++)
+            {
+                AlertPreferenceData preference = save.alertPreferences[index];
+                if (preference != null && string.Equals(preference.category, category, StringComparison.Ordinal))
+                {
+                    preference.enabled = enabled;
+                    return;
+                }
+            }
+            save.alertPreferences.Add(new AlertPreferenceData { category = category, enabled = enabled });
+        }
+
+        public static void ResetPreferences(ColonySaveData save)
+        {
+            if (save == null) return;
+            EnsureAlertPreferences(save);
+            for (int index = 0; index < CategoryIds.Length; index++)
+                SetCategoryEnabled(save, CategoryIds[index], true);
+        }
+
+        public static bool AllCategoriesDisabled(ColonySaveData save)
+        {
+            if (save == null) return false;
+            EnsureAlertPreferences(save);
+            for (int index = 0; index < CategoryIds.Length; index++)
+                if (IsCategoryEnabled(save, CategoryIds[index])) return false;
+            return true;
+        }
+
+        public static string CategoryForMessage(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message)) return null;
             string lower = message.Trim().ToLowerInvariant();
 
-            // These are the only global event categories. Match stable event
-            // wording rather than a broad keyword so UI guidance, breeding
-            // activity, movement, and diagnostics cannot leak into the
-            // top-right banner or persistent history.
-            return lower.Contains("restocked") ||
-                lower.Contains(" died") || lower.StartsWith("died") ||
-                lower.Contains(" was sold") ||
-                lower.Contains(" became pregnant") ||
-                lower.Contains(" is pregnant") ||
-                lower.StartsWith("birth:") || lower.Contains(" gave birth") ||
-                lower.Contains(" has given birth to");
+            if (lower.Contains("restocked")) return StoreRestocked;
+            if (lower.Contains("became pregnant") || lower.Contains(" is pregnant")) return Pregnancy;
+            if (lower.StartsWith("birth:") || lower.Contains(" gave birth") || lower.Contains(" has given birth to")) return Birth;
+            if (lower.Contains("was euthanized")) return Euthanasia;
+            if (lower.Contains(" was sold") || lower.StartsWith("sold ")) return Sale;
+            if (lower.Contains("fully weaned")) return FullyWeaned;
+            if (lower.Contains(" died") || lower.StartsWith("died")) return NaturalDeath;
+
+            // Keep this category reserved for future explicit colony-wide
+            // announcements. Purchases, upgrades, movement, breeding
+            // attempts, activity changes, cooldowns, and diagnostics were
+            // intentionally not global alerts in the existing build.
+            return null;
+        }
+
+        public static bool IsAllowed(string message)
+        {
+            return CategoryForMessage(message) != null;
+        }
+
+        public static bool IsAlertEnabled(ColonySaveData save, ColonyEventData entry)
+        {
+            if (entry == null) return false;
+            string category = string.IsNullOrEmpty(entry.category)
+                ? CategoryForMessage(entry.message)
+                : entry.category;
+            return !string.IsNullOrEmpty(category) && IsCategoryEnabled(save, category);
         }
 
         /// <summary>
@@ -468,6 +603,7 @@ namespace RatHabitat
         {
             if (save == null) return false;
             save.EnsureLists();
+            EnsureAlertPreferences(save);
             bool changed = false;
             for (int index = save.eventLog.Count - 1; index >= 0; index--)
             {
@@ -476,6 +612,15 @@ namespace RatHabitat
                 {
                     save.eventLog.RemoveAt(index);
                     changed = true;
+                }
+                else
+                {
+                    string category = CategoryForMessage(entry.message);
+                    if (!string.Equals(entry.category, category, StringComparison.Ordinal))
+                    {
+                        entry.category = category;
+                        changed = true;
+                    }
                 }
             }
 
