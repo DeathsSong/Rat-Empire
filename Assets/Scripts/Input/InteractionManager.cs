@@ -138,6 +138,15 @@ namespace RatHabitat
         {
             if (!configured || !managerReady || !isActiveAndEnabled) return;
 
+            // Generated page controls normally use Unity's EventSystem. Keep
+            // the direct relay as a deterministic fallback as well, including
+            // while a page is modal from the world's point of view. Previously
+            // the modal early return happened first, so My Rats' ScrollRect
+            // could consume a touch without either the Button or the fallback
+            // invoking the tapped control.
+            if (pageUi == null) pageUi = FindObjectOfType<VerticalSliceUI>();
+            if (pageUi != null) pageUi.ProcessFallbackUiInput();
+
             // Modal panels are owned by the UI EventSystem.  Do not poll
             // world input while one is open: polling here would allow a
             // touch pinch, mouse hover, or an already-started drag to leak

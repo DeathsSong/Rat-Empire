@@ -227,7 +227,7 @@ namespace RatHabitat
         /// header, while using the final screen-position hit for generated
         /// page controls so touch and mouse activation remain deterministic.
         /// </summary>
-        private void ProcessFallbackUiInput()
+        public void ProcessFallbackUiInput()
         {
             if (Input.touchCount > 0)
             {
@@ -271,6 +271,21 @@ namespace RatHabitat
                 if (!moved && relay != null && relay.ContainsScreenPoint(Input.mousePosition))
                     relay.InvokeFallback();
             }
+        }
+
+        /// <summary>
+        /// Clears the manual UI pointer capture used by generated controls.
+        /// Navigation can replace the page hierarchy while a touch or mouse
+        /// sequence is still finishing; retaining a relay from the old page
+        /// would make the next tap target a destroyed or unrelated control.
+        /// </summary>
+        public void ClearUiPointerState()
+        {
+            fallbackMouseRelay = null;
+            fallbackTouchRelay = null;
+            fallbackMouseDownPosition = Vector2.zero;
+            fallbackTouchDownPosition = Vector2.zero;
+            fallbackTouchFingerId = -1;
         }
 
         private DirectUiClickRelay FindFallbackRelay(Vector2 screenPoint)
@@ -864,7 +879,12 @@ namespace RatHabitat
             var blockerImage = myRatsInputBlocker.gameObject.AddComponent<Image>();
             blockerImage.color = new Color(0f, 0f, 0f, 0.001f);
             blockerImage.raycastTarget = true;
-            myRatsInputBlocker.SetSiblingIndex(scrollObject.transform.GetSiblingIndex());
+            // This is a world-input shield, not a page overlay. Keep it at
+            // the bottom of the safe-root sibling stack so every generated
+            // page control (including My Rats buttons and ScrollRects) stays
+            // above it in the same GraphicRaycaster. The fixed header has its
+            // own higher sorting Canvas as an additional guard.
+            myRatsInputBlocker.SetSiblingIndex(0);
 
             // Family Tree is a page-level modal interaction surface. Keep a
             // separate blocker so empty tree/card space cannot send the same
@@ -877,7 +897,7 @@ namespace RatHabitat
             var familyTreeBlockerImage = familyTreeInputBlocker.gameObject.AddComponent<Image>();
             familyTreeBlockerImage.color = new Color(0f, 0f, 0f, 0.001f);
             familyTreeBlockerImage.raycastTarget = true;
-            familyTreeInputBlocker.SetSiblingIndex(scrollObject.transform.GetSiblingIndex());
+            familyTreeInputBlocker.SetSiblingIndex(0);
 
             var viewport = CreateRect("Page Viewport", scrollRect);
             viewport.anchorMin = Vector2.zero;
@@ -1673,6 +1693,9 @@ namespace RatHabitat
 
         private void SetOverlayVisibility()
         {
+            ClearUiPointerState();
+            if (EventSystem.current != null)
+                EventSystem.current.SetSelectedGameObject(null);
             // The welcome dialog is the one modal that must be acknowledged
             // before any navigation or speed control is usable. Normally the
             // header deliberately renders above panels, but temporarily place
