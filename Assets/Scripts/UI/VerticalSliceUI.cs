@@ -229,6 +229,7 @@ namespace RatHabitat
         /// </summary>
         public void ProcessFallbackUiInput()
         {
+            if (!ready) return;
             if (Input.touchCount > 0)
             {
                 for (int index = 0; index < Input.touchCount; index++)
@@ -1694,8 +1695,6 @@ namespace RatHabitat
         private void SetOverlayVisibility()
         {
             ClearUiPointerState();
-            if (EventSystem.current != null)
-                EventSystem.current.SetSelectedGameObject(null);
             // The welcome dialog is the one modal that must be acknowledged
             // before any navigation or speed control is usable. Normally the
             // header deliberately renders above panels, but temporarily place
