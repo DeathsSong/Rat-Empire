@@ -207,6 +207,22 @@ namespace RatHabitat
                             material.SetColor("_AccentColor", ParseColor(rat.phenotype.accentHex, coat));
                         if (material.HasProperty("_MarkingFamily"))
                             material.SetFloat("_MarkingFamily", MarkingFamilyStyle(rat.markingFamily));
+                        if (material.HasProperty("_FaceMarkingStrength") ||
+                            material.HasProperty("_LegMarkingStrength") ||
+                            material.HasProperty("_BellyMarkingStrength"))
+                        {
+                            float faceStrength;
+                            float legStrength;
+                            float bellyStrength;
+                            ResolveFeatureMarkingStrengths(rat.markingFamily,
+                                out faceStrength, out legStrength, out bellyStrength);
+                            if (material.HasProperty("_FaceMarkingStrength"))
+                                material.SetFloat("_FaceMarkingStrength", faceStrength);
+                            if (material.HasProperty("_LegMarkingStrength"))
+                                material.SetFloat("_LegMarkingStrength", legStrength);
+                            if (material.HasProperty("_BellyMarkingStrength"))
+                                material.SetFloat("_BellyMarkingStrength", bellyStrength);
+                        }
                         if (material.HasProperty("_PinkEyeMode"))
                         {
                             string variant = rat.coatColorVariant ?? string.Empty;
@@ -279,6 +295,65 @@ namespace RatHabitat
                 case "Self":
                 case "Solid":
                 default: return 0f;
+            }
+        }
+
+        /// <summary>
+        /// Adds a restrained, object-space feature contribution to the same
+        /// skinned coat mesh. This is intentionally separate from the saved
+        /// marking label: it makes face, leg, and belly regions visible even
+        /// when the imported UV body mask omits those islands, while the
+        /// deterministic UV pattern continues to supply the organic body
+        /// variation.
+        /// </summary>
+        private static void ResolveFeatureMarkingStrengths(
+            string family, out float face, out float legs, out float belly)
+        {
+            face = 0f;
+            legs = 0f;
+            belly = 0f;
+            string normalized = GeneticsSystem.NormalizeMarkingFamily(family, null);
+            switch (normalized)
+            {
+                case "Hooded":
+                    legs = 0.52f; belly = 0.62f; break;
+                case "Broken hooded":
+                    face = 0.25f; legs = 0.55f; belly = 0.58f; break;
+                case "Berkshire":
+                    legs = 0.90f; belly = 1f; break;
+                case "Bareback":
+                    face = 0.18f; legs = 0.35f; belly = 0.32f; break;
+                case "Capped":
+                    face = 0.95f; legs = 0.18f; break;
+                case "Mask":
+                    face = 0.92f; legs = 0.16f; break;
+                case "Patch":
+                    face = 0.74f; legs = 0.34f; belly = 0.22f; break;
+                case "Black-eye white":
+                    face = 0.52f; legs = 0.76f; belly = 0.86f; break;
+                case "Variegated":
+                    face = 0.58f; legs = 0.64f; belly = 0.54f; break;
+                case "Variberk":
+                    face = 0.18f; legs = 0.86f; belly = 0.94f; break;
+                case "Irish":
+                    face = 0.20f; legs = 0.95f; belly = 0.72f; break;
+                case "Blaze":
+                case "Lightning blaze Siamese":
+                case "Badger blaze Siamese":
+                    face = 1f; legs = 0.20f; belly = 0.15f; break;
+                case "Dalmatian-style":
+                case "Dominant white spotted":
+                case "Merle":
+                case "Tabby/Marble":
+                    face = 0.55f; legs = 0.58f; belly = 0.46f; break;
+                case "White side":
+                    face = 0.18f; legs = 0.62f; belly = 0.84f; break;
+                case "Mismarked hooded":
+                    face = 0.42f; legs = 0.54f; belly = 0.58f; break;
+                case "Self":
+                case "Solid":
+                default:
+                    break;
             }
         }
 
@@ -1002,9 +1077,19 @@ namespace RatHabitat
         /// </summary>
         public void KeepPairingVisualGrounded(GameObject visual, RatData rat)
         {
+            KeepPairingVisualGrounded(visual, rat, null);
+        }
+
+        public void KeepPairingVisualGrounded(GameObject visual, RatData rat, RatVisualController controller)
+        {
             if (visual == null || rat == null || rat.stage == RatStage.Pinkie ||
                 rat.enclosure != RatEnclosure.Pairing) return;
-            if (!TryGetWorldBounds(visual, out Bounds visualBounds)) return;
+            Bounds visualBounds;
+            if (controller != null)
+            {
+                if (!controller.TryGetWorldBounds(out visualBounds)) return;
+            }
+            else if (!TryGetWorldBounds(visual, out visualBounds)) return;
 
             float desiredMinY = GameConfig.PairingHabitatFloorTop +
                 GameConfig.PairingAdultGroundClearance;

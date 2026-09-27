@@ -17,6 +17,13 @@ namespace RatHabitat
         private Coroutine transitionRoutine;
         private RatStage currentStage;
         private bool hasVisual;
+        // Renderer hierarchy queries are expensive on mobile WebGL. Cache the
+        // bounds source for the current stage visual and invalidate it only
+        // when the visual is replaced or its scale changes materially.
+        private Renderer[] cachedRenderers;
+        private Renderer selectionBoundsRenderer;
+        private int selectionBoundsVersion;
+        private float lastColliderVisualScale = -1f;
         // The factory-normalized scale is kept separate from the age-driven
         // scale so repeated simulation refreshes never compound or skew it.
         private Vector3 currentBaseScale = Vector3.one;
@@ -25,6 +32,11 @@ namespace RatHabitat
         public RatStage CurrentStage
         {
             get { return currentStage; }
+        }
+
+        public int SelectionBoundsVersion
+        {
+            get { return selectionBoundsVersion; }
         }
 
         /// <summary>
@@ -44,41 +56,11 @@ namespace RatHabitat
             localBounds = new Bounds(transform.position, Vector3.zero);
             if (currentVisual == null || !currentVisual.activeInHierarchy) return false;
 
-            Renderer selectedRenderer = null;
-            ImportedRatVisualMarker importedMarker = currentVisual.GetComponent<ImportedRatVisualMarker>();
-            if (importedMarker != null)
+            Renderer selectedRenderer = selectionBoundsRenderer;
+            if (selectedRenderer == null || !selectedRenderer.enabled || !selectedRenderer.gameObject.activeInHierarchy)
             {
-                float largestBounds = 0f;
-                foreach (var renderer in currentVisual.GetComponentsInChildren<SkinnedMeshRenderer>(true))
-                {
-                    if (renderer == null || !renderer.enabled || !renderer.gameObject.activeInHierarchy) continue;
-                    if (string.Equals(renderer.gameObject.name, "rat_mesh", System.StringComparison.OrdinalIgnoreCase))
-                    {
-                        selectedRenderer = renderer;
-                        break;
-                    }
-
-                    float area = renderer.bounds.size.sqrMagnitude;
-                    if (selectedRenderer == null || area > largestBounds)
-                    {
-                        selectedRenderer = renderer;
-                        largestBounds = area;
-                    }
-                }
-            }
-            else
-            {
-                float largestBounds = 0f;
-                foreach (var renderer in currentVisual.GetComponentsInChildren<Renderer>(true))
-                {
-                    if (renderer == null || !renderer.enabled || !renderer.gameObject.activeInHierarchy) continue;
-                    float area = renderer.bounds.size.sqrMagnitude;
-                    if (selectedRenderer == null || area > largestBounds)
-                    {
-                        selectedRenderer = renderer;
-                        largestBounds = area;
-                    }
-                }
+                CacheBoundsRenderer();
+                selectedRenderer = selectionBoundsRenderer;
             }
 
             if (selectedRenderer == null || selectedRenderer.bounds.size.sqrMagnitude <= 0.0001f) return false;
@@ -111,6 +93,32 @@ namespace RatHabitat
                 }
             }
             return found && localBounds.size.sqrMagnitude > 0.0001f;
+        }
+
+        /// <summary>
+        /// Returns visible bounds without walking the imported hierarchy. The
+        /// renderer array is built once per stage visual.
+        /// </summary>
+        public bool TryGetWorldBounds(out Bounds bounds)
+        {
+            bounds = new Bounds(transform.position, Vector3.zero);
+            if (cachedRenderers == null || cachedRenderers.Length == 0) return false;
+            bool found = false;
+            for (int i = 0; i < cachedRenderers.Length; i++)
+            {
+                Renderer renderer = cachedRenderers[i];
+                if (renderer == null || !renderer.enabled || !renderer.gameObject.activeInHierarchy) continue;
+                if (!found)
+                {
+                    bounds = renderer.bounds;
+                    found = true;
+                }
+                else
+                {
+                    bounds.Encapsulate(renderer.bounds);
+                }
+            }
+            return found;
         }
 
         public void Configure(RatVisualFactory visualFactory)
@@ -165,6 +173,15 @@ namespace RatHabitat
             if (Mathf.Abs(targetScale - currentVisualScale) <= 0.0001f) return;
             currentVisualScale = targetScale;
             SetStageScale(currentVisual, currentBaseScale, currentVisualScale);
+            // Selection colliders do not need to be rebuilt for sub-pixel
+            // growth changes. Keep the visual smooth while bounding the
+            // expensive collider/layout work to meaningful scale changes.
+            if (lastColliderVisualScale < 0f ||
+                Mathf.Abs(currentVisualScale - lastColliderVisualScale) >= 0.01f)
+            {
+                lastColliderVisualScale = currentVisualScale;
+                selectionBoundsVersion++;
+            }
         }
 
         private void EnsureVisualRoot()
@@ -186,8 +203,11 @@ namespace RatHabitat
             StopTransitionAndClearChildren();
             currentVisual = factory.CreateStageVisual(visualRoot, rat);
             if (currentVisual == null) return;
+            CacheBoundsRenderer();
             currentBaseScale = UniformBaseScale(currentVisual.transform.localScale);
             currentVisualScale = GrowthSystem.VisualScaleForAge(rat);
+            lastColliderVisualScale = currentVisualScale;
+            selectionBoundsVersion++;
             SetStageScale(currentVisual, currentBaseScale, currentVisualScale);
             currentStage = rat.stage;
             hasVisual = true;
@@ -214,6 +234,9 @@ namespace RatHabitat
             float toScale = GrowthSystem.VisualScaleForAge(rat);
             Vector3 previousBaseScale = currentBaseScale;
             Vector3 nextBaseScale = UniformBaseScale(next.transform.localScale);
+            CacheBoundsRenderer(next);
+            lastColliderVisualScale = fromScale;
+            selectionBoundsVersion++;
             SetStageScale(next, nextBaseScale, fromScale);
             currentVisual = next;
             currentStage = rat.stage;
@@ -281,9 +304,45 @@ namespace RatHabitat
             }
             currentVisual = null;
             transitioningOutVisual = null;
+            cachedRenderers = null;
+            selectionBoundsRenderer = null;
             hasVisual = false;
             currentBaseScale = Vector3.one;
             currentVisualScale = GameConfig.AdultVisualScale;
+            lastColliderVisualScale = -1f;
+        }
+
+        private void CacheBoundsRenderer()
+        {
+            CacheBoundsRenderer(currentVisual);
+        }
+
+        private void CacheBoundsRenderer(GameObject visual)
+        {
+            cachedRenderers = visual == null
+                ? null
+                : visual.GetComponentsInChildren<Renderer>(true);
+            selectionBoundsRenderer = null;
+            if (cachedRenderers == null) return;
+
+            float largestBounds = 0f;
+            for (int i = 0; i < cachedRenderers.Length; i++)
+            {
+                Renderer renderer = cachedRenderers[i];
+                if (renderer == null || !renderer.enabled || !renderer.gameObject.activeInHierarchy) continue;
+                if (string.Equals(renderer.gameObject.name, "rat_mesh", System.StringComparison.OrdinalIgnoreCase))
+                {
+                    selectionBoundsRenderer = renderer;
+                    return;
+                }
+
+                float area = renderer.bounds.size.sqrMagnitude;
+                if (selectionBoundsRenderer == null || area > largestBounds)
+                {
+                    selectionBoundsRenderer = renderer;
+                    largestBounds = area;
+                }
+            }
         }
 
         private static float DurationFor(RatStage fromStage, RatStage toStage)

@@ -14,6 +14,9 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
         _AlbinoBodyColor ("Albino Body Color", Color) = (0.98, 0.965, 0.92, 1)
         _PinkEyeMode ("Pink Eye Phenotype", Range(0, 1)) = 0
         _MarkingFamily ("Marking Family", Float) = 0
+        _FaceMarkingStrength ("Face Marking Strength", Range(0, 1)) = 0
+        _LegMarkingStrength ("Leg Marking Strength", Range(0, 1)) = 0
+        _BellyMarkingStrength ("Belly Marking Strength", Range(0, 1)) = 0
     }
 
     SubShader
@@ -37,10 +40,14 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
         fixed4 _AlbinoBodyColor;
         float _PinkEyeMode;
         float _MarkingFamily;
+        float _FaceMarkingStrength;
+        float _LegMarkingStrength;
+        float _BellyMarkingStrength;
 
         struct Input
         {
             float2 uv_MainTex;
+            float3 worldPos;
         };
 
         void surf(Input input, inout SurfaceOutputStandard output)
@@ -119,6 +126,37 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             float softenedSpots = smoothstep(familyEdge, 1.0 - familyEdge, spots);
 
             float whiteBlend = saturate(bodyMask * softenedSpots * _SpotStrength);
+            // The imported asset's body mask intentionally avoids several
+            // face, leg, and underside UV islands. Add a small object-space
+            // contribution so the recorded marking family is visible on the
+            // actual skinned mesh, not just in profile text. worldPos is
+            // converted through the rat visual's object transform, so these
+            // regions follow bones, rotation, and animation naturally.
+            float3 ratLocal = mul(unity_WorldToObject, float4(input.worldPos, 1.0)).xyz;
+            float headEnd = smoothstep(0.02, 0.28, ratLocal.z);
+            float faceWidth = 1.0 - smoothstep(0.055, 0.19, abs(ratLocal.x));
+            float faceHeight = smoothstep(0.13, 0.24, ratLocal.y) *
+                (1.0 - smoothstep(0.43, 0.55, ratLocal.y));
+            // A low-frequency deterministic offset makes the facial region
+            // slightly asymmetric without changing the stored genetics.
+            float faceOffset = sin(_SpotSeed * 19.37 + ratLocal.z * 11.0) * 0.035;
+            float faceRegion = saturate(headEnd * faceWidth * faceHeight *
+                (1.0 - smoothstep(0.14, 0.28, abs(ratLocal.x + faceOffset))));
+
+            float lowerBody = 1.0 - smoothstep(0.055, 0.19, ratLocal.y);
+            float legSide = smoothstep(0.07, 0.15, abs(ratLocal.x));
+            float legEndVariation = 0.82 + 0.18 *
+                (sin(_SpotSeed * 13.1 + ratLocal.z * 17.0) * 0.5 + 0.5);
+            float legRegion = saturate(lowerBody * legSide * legEndVariation);
+            float bellyRegion = saturate(lowerBody *
+                (1.0 - smoothstep(0.08, 0.27, abs(ratLocal.x))) *
+                (0.76 + 0.24 * sin(_SpotSeed * 7.7 + ratLocal.z * 9.0)));
+            float featureBlend = saturate(faceRegion * _FaceMarkingStrength +
+                legRegion * _LegMarkingStrength + bellyRegion * _BellyMarkingStrength);
+            // Keep dark eye/mouth/tail detail readable when a white facial or
+            // belly region crosses the same imported texture island.
+            featureBlend *= saturate(1.0 - darkFeatureSignal * 0.72);
+            whiteBlend = max(whiteBlend, featureBlend);
             output.Albedo = lerp(painted.rgb, _SpotColor.rgb, whiteBlend);
             output.Metallic = 0.0;
             output.Smoothness = 0.08;

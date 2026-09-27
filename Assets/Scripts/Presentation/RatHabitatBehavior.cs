@@ -50,6 +50,8 @@ namespace RatHabitat
         private HabitatBuilder habitat;
         private RatData rat;
         private Animator animator;
+        private bool animatorLookupAttempted;
+        private float lastAppliedAnimatorSpeed = -1f;
         private System.Random random;
         private readonly Dictionary<string, float> targetCooldowns = new Dictionary<string, float>();
         private RatBehaviorTarget currentTarget;
@@ -247,12 +249,17 @@ namespace RatHabitat
                 configured = false;
                 ClearMicroAnimationOffsets();
                 animator = null;
+                animatorLookupAttempted = false;
                 microAnimationRoot = null;
                 microAnimationBound = false;
                 return;
             }
 
-            animator = GetComponentInChildren<Animator>(true);
+            if (!animatorLookupAttempted)
+            {
+                animator = GetComponentInChildren<Animator>(true);
+                animatorLookupAttempted = true;
+            }
             if (animator != null)
             {
                 // Ambient movement is code-driven. Keep the imported
@@ -582,9 +589,10 @@ namespace RatHabitat
         private void Update()
         {
             if (!configured || rat == null || habitat == null) return;
-            if (animator == null)
+            if (!animatorLookupAttempted)
             {
                 animator = GetComponentInChildren<Animator>(true);
+                animatorLookupAttempted = true;
                 microAnimationBound = false;
                 AuditAnimatorOnce();
             }
@@ -1373,7 +1381,10 @@ namespace RatHabitat
                 state == RatBehaviorState.WalkToTarget
                 ? WalkAnimationPlaybackScale
                 : 1f;
-            animator.speed = statePlaybackScale * GrowthSystem.RuntimeAnimationPlaybackMultiplier;
+            float targetSpeed = statePlaybackScale * GrowthSystem.RuntimeAnimationPlaybackMultiplier;
+            if (Mathf.Abs(targetSpeed - lastAppliedAnimatorSpeed) <= 0.0001f) return;
+            animator.speed = targetSpeed;
+            lastAppliedAnimatorSpeed = targetSpeed;
         }
 
         private void PlayAvailableMotion(string preferredState, float blendSeconds, float playbackSpeed, params string[] fallbacks)

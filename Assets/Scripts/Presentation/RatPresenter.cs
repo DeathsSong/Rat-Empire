@@ -15,8 +15,11 @@ namespace RatHabitat
         private readonly Dictionary<string, RatVisualController> visualControllers = new Dictionary<string, RatVisualController>();
         private readonly Dictionary<string, RatHabitatBehavior> behaviors = new Dictionary<string, RatHabitatBehavior>();
         private readonly Dictionary<string, RatData> liveRats = new Dictionary<string, RatData>();
+        private readonly Dictionary<string, int> configuredSelectionBoundsVersions = new Dictionary<string, int>();
         private RatVisualFactory visualFactory;
         private HabitatBuilder habitat;
+        private float groundingRefreshTimer;
+        private const float GroundingRefreshIntervalSeconds = 0.075f;
 
         public void ConfigureHabitat(HabitatBuilder builder)
         {
@@ -109,7 +112,7 @@ namespace RatHabitat
                     RemoveLegacySelectionMarker(root);
                 }
 
-                controller.Configure(EnsureVisualFactory());
+                controller.Configure(visualFactory);
                 // A controller keeps the visual child between renders. When a
                 // saved stage changes, it performs the configured smooth
                 // pinkie->young or young->adult transition.
@@ -123,6 +126,7 @@ namespace RatHabitat
                     ApplyDeterministicPinkiePose(rat, root, controller);
                 }
                 EnsureBehaviorForStage(root, rat);
+                configuredSelectionBoundsVersions[rat.id] = controller.SelectionBoundsVersion;
             }
 
             RemoveMissingRats(liveIds);
@@ -135,6 +139,10 @@ namespace RatHabitat
             // this point in the frame. Keep the stable selection surfaces
             // aligned with the currently visible mesh instead of leaving a
             // stale pose-sized hitbox below or beside an animated rat.
+            groundingRefreshTimer -= Time.unscaledDeltaTime;
+            bool refreshGrounding = groundingRefreshTimer <= 0f;
+            if (refreshGrounding) groundingRefreshTimer = GroundingRefreshIntervalSeconds;
+
             foreach (var item in visualControllers)
             {
                 RatVisualController controller = item.Value;
@@ -153,18 +161,24 @@ namespace RatHabitat
                     controller.ApplyAgeScale(rat);
                 }
 
-                Bounds bounds;
-                if (controller.TryGetSelectionBounds(out bounds))
+                int configuredBoundsVersion;
+                if (!configuredSelectionBoundsVersions.TryGetValue(item.Key, out configuredBoundsVersion) ||
+                    configuredBoundsVersion != controller.SelectionBoundsVersion)
                 {
-                    ConfigureRatCollider(root, controller.CurrentStage, controller);
+                    Bounds bounds;
+                    if (controller.TryGetSelectionBounds(out bounds))
+                    {
+                        ConfigureRatCollider(root, controller.CurrentStage, controller);
+                        configuredSelectionBoundsVersions[item.Key] = controller.SelectionBoundsVersion;
+                    }
                 }
 
-                if (liveRats.TryGetValue(item.Key, out rat) &&
+                if (refreshGrounding && liveRats.TryGetValue(item.Key, out rat) &&
                     controller.TryGetCurrentVisual(out currentVisual))
                 {
                     // Keep animation-driven feet/tails from dipping below
                     // the actual Pairing cage floor after the render pass.
-                    EnsureVisualFactory().KeepPairingVisualGrounded(currentVisual, rat);
+                    visualFactory.KeepPairingVisualGrounded(currentVisual, rat, controller);
                 }
             }
         }
@@ -402,6 +416,7 @@ namespace RatHabitat
                 visualControllers.Remove(id);
                 behaviors.Remove(id);
                 liveRats.Remove(id);
+                configuredSelectionBoundsVersions.Remove(id);
             }
         }
 
@@ -415,6 +430,7 @@ namespace RatHabitat
             visualControllers.Clear();
             behaviors.Clear();
             liveRats.Clear();
+            configuredSelectionBoundsVersions.Clear();
         }
 
         private static Dictionary<string, int> BuildPinkieSlotMap(List<RatData> rats)

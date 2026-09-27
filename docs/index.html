@@ -58,10 +58,9 @@
 
       // Keep all Unity payload URLs on the same immutable cache-busted revision.
       // GitHub Pages can otherwise serve a cached .data file alongside a newer
-      // framework/wasm pair after a deployment, which causes an early WebGL
-      // memory-access failure before the game scene is initialized.
+      // framework/wasm pair after a deployment.
       var buildUrl = "Build";
-      var buildRevision = "pointer-relay-20260927";
+      var buildRevision = "lategame-coat-20260927";
       var buildAsset = function(name) { return buildUrl + "/" + name + "?v=" + buildRevision; };
       var loaderUrl = buildAsset("WebGL.loader.js");
       var config = {
