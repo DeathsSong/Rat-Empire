@@ -56,12 +56,18 @@
         updateBannerVisibility();
       }
 
+      // Keep all Unity payload URLs on the same immutable cache-busted revision.
+      // GitHub Pages can otherwise serve a cached .data file alongside a newer
+      // framework/wasm pair after a deployment, which causes an early WebGL
+      // memory-access failure before the game scene is initialized.
       var buildUrl = "Build";
-      var loaderUrl = buildUrl + "/WebGL.loader.js";
+      var buildRevision = "c430880";
+      var buildAsset = function(name) { return buildUrl + "/" + name + "?v=" + buildRevision; };
+      var loaderUrl = buildAsset("WebGL.loader.js");
       var config = {
-        dataUrl: buildUrl + "/WebGL.data",
-        frameworkUrl: buildUrl + "/WebGL.framework.js",
-        codeUrl: buildUrl + "/WebGL.wasm",
+        dataUrl: buildAsset("WebGL.data"),
+        frameworkUrl: buildAsset("WebGL.framework.js"),
+        codeUrl: buildAsset("WebGL.wasm"),
         streamingAssetsUrl: "StreamingAssets",
         companyName: "Rat Empire Studio",
         productName: "Rat Empire",
