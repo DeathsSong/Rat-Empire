@@ -1993,13 +1993,13 @@ var tempI64;
 // === Body ===
 
 var ASM_CONSTS = {
-  1839296: function() {return Module.webglContextAttributes.premultipliedAlpha;},  
- 1839357: function() {return Module.webglContextAttributes.preserveDrawingBuffer;},  
- 1839421: function() {return Module.webglContextAttributes.powerPreference;},  
- 1839479: function() {Module['emscripten_get_now_backup'] = performance.now;},  
- 1839534: function($0) {performance.now = function() { return $0; };},  
- 1839582: function($0) {performance.now = function() { return $0; };},  
- 1839630: function() {performance.now = Module['emscripten_get_now_backup'];}
+  1839360: function() {return Module.webglContextAttributes.premultipliedAlpha;},  
+ 1839421: function() {return Module.webglContextAttributes.preserveDrawingBuffer;},  
+ 1839485: function() {return Module.webglContextAttributes.powerPreference;},  
+ 1839543: function() {Module['emscripten_get_now_backup'] = performance.now;},  
+ 1839598: function($0) {performance.now = function() { return $0; };},  
+ 1839646: function($0) {performance.now = function() { return $0; };},  
+ 1839694: function() {performance.now = Module['emscripten_get_now_backup'];}
 };
 
 
@@ -4482,26 +4482,36 @@ var ASM_CONSTS = {
   }
 
   function _RatHabitatBrowserFlush(keyPtr) {
-          var key = UTF8ToString(keyPtr);
+          var bridge = ratHabitatSaveBridgeState();
+          if (bridge.flushInProgress) return;
+          bridge.flushInProgress = true;
           try {
+              var key = UTF8ToString(keyPtr);
               // localStorage is synchronous. Re-setting the last serialized
-              // payload makes the requested flush explicit for pagehide and
-              // browser unload handlers without requiring sessionStorage.
+              // payload makes the requested flush explicit without invoking
+              // another Unity save or relying on sessionStorage.
               var value = window.localStorage.getItem(key);
               if (value !== null) window.localStorage.setItem(key, value);
           } catch (error) {
               console.warn("Rat Habitat browser save flush failed", error);
+          } finally {
+              bridge.flushInProgress = false;
           }
       }
 
   function _RatHabitatBrowserRead(keyPtr) {
-          var key = UTF8ToString(keyPtr);
+          var bridge = ratHabitatSaveBridgeState();
+          if (bridge.readInProgress) return allocateUTF8("");
+          bridge.readInProgress = true;
           try {
+              var key = UTF8ToString(keyPtr);
               var value = window.localStorage.getItem(key);
               return allocateUTF8(value === null ? "" : value);
           } catch (error) {
               console.warn("Rat Habitat browser save read failed", error);
               return allocateUTF8("");
+          } finally {
+              bridge.readInProgress = false;
           }
       }
 
@@ -4513,12 +4523,16 @@ var ASM_CONSTS = {
               window.__ratHabitatSaveLifecycleKeys[key] = true;
   
               var flush = function () {
+                  var bridge = ratHabitatSaveBridgeState();
+                  if (bridge.flushInProgress) return;
+                  bridge.flushInProgress = true;
                   try {
                       var value = window.localStorage.getItem(key);
                       if (value !== null) window.localStorage.setItem(key, value);
                   } catch (error) {
-                      // The normal save path already reports write failures;
-                      // unload handlers must never block page navigation.
+                      // Unload handlers must never block page navigation.
+                  } finally {
+                      bridge.flushInProgress = false;
                   }
               };
   
@@ -4533,19 +4547,23 @@ var ASM_CONSTS = {
       }
 
   function _RatHabitatBrowserRemove(keyPtr) {
-          var key = UTF8ToString(keyPtr);
+          var bridge = ratHabitatSaveBridgeState();
+          if (bridge.removeInProgress) return;
+          bridge.removeInProgress = true;
           try {
+              var key = UTF8ToString(keyPtr);
               window.localStorage.removeItem(key);
           } catch (error) {
               console.warn("Rat Habitat browser save remove failed", error);
+          } finally {
+              bridge.removeInProgress = false;
           }
       }
 
   function _RatHabitatBrowserWakeLockGetStatus() {
           try {
               var state = window.__ratHabitatWakeLockState;
-              if (!state) return 4;
-              return state.status || 4;
+              return state ? (state.status || 4) : 4;
           } catch (error) {
               return 3;
           }
@@ -4553,131 +4571,45 @@ var ASM_CONSTS = {
 
   function _RatHabitatBrowserWakeLockRegisterLifecycle() {
           try {
-              var state = window.__ratHabitatWakeLockState;
-              if (!state) {
-                  state = window.__ratHabitatWakeLockState = {
-                      enabled: true,
-                      sentinel: null,
-                      pending: false,
-                      status: 5,
-                      listenersInstalled: false
-                  };
-              }
+              var state = ratHabitatInstallWakeLockRequest();
               if (state.listenersInstalled) return;
               state.listenersInstalled = true;
-              window.__ratHabitatRequestWakeLock = function () {
-                  try {
-                      if (window.__ratHabitatWakeLockState &&
-                          window.__ratHabitatWakeLockState.enabled &&
-                          document.visibilityState === "visible") {
-                          // Invoke the bridge function without requiring a fake
-                          // input event. This is used only to reacquire a lock
-                          // that the browser revoked after visibility changed.
-                          var current = window.__ratHabitatWakeLockState;
-                          if (!current.sentinel && !current.pending && navigator.wakeLock && navigator.wakeLock.request) {
-                              current.pending = true;
-                              current.status = 5;
-                              navigator.wakeLock.request("screen").then(function (sentinel) {
-                                  current.pending = false;
-                                  if (!current.enabled || document.visibilityState !== "visible") {
-                                      try { sentinel.release(); } catch (releaseError) { }
-                                      current.status = current.enabled ? 5 : 4;
-                                      return;
-                                  }
-                                  current.sentinel = sentinel;
-                                  current.status = 1;
-                                  sentinel.addEventListener("release", function () {
-                                      current.sentinel = null;
-                                      current.pending = false;
-                                      current.status = current.enabled ? 5 : 4;
-                                  }, false);
-                              }).catch(function () {
-                                  current.pending = false;
-                                  current.sentinel = null;
-                                  current.status = 3;
-                              });
-                          }
-                      }
-                  } catch (error) { }
-              };
+  
               document.addEventListener("visibilitychange", function () {
+                  var current = ratHabitatWakeLockState();
                   if (document.visibilityState === "hidden") {
-                      if (state.sentinel) {
-                          try { state.sentinel.release(); } catch (releaseError) { }
-                          state.sentinel = null;
+                      if (current.reacquireTimer !== null) {
+                          window.clearTimeout(current.reacquireTimer);
+                          current.reacquireTimer = null;
                       }
-                      state.pending = false;
-                      state.status = state.enabled ? 5 : 4;
-                  } else if (state.enabled) {
-                      window.setTimeout(window.__ratHabitatRequestWakeLock, 150);
+                      current.reacquireOnVisible = !!current.sentinel || current.reacquireOnVisible;
+                      ratHabitatReleaseWakeLock(current);
+                      current.pending = false;
+                      current.status = current.enabled ? 5 : 4;
+                  } else if (current.enabled && current.reacquireOnVisible && current.reacquireTimer === null) {
+                      // Wait briefly for the page to become fully visible. The
+                      // guard allows at most one pending reacquisition.
+                      current.reacquireTimer = window.setTimeout(function () {
+                          current.reacquireTimer = null;
+                          if (current.enabled && document.visibilityState === "visible") {
+                              window.__ratHabitatRequestWakeLock();
+                          }
+                      }, 150);
                   }
               }, false);
-          } catch (error) { }
+          } catch (error) {
+          }
       }
 
   function _RatHabitatBrowserWakeLockRequest() {
           try {
-              var state = window.__ratHabitatWakeLockState;
-              if (!state) {
-                  state = window.__ratHabitatWakeLockState = {
-                      enabled: true,
-                      sentinel: null,
-                      pending: false,
-                      status: 5,
-                      listenersInstalled: false
-                  };
-              }
-              if (!state.enabled) {
-                  state.status = 4;
-                  return 0;
-              }
-              if (!navigator.wakeLock || typeof navigator.wakeLock.request !== "function") {
-                  state.status = 2;
-                  return 0;
-              }
-              if (document.visibilityState !== "visible") {
-                  state.status = 5;
-                  return 0;
-              }
-              if (state.sentinel || state.pending) return 1;
-  
-              state.pending = true;
-              state.status = 5;
-              navigator.wakeLock.request("screen").then(function (sentinel) {
-                  state.pending = false;
-                  if (!state.enabled || document.visibilityState !== "visible") {
-                      try { sentinel.release(); } catch (releaseError) { }
-                      state.status = state.enabled ? 5 : 4;
-                      return;
-                  }
-                  state.sentinel = sentinel;
-                  state.status = 1; // active
-                  sentinel.addEventListener("release", function () {
-                      state.sentinel = null;
-                      state.pending = false;
-                      if (!state.enabled) {
-                          state.status = 4;
-                      } else if (document.visibilityState === "visible") {
-                          // Surface the revocation without retrying in a tight
-                          // loop. The next real user gesture or visibility
-                          // transition is the safe retry point, especially when
-                          // the browser revoked the lock for low-battery mode.
-                          state.status = 3;
-                      } else {
-                          state.status = 5;
-                      }
-                  }, false);
-              }).catch(function () {
-                  state.pending = false;
-                  state.sentinel = null;
-                  state.status = 3; // denied/revoked/error
-              });
-              return 1;
+              ratHabitatInstallWakeLockRequest();
+              return window.__ratHabitatRequestWakeLock() ? 1 : 0;
           } catch (error) {
-              var failedState = window.__ratHabitatWakeLockState;
-              if (failedState) {
-                  failedState.pending = false;
-                  failedState.status = 3;
+              var state = window.__ratHabitatWakeLockState;
+              if (state) {
+                  state.pending = false;
+                  state.status = 3;
               }
               return 0;
           }
@@ -4685,48 +4617,45 @@ var ASM_CONSTS = {
 
   function _RatHabitatBrowserWakeLockSetDesired(enabled) {
           try {
-              var state = window.__ratHabitatWakeLockState;
-              if (!state) {
-                  state = window.__ratHabitatWakeLockState = {
-                      enabled: false,
-                      sentinel: null,
-                      pending: false,
-                      status: 4,
-                      listenersInstalled: false
-                  };
-              }
+              var state = ratHabitatWakeLockState();
               state.enabled = !!enabled;
               if (!state.enabled) {
-                  state.pending = false;
-                  state.status = 4; // disabled
-                  if (state.sentinel) {
-                      var sentinel = state.sentinel;
-                      state.sentinel = null;
-                      try { sentinel.release(); } catch (releaseError) { }
+                  if (state.reacquireTimer !== null) {
+                      window.clearTimeout(state.reacquireTimer);
+                      state.reacquireTimer = null;
                   }
+                  state.pending = false;
+                  state.reacquireOnVisible = false;
+                  state.status = 4;
+                  ratHabitatReleaseWakeLock(state);
                   return;
               }
               if (!navigator.wakeLock || typeof navigator.wakeLock.request !== "function") {
-                  state.status = 2; // unsupported
+                  state.status = 2;
               } else if (document.visibilityState !== "visible") {
-                  state.status = 5; // waiting for a visible page
+                  state.status = 5;
               } else if (!state.sentinel && !state.pending) {
-                  state.status = 5; // awaiting a user-gesture request
+                  // Initial acquisition remains user-gesture driven.
+                  state.status = 5;
               }
           } catch (error) {
-              // A browser integration failure must never affect the game loop.
           }
       }
 
   function _RatHabitatBrowserWrite(keyPtr, valuePtr) {
-          var key = UTF8ToString(keyPtr);
-          var value = UTF8ToString(valuePtr);
+          var bridge = ratHabitatSaveBridgeState();
+          if (bridge.writeInProgress) return 0;
+          bridge.writeInProgress = true;
           try {
+              var key = UTF8ToString(keyPtr);
+              var value = UTF8ToString(valuePtr);
               window.localStorage.setItem(key, value);
               return 1;
           } catch (error) {
               console.error("Rat Habitat browser save write failed", error);
               return 0;
+          } finally {
+              bridge.writeInProgress = false;
           }
       }
 
@@ -15977,25 +15906,22 @@ var dynCall_viiiiiiiiiiii = Module["dynCall_viiiiiiiiiiii"] = createExportWrappe
 var dynCall_iiifi = Module["dynCall_iiifi"] = createExportWrapper("dynCall_iiifi");
 
 /** @type {function(...*):?} */
-var dynCall_vfi = Module["dynCall_vfi"] = createExportWrapper("dynCall_vfi");
-
-/** @type {function(...*):?} */
-var dynCall_viiiji = Module["dynCall_viiiji"] = createExportWrapper("dynCall_viiiji");
-
-/** @type {function(...*):?} */
-var dynCall_fi = Module["dynCall_fi"] = createExportWrapper("dynCall_fi");
-
-/** @type {function(...*):?} */
-var dynCall_iiiiji = Module["dynCall_iiiiji"] = createExportWrapper("dynCall_iiiiji");
-
-/** @type {function(...*):?} */
 var dynCall_iiijii = Module["dynCall_iiijii"] = createExportWrapper("dynCall_iiijii");
 
 /** @type {function(...*):?} */
-var dynCall_iiiifi = Module["dynCall_iiiifi"] = createExportWrapper("dynCall_iiiifi");
+var dynCall_iiiji = Module["dynCall_iiiji"] = createExportWrapper("dynCall_iiiji");
 
 /** @type {function(...*):?} */
 var dynCall_iiiiijii = Module["dynCall_iiiiijii"] = createExportWrapper("dynCall_iiiiijii");
+
+/** @type {function(...*):?} */
+var dynCall_ji = Module["dynCall_ji"] = createExportWrapper("dynCall_ji");
+
+/** @type {function(...*):?} */
+var dynCall_viiiiiiiiiii = Module["dynCall_viiiiiiiiiii"] = createExportWrapper("dynCall_viiiiiiiiiii");
+
+/** @type {function(...*):?} */
+var dynCall_fi = Module["dynCall_fi"] = createExportWrapper("dynCall_fi");
 
 /** @type {function(...*):?} */
 var dynCall_fii = Module["dynCall_fii"] = createExportWrapper("dynCall_fii");
@@ -16004,16 +15930,19 @@ var dynCall_fii = Module["dynCall_fii"] = createExportWrapper("dynCall_fii");
 var dynCall_viiiffi = Module["dynCall_viiiffi"] = createExportWrapper("dynCall_viiiffi");
 
 /** @type {function(...*):?} */
+var dynCall_viiiji = Module["dynCall_viiiji"] = createExportWrapper("dynCall_viiiji");
+
+/** @type {function(...*):?} */
 var dynCall_ifi = Module["dynCall_ifi"] = createExportWrapper("dynCall_ifi");
 
 /** @type {function(...*):?} */
-var dynCall_iiiji = Module["dynCall_iiiji"] = createExportWrapper("dynCall_iiiji");
+var dynCall_vfi = Module["dynCall_vfi"] = createExportWrapper("dynCall_vfi");
 
 /** @type {function(...*):?} */
-var dynCall_ji = Module["dynCall_ji"] = createExportWrapper("dynCall_ji");
+var dynCall_iiiiji = Module["dynCall_iiiiji"] = createExportWrapper("dynCall_iiiiji");
 
 /** @type {function(...*):?} */
-var dynCall_viiiiiiiiiii = Module["dynCall_viiiiiiiiiii"] = createExportWrapper("dynCall_viiiiiiiiiii");
+var dynCall_iiiifi = Module["dynCall_iiiifi"] = createExportWrapper("dynCall_iiiifi");
 
 /** @type {function(...*):?} */
 var dynCall_iiiiifi = Module["dynCall_iiiiifi"] = createExportWrapper("dynCall_iiiiifi");
@@ -17053,10 +16982,10 @@ function invoke_iiifi(index,a1,a2,a3,a4) {
   }
 }
 
-function invoke_vfi(index,a1,a2) {
+function invoke_viiiiiiiiiii(index,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11) {
   var sp = stackSave();
   try {
-    dynCall_vfi(index,a1,a2);
+    dynCall_viiiiiiiiiii(index,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11);
   } catch(e) {
     stackRestore(sp);
     if (e !== e+0) throw e;
@@ -17075,54 +17004,10 @@ function invoke_fi(index,a1) {
   }
 }
 
-function invoke_iiiifi(index,a1,a2,a3,a4,a5) {
-  var sp = stackSave();
-  try {
-    return dynCall_iiiifi(index,a1,a2,a3,a4,a5);
-  } catch(e) {
-    stackRestore(sp);
-    if (e !== e+0) throw e;
-    _setThrew(1, 0);
-  }
-}
-
 function invoke_fii(index,a1,a2) {
   var sp = stackSave();
   try {
     return dynCall_fii(index,a1,a2);
-  } catch(e) {
-    stackRestore(sp);
-    if (e !== e+0) throw e;
-    _setThrew(1, 0);
-  }
-}
-
-function invoke_iiiiifi(index,a1,a2,a3,a4,a5,a6) {
-  var sp = stackSave();
-  try {
-    return dynCall_iiiiifi(index,a1,a2,a3,a4,a5,a6);
-  } catch(e) {
-    stackRestore(sp);
-    if (e !== e+0) throw e;
-    _setThrew(1, 0);
-  }
-}
-
-function invoke_viifii(index,a1,a2,a3,a4,a5) {
-  var sp = stackSave();
-  try {
-    dynCall_viifii(index,a1,a2,a3,a4,a5);
-  } catch(e) {
-    stackRestore(sp);
-    if (e !== e+0) throw e;
-    _setThrew(1, 0);
-  }
-}
-
-function invoke_viiiiiiiiiii(index,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11) {
-  var sp = stackSave();
-  try {
-    dynCall_viiiiiiiiiii(index,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11);
   } catch(e) {
     stackRestore(sp);
     if (e !== e+0) throw e;
@@ -17145,6 +17030,50 @@ function invoke_ifi(index,a1,a2) {
   var sp = stackSave();
   try {
     return dynCall_ifi(index,a1,a2);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
+function invoke_vfi(index,a1,a2) {
+  var sp = stackSave();
+  try {
+    dynCall_vfi(index,a1,a2);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
+function invoke_iiiifi(index,a1,a2,a3,a4,a5) {
+  var sp = stackSave();
+  try {
+    return dynCall_iiiifi(index,a1,a2,a3,a4,a5);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
+function invoke_iiiiifi(index,a1,a2,a3,a4,a5,a6) {
+  var sp = stackSave();
+  try {
+    return dynCall_iiiiifi(index,a1,a2,a3,a4,a5,a6);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
+function invoke_viifii(index,a1,a2,a3,a4,a5) {
+  var sp = stackSave();
+  try {
+    dynCall_viifii(index,a1,a2,a3,a4,a5);
   } catch(e) {
     stackRestore(sp);
     if (e !== e+0) throw e;
@@ -17405,32 +17334,21 @@ function invoke_iijii(index,a1,a2,a3,a4,a5) {
   }
 }
 
-function invoke_viiiji(index,a1,a2,a3,a4,a5,a6) {
-  var sp = stackSave();
-  try {
-    dynCall_viiiji(index,a1,a2,a3,a4,a5,a6);
-  } catch(e) {
-    stackRestore(sp);
-    if (e !== e+0) throw e;
-    _setThrew(1, 0);
-  }
-}
-
-function invoke_iiiiji(index,a1,a2,a3,a4,a5,a6) {
-  var sp = stackSave();
-  try {
-    return dynCall_iiiiji(index,a1,a2,a3,a4,a5,a6);
-  } catch(e) {
-    stackRestore(sp);
-    if (e !== e+0) throw e;
-    _setThrew(1, 0);
-  }
-}
-
 function invoke_iiijii(index,a1,a2,a3,a4,a5,a6) {
   var sp = stackSave();
   try {
     return dynCall_iiijii(index,a1,a2,a3,a4,a5,a6);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
+function invoke_iiiji(index,a1,a2,a3,a4,a5) {
+  var sp = stackSave();
+  try {
+    return dynCall_iiiji(index,a1,a2,a3,a4,a5);
   } catch(e) {
     stackRestore(sp);
     if (e !== e+0) throw e;
@@ -17449,10 +17367,21 @@ function invoke_iiiiijii(index,a1,a2,a3,a4,a5,a6,a7,a8) {
   }
 }
 
-function invoke_iiiji(index,a1,a2,a3,a4,a5) {
+function invoke_viiiji(index,a1,a2,a3,a4,a5,a6) {
   var sp = stackSave();
   try {
-    return dynCall_iiiji(index,a1,a2,a3,a4,a5);
+    dynCall_viiiji(index,a1,a2,a3,a4,a5,a6);
+  } catch(e) {
+    stackRestore(sp);
+    if (e !== e+0) throw e;
+    _setThrew(1, 0);
+  }
+}
+
+function invoke_iiiiji(index,a1,a2,a3,a4,a5,a6) {
+  var sp = stackSave();
+  try {
+    return dynCall_iiiiji(index,a1,a2,a3,a4,a5,a6);
   } catch(e) {
     stackRestore(sp);
     if (e !== e+0) throw e;
