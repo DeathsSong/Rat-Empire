@@ -11,20 +11,47 @@ namespace RatHabitat
     /// </summary>
     public static class GrowthSystem
     {
-        // Presentation behavior consumes this same normalized multiplier as
-        // the authoritative clock. Movement, animation, and action timers
-        // therefore all advance at the same 1x/2x/3x rate.
-        private const double BaseGameMillisecondsPerRealSecond = 60d * 60d * 1000d;
+        // Presentation behavior consumes the normalized 1x/2x/3x multiplier.
+        // The game clock intentionally keeps its existing stepped fast-forward
+        // conversion below; rat movement, animation, and action timers use the
+        // presentation multiplier exactly once and never alter the clock rate.
         private static float runtimeSimulationSpeed = 1f;
         private static bool simulationPaused;
         private static float lastMovementRealDeltaSeconds;
         private static float lastMovementSimulationDeltaSeconds;
+        private static int diagnosticsFrame = -1;
+        private static int lastSimulationStepCount;
+        private static int lastCompressedVisualActionCount;
+
+        // A high-speed frame can represent many in-game seconds. Subdivide
+        // behavior updates into bounded chunks so state transitions remain
+        // ordered without replaying every skipped render frame. Movement has a
+        // separate per-rat visual cap in RatHabitatBehavior.
+        public const float MaximumBehaviorStepSeconds = 1f;
+        public const int MaximumBehaviorStepsPerFrame = 24;
+        public const float MaximumVisualMovementUnitsPerFrame = 1.25f;
+        public const float MaximumFastRouteMovementUnitsPerFrame = 8f;
+        public const float MaximumAnimationPlaybackMultiplier = 12f;
 
         public static float RuntimeSimulationSpeed { get { return simulationPaused ? 0f : runtimeSimulationSpeed; } }
+        public static float RuntimeSimulationMultiplier
+        {
+            get
+            {
+                if (simulationPaused) return 0f;
+                return SimulationMultiplierForSpeed(runtimeSimulationSpeed);
+            }
+        }
+        public static float RuntimeAnimationPlaybackMultiplier
+        {
+            get { return Mathf.Min(RuntimeSimulationMultiplier, MaximumAnimationPlaybackMultiplier); }
+        }
         public static bool SimulationPaused { get { return simulationPaused; } }
 
         public static float LastMovementRealDeltaSeconds { get { return lastMovementRealDeltaSeconds; } }
         public static float LastMovementSimulationDeltaSeconds { get { return lastMovementSimulationDeltaSeconds; } }
+        public static int LastSimulationStepCount { get { return lastSimulationStepCount; } }
+        public static int LastCompressedVisualActionCount { get { return lastCompressedVisualActionCount; } }
 
         public static void SetRuntimeSpeed(float speed)
         {
@@ -50,10 +77,44 @@ namespace RatHabitat
         public static float SimulationMovementDeltaSeconds(float realDeltaSeconds)
         {
             if (simulationPaused || realDeltaSeconds <= 0f) return 0f;
-            float simulationDelta = realDeltaSeconds * runtimeSimulationSpeed;
+            float simulationDelta = realDeltaSeconds * RuntimeSimulationMultiplier;
             lastMovementRealDeltaSeconds = realDeltaSeconds;
             lastMovementSimulationDeltaSeconds = simulationDelta;
             return simulationDelta;
+        }
+
+        /// <summary>
+        /// Starts one rat behavior update for the current rendered frame and
+        /// returns a bounded number of ordered simulation steps. The returned
+        /// steps cover the full elapsed simulation delta; if the frame was
+        /// unusually long, the excess is treated as compressed visual work
+        /// rather than replayed as thousands of intermediate animations.
+        /// </summary>
+        public static int BeginBehaviorUpdate(float simulationDeltaSeconds)
+        {
+            EnsureDiagnosticsFrame();
+            if (simulationDeltaSeconds <= 0f) return 0;
+
+            int requested = Mathf.Max(1, Mathf.CeilToInt(
+                simulationDeltaSeconds / MaximumBehaviorStepSeconds));
+            int steps = Mathf.Clamp(requested, 1, MaximumBehaviorStepsPerFrame);
+            lastSimulationStepCount += steps;
+            if (requested > steps) lastCompressedVisualActionCount += requested - steps;
+            return steps;
+        }
+
+        public static void RecordCompressedVisualAction(int count = 1)
+        {
+            EnsureDiagnosticsFrame();
+            lastCompressedVisualActionCount += Mathf.Max(0, count);
+        }
+
+        private static void EnsureDiagnosticsFrame()
+        {
+            if (diagnosticsFrame == Time.frameCount) return;
+            diagnosticsFrame = Time.frameCount;
+            lastSimulationStepCount = 0;
+            lastCompressedVisualActionCount = 0;
         }
 
         // Timed behavior and movement share the same clock. Keep the older
@@ -72,6 +133,43 @@ namespace RatHabitat
         public static float SimulationMovementStep(float baseWorldSpeed, float realDeltaSeconds)
         {
             return Mathf.Max(0f, baseWorldSpeed) * SimulationMovementDeltaSeconds(realDeltaSeconds);
+        }
+
+        /// <summary>
+        /// Converts an already scaled behavior step into visual movement. The
+        /// optional per-rat budget prevents a 1,440x frame from teleporting a
+        /// visible rat across the whole enclosure while preserving the full
+        /// simulation-time advancement for actions and deadlines.
+        /// </summary>
+        public static float SimulationMovementStep(
+            float baseWorldSpeed,
+            float simulationDeltaSeconds,
+            ref float visualMovementBudget)
+        {
+            float rawStep = Mathf.Max(0f, baseWorldSpeed) * Mathf.Max(0f, simulationDeltaSeconds);
+            if (RuntimeSimulationMultiplier <= 1.001f) return rawStep;
+
+            float allowed = Mathf.Max(0f, visualMovementBudget);
+            float step = Mathf.Min(rawStep, allowed);
+            visualMovementBudget = Mathf.Max(0f, visualMovementBudget - step);
+            return step;
+        }
+
+        public static float SimulationMultiplierForSpeed(float speed)
+        {
+            double baseline = SimulationMillisecondsPerRealMillisecond(1f);
+            if (baseline <= 0d) return 1f;
+            return Mathf.Max(0f, (float)(SimulationMillisecondsPerRealMillisecond(speed) / baseline));
+        }
+
+        public static double GameSecondsPerRealSecond(float speed)
+        {
+            return SimulationMillisecondsPerRealSecond(speed) / 1000d;
+        }
+
+        public static double GameMillisecondsPerBehaviorSecond
+        {
+            get { return SimulationMillisecondsPerRealSecond(1f); }
         }
 
         public static bool AdvanceClock(ColonySaveData save, long realNow)
@@ -110,17 +208,26 @@ namespace RatHabitat
         /// real millisecond. This is the single clock contract used by every
         /// time-based system:
         ///
-        ///   1x = 1 in-game hour per real-world second
-        ///   2x = 2 in-game hours per real-world second
-        ///   3x = 3 in-game hours per real-world second
+        ///   1x = 1 in-game minute per real-world second
+        ///   2x = 1 in-game hour per real-world second
+        ///   3x = 1 in-game day per real-world second
         ///
-        /// In other words, the exact conversion is 3,600,000 simulated
-        /// milliseconds per real second at 1x, multiplied by the selected
-        /// speed. Do not add another speed multiplier at call sites.
+        /// Preserve these legacy fast-forward rates. Do not reinterpret the
+        /// clock as a linear 1x/2x/3x conversion, and do not add another clock
+        /// multiplier at call sites. Rat movement, animation, and action timers
+        /// use the separate RuntimeSimulationSpeed multiplier exactly once.
         /// </summary>
         public static double SimulationMillisecondsPerRealMillisecond(float speed)
         {
-            return (BaseGameMillisecondsPerRealSecond / 1000d) * NormalizeSpeed(speed);
+            switch ((int)NormalizeSpeed(speed))
+            {
+                case 2:
+                    return 60d * 60d;
+                case 3:
+                    return 24d * 60d * 60d;
+                default:
+                    return 60d;
+            }
         }
 
         public static double SimulationMillisecondsPerRealSecond(float speed)
@@ -130,7 +237,7 @@ namespace RatHabitat
 
         public static double GameHoursPerRealSecond(float speed)
         {
-            return NormalizeSpeed(speed);
+            return SimulationMillisecondsPerRealSecond(speed) / GameConfig.GameDayMs * 24d;
         }
 
         public static double RealSecondsPerGameHour(float speed)

@@ -132,7 +132,7 @@ namespace RatHabitat
         public float BaseWorldMovementSpeed { get { return movementSpeed; } }
         public float TargetWorldMovementSpeed
         {
-            get { return movementSpeed * GrowthSystem.RuntimeSimulationSpeed; }
+            get { return movementSpeed * GrowthSystem.RuntimeSimulationMultiplier; }
         }
         public float ActualWorldMovementSpeed { get { return lastActualWorldMovementSpeed; } }
 
@@ -145,18 +145,20 @@ namespace RatHabitat
                     candidate.rat.stage == RatStage.Pinkie) continue;
 
                 return string.Format(
-                "Rat {0}: simulation {1:0.#}x | clock {4:0.###} real s/game h | actual {2:0.00} u/s | target {3:0.00} u/s | movement/animation/actions=simulation delta",
+                "Rat {0}: speed {1:0.#}x | movement multiplier {5:0.#}x | clock {4:0.###} real s/game h | actual {2:0.00} u/s | target {3:0.00} u/s | movement/animation/actions=simulation delta",
                 ColonyFactory.DisplayName(candidate.rat),
                     GrowthSystem.RuntimeSimulationSpeed,
                     candidate.ActualWorldMovementSpeed,
                     candidate.TargetWorldMovementSpeed,
-                    GrowthSystem.RealSecondsPerGameHour(GrowthSystem.RuntimeSimulationSpeed));
+                    GrowthSystem.RealSecondsPerGameHour(GrowthSystem.RuntimeSimulationSpeed),
+                    GrowthSystem.RuntimeSimulationMultiplier);
             }
 
             return string.Format(
-                "No moving rat sampled | simulation {0:0.#}x | clock {1:0.###} real s/game h | movement/animation/actions=simulation delta",
+                "No moving rat sampled | speed {0:0.#}x | movement multiplier {2:0.#}x | clock {1:0.###} real s/game h | movement/animation/actions=simulation delta",
                 GrowthSystem.RuntimeSimulationSpeed,
-                GrowthSystem.RealSecondsPerGameHour(GrowthSystem.RuntimeSimulationSpeed));
+                GrowthSystem.RealSecondsPerGameHour(GrowthSystem.RuntimeSimulationSpeed),
+                GrowthSystem.RuntimeSimulationMultiplier);
         }
 
         /// <summary>
@@ -278,7 +280,7 @@ namespace RatHabitat
                 diagnosticsPreviousPosition = transform.position;
                 diagnosticsHavePreviousPosition = true;
                 lastActualWorldMovementSpeed = 0f;
-                if (animator != null) animator.speed = GrowthSystem.RuntimeSimulationSpeed;
+                if (animator != null) animator.speed = GrowthSystem.RuntimeAnimationPlaybackMultiplier;
                 // Skip the initial stationary hold so new adults begin with
                 // the configured movement behavior.
                 if (rat.nursing && EnclosureSystem.HasNest(rat.enclosure)) BeginCaregivingRest();
@@ -292,7 +294,7 @@ namespace RatHabitat
                 nursingInteractionRemaining = 0f;
                 nursingCareRestActive = false;
                 deathPoseHeld = false;
-                if (animator != null) animator.speed = GrowthSystem.RuntimeSimulationSpeed;
+                if (animator != null) animator.speed = GrowthSystem.RuntimeAnimationPlaybackMultiplier;
                 if (rat.nursing && EnclosureSystem.HasNest(rat.enclosure)) BeginCaregivingRest();
                 else EnterState(RatBehaviorState.Idle, NextIdleDuration(0.8f, 1.8f));
             }
@@ -516,7 +518,7 @@ namespace RatHabitat
             if (!configured || state == RatBehaviorState.Dying) return;
             currentTarget = null;
             deathPoseHeld = false;
-            if (animator != null) animator.speed = GrowthSystem.RuntimeSimulationSpeed;
+            if (animator != null) animator.speed = GrowthSystem.RuntimeAnimationPlaybackMultiplier;
             EnterState(RatBehaviorState.Dying, 0.75f);
         }
 
@@ -531,7 +533,11 @@ namespace RatHabitat
             }
 
             float deltaTime = GrowthSystem.SimulationBehaviorDeltaSeconds(Time.unscaledDeltaTime);
-            behaviorClockSeconds += deltaTime;
+            int simulationSteps = GrowthSystem.BeginBehaviorUpdate(deltaTime);
+            float stepDeltaTime = simulationSteps <= 0 ? 0f : deltaTime / simulationSteps;
+            float visualMovementBudget = pairingApproachActive || nursingInteractionActive || nursingCareRestActive
+                ? GrowthSystem.MaximumFastRouteMovementUnitsPerFrame
+                : GrowthSystem.MaximumVisualMovementUnitsPerFrame;
             ApplySimulationAnimationSpeed();
 
             if (state == RatBehaviorState.Dying)
@@ -571,38 +577,42 @@ namespace RatHabitat
                 }
             }
 
-            if (pairingApproachActive)
+            for (int simulationStep = 0; simulationStep < simulationSteps; simulationStep++)
             {
-                if (pairingInteractionActive) UpdatePairingInteraction(deltaTime);
-                else UpdatePairingApproach(deltaTime);
-                return;
-            }
+                behaviorClockSeconds += stepDeltaTime;
+                if (pairingApproachActive)
+                {
+                    if (pairingInteractionActive) UpdatePairingInteraction(stepDeltaTime);
+                    else UpdatePairingApproach(stepDeltaTime, ref visualMovementBudget);
+                    continue;
+                }
 
-            UpdateNeeds(deltaTime);
-            stateTimer -= deltaTime;
+                UpdateNeeds(stepDeltaTime);
+                stateTimer -= stepDeltaTime;
 
-            switch (state)
-            {
-                case RatBehaviorState.Idle:
-                    if (stateTimer <= 0f) BeginTravel();
-                    break;
-                case RatBehaviorState.Wander:
-                case RatBehaviorState.WalkToTarget:
-                case RatBehaviorState.Run:
-                    UpdateTravel(deltaTime);
-                    break;
-                case RatBehaviorState.Investigate:
-                    UpdateInvestigation(deltaTime);
-                    break;
-                case RatBehaviorState.Interact:
-                    UpdateInteraction(deltaTime);
-                    break;
-                case RatBehaviorState.Jump:
-                    UpdateJump(deltaTime);
-                    break;
-                case RatBehaviorState.Recover:
-                    if (stateTimer <= 0f) EnterState(RatBehaviorState.Idle, NextIdleDuration(1.2f, 4.2f));
-                    break;
+                switch (state)
+                {
+                    case RatBehaviorState.Idle:
+                        if (stateTimer <= 0f) BeginTravel();
+                        break;
+                    case RatBehaviorState.Wander:
+                    case RatBehaviorState.WalkToTarget:
+                    case RatBehaviorState.Run:
+                        UpdateTravel(stepDeltaTime, ref visualMovementBudget);
+                        break;
+                    case RatBehaviorState.Investigate:
+                        UpdateInvestigation(stepDeltaTime);
+                        break;
+                    case RatBehaviorState.Interact:
+                        UpdateInteraction(stepDeltaTime);
+                        break;
+                    case RatBehaviorState.Jump:
+                        UpdateJump(stepDeltaTime);
+                        break;
+                    case RatBehaviorState.Recover:
+                        if (stateTimer <= 0f) EnterState(RatBehaviorState.Idle, NextIdleDuration(1.2f, 4.2f));
+                        break;
+                }
             }
         }
 
@@ -834,8 +844,11 @@ namespace RatHabitat
             }
         }
 
-        private void UpdateTravel(float deltaTime)
+        private void UpdateTravel(float deltaTime, ref float visualMovementBudget)
         {
+            if (pairingApproachActive || nursingInteractionActive || nursingCareRestActive)
+                visualMovementBudget = Mathf.Max(
+                    visualMovementBudget, GrowthSystem.MaximumFastRouteMovementUnitsPerFrame);
             travelTimer += deltaTime;
             Vector3 toTarget = targetPosition - transform.position;
             toTarget.y = 0f;
@@ -884,50 +897,59 @@ namespace RatHabitat
                 // write, but clamp the step so a 2x/3x frame can never jump
                 // past the destination and start oscillating around it.
                 float step = GrowthSystem.SimulationMovementStep(
-                    movementSpeed, Time.unscaledDeltaTime);
+                    movementSpeed, deltaTime, ref visualMovementBudget);
                 Vector3 nextPosition = Vector3.MoveTowards(
                     transform.position,
                     targetPosition,
                     step);
-                transform.position = MoveTowardAvoidingNest(transform.position, nextPosition);
+                transform.position = MoveTowardAvoidingNest(transform.position, nextPosition, step);
             }
-            ResolveSpacing();
+            ResolveSpacing(deltaTime);
         }
 
-        private void UpdatePairingApproach(float deltaTime)
+        private void UpdatePairingApproach(float deltaTime, ref float visualMovementBudget)
         {
             FacePairingPoint(deltaTime);
-            Vector3 currentDestination = pairingRouteWaypointIndex < pairingRouteWaypoints.Count
-                ? pairingRouteWaypoints[pairingRouteWaypointIndex]
-                : pairingApproachTarget;
-            Vector3 toTarget = currentDestination - transform.position;
-            toTarget.y = 0f;
-            if (toTarget.sqrMagnitude <= ArrivalDistance * ArrivalDistance)
+            float remainingStep = GrowthSystem.SimulationMovementStep(
+                movementSpeed, deltaTime, ref visualMovementBudget);
+            int waypointGuard = 0;
+            while (remainingStep > 0.0001f && !pairingApproachArrived && waypointGuard++ < 8)
             {
-                if (pairingRouteWaypointIndex < pairingRouteWaypoints.Count)
+                Vector3 currentDestination = pairingRouteWaypointIndex < pairingRouteWaypoints.Count
+                    ? pairingRouteWaypoints[pairingRouteWaypointIndex]
+                    : pairingApproachTarget;
+                Vector3 toTarget = currentDestination - transform.position;
+                toTarget.y = 0f;
+                float distance = toTarget.magnitude;
+                if (distance <= ArrivalDistance)
                 {
-                    pairingRouteWaypointIndex++;
-                    return;
+                    if (pairingRouteWaypointIndex < pairingRouteWaypoints.Count)
+                    {
+                        pairingRouteWaypointIndex++;
+                        continue;
+                    }
+                    transform.position = ClampToAssignedEnclosure(new Vector3(
+                        pairingApproachTarget.x,
+                        transform.position.y,
+                        pairingApproachTarget.z));
+                    pairingApproachArrived = true;
+                    break;
                 }
-                transform.position = ClampToAssignedEnclosure(new Vector3(
-                    pairingApproachTarget.x,
-                    transform.position.y,
-                    pairingApproachTarget.z));
-                pairingApproachArrived = true;
-                return;
-            }
 
-            Vector3 direction = toTarget.normalized;
-            // Pairing routes use the same centralized simulation delta as
-            // ambient travel. Clamp each step to the active waypoint so an
-            // immediate speed change cannot overshoot the face-to-face point.
-            float step = GrowthSystem.SimulationMovementStep(
-                movementSpeed, Time.unscaledDeltaTime);
-            Vector3 nextPosition = Vector3.MoveTowards(
-                transform.position,
-                currentDestination,
-                step);
-            transform.position = MoveTowardAvoidingNest(transform.position, nextPosition);
+                Vector3 before = transform.position;
+                Vector3 nextPosition = Vector3.MoveTowards(
+                    transform.position,
+                    currentDestination,
+                    remainingStep);
+                transform.position = MoveTowardAvoidingNest(transform.position, nextPosition, remainingStep);
+                float moved = Vector3.Distance(before, transform.position);
+                remainingStep -= moved;
+
+                // A nest detour or enclosure clamp consumed this movement
+                // budget without reaching the waypoint. Continue next frame;
+                // do not repeatedly issue the same route in a tight loop.
+                if (moved <= 0.0001f || moved + ArrivalDistance < distance) break;
+            }
         }
 
         /// <summary>
@@ -1103,7 +1125,7 @@ namespace RatHabitat
             }
         }
 
-        private void ResolveSpacing()
+        private void ResolveSpacing(float deltaTime)
         {
             if (rat == null || rat.stage == RatStage.Pinkie) return;
             if (pairingApproachActive || nursingInteractionActive) return;
@@ -1119,8 +1141,7 @@ namespace RatHabitat
                 float distance = offset.magnitude;
                 if (distance <= 0.001f || distance >= minimum) continue;
                 if (other.rat.enclosure != rat.enclosure) continue;
-                float spacingDelta = GrowthSystem.SimulationMovementDeltaSeconds(Time.unscaledDeltaTime);
-                float correction = (minimum - distance) * Mathf.Clamp01(spacingDelta * 5f);
+                float correction = (minimum - distance) * Mathf.Clamp01(deltaTime * 5f);
                 transform.position = ClampToAssignedEnclosure(
                     transform.position + offset.normalized * correction);
             }
@@ -1221,7 +1242,7 @@ namespace RatHabitat
                 state == RatBehaviorState.WalkToTarget
                 ? WalkAnimationPlaybackScale
                 : 1f;
-            animator.speed = statePlaybackScale * GrowthSystem.RuntimeSimulationSpeed;
+            animator.speed = statePlaybackScale * GrowthSystem.RuntimeAnimationPlaybackMultiplier;
         }
 
         private void PlayAvailableMotion(string preferredState, float blendSeconds, float playbackSpeed, params string[] fallbacks)
@@ -1242,7 +1263,7 @@ namespace RatHabitat
                 int shortHash = Animator.StringToHash(name);
                 if (animator.HasState(0, fullHash))
                 {
-                    animator.speed = playbackSpeed * GrowthSystem.RuntimeSimulationSpeed;
+                    animator.speed = playbackSpeed * GrowthSystem.RuntimeAnimationPlaybackMultiplier;
                     // Movement clips must always begin at their first frame so
                     // source-range changes remain observable in gameplay.
                     animator.CrossFadeInFixedTime(fullHash, blendSeconds, 0, 0f);
@@ -1251,7 +1272,7 @@ namespace RatHabitat
                 }
                 if (animator.HasState(0, shortHash))
                 {
-                    animator.speed = playbackSpeed * GrowthSystem.RuntimeSimulationSpeed;
+                    animator.speed = playbackSpeed * GrowthSystem.RuntimeAnimationPlaybackMultiplier;
                     animator.CrossFadeInFixedTime(shortHash, blendSeconds, 0, 0f);
                     LogAnimationStart(name, 0f);
                     return;
@@ -1279,14 +1300,14 @@ namespace RatHabitat
                 int shortHash = Animator.StringToHash(name);
                 if (animator.HasState(0, fullHash))
                 {
-                    animator.speed = GrowthSystem.RuntimeSimulationSpeed;
+                    animator.speed = GrowthSystem.RuntimeAnimationPlaybackMultiplier;
                     animator.Play(fullHash, 0, 0f);
                     LogAnimationStart(name, 0f);
                     return;
                 }
                 if (animator.HasState(0, shortHash))
                 {
-                    animator.speed = GrowthSystem.RuntimeSimulationSpeed;
+                    animator.speed = GrowthSystem.RuntimeAnimationPlaybackMultiplier;
                     animator.Play(shortHash, 0, 0f);
                     LogAnimationStart(name, 0f);
                     return;
@@ -1399,7 +1420,7 @@ namespace RatHabitat
         /// the nest, the rat receives a short waypoint around the nearest side
         /// and continues walking there naturally.
         /// </summary>
-        private Vector3 MoveTowardAvoidingNest(Vector3 current, Vector3 desired)
+        private Vector3 MoveTowardAvoidingNest(Vector3 current, Vector3 desired, float movementStep)
         {
             RatEnclosure enclosure = rat == null ? RatEnclosure.FemaleColony : rat.enclosure;
             if (nursingInteractionActive || nursingCareRestActive)
@@ -1425,9 +1446,7 @@ namespace RatHabitat
                     toWaypoint.y = 0f;
                 }
                 if (toWaypoint.sqrMagnitude <= 0.0001f) return ClampToAssignedEnclosure(current);
-                float detourStep = GrowthSystem.SimulationMovementStep(
-                    movementSpeed, Time.unscaledDeltaTime);
-                return ClampToAssignedEnclosure(current + toWaypoint.normalized * Mathf.Min(detourStep, toWaypoint.magnitude));
+                return ClampToAssignedEnclosure(current + toWaypoint.normalized * Mathf.Min(movementStep, toWaypoint.magnitude));
             }
 
             bool currentInside = EnclosureSystem.IsInsideAdultNestExclusion(enclosure, current, 0.04f);
@@ -1463,9 +1482,7 @@ namespace RatHabitat
             Vector3 toFirstWaypoint = firstWaypoint - current;
             toFirstWaypoint.y = 0f;
             if (toFirstWaypoint.sqrMagnitude <= 0.0001f) return ClampToAssignedEnclosure(current);
-            float step = GrowthSystem.SimulationMovementStep(
-                movementSpeed, Time.unscaledDeltaTime);
-            return ClampToAssignedEnclosure(current + toFirstWaypoint.normalized * Mathf.Min(step, toFirstWaypoint.magnitude));
+            return ClampToAssignedEnclosure(current + toFirstWaypoint.normalized * Mathf.Min(movementStep, toFirstWaypoint.magnitude));
         }
 
         private bool TryBuildNestDetour(RatEnclosure enclosure, Vector3 start, Vector3 end)

@@ -319,9 +319,13 @@ namespace RatHabitat
         {
             get
             {
-                return "Clock: " + GrowthSystem.GameHoursPerRealSecond(SimulationSpeed).ToString("0.#") +
-                    " game h/real s (" + GrowthSystem.RealSecondsPerGameHour(SimulationSpeed).ToString("0.###") +
-                    " real s/game h) | movement/animation/actions: " + SimulationSpeed.ToString("0.#") + "x | " +
+                return "Speed: " + SimulationSpeed.ToString("0.#") + "x | clock: " +
+                    GrowthSystem.GameSecondsPerRealSecond(SimulationSpeed).ToString("0.###") +
+                    " game s/real s (" + GrowthSystem.RealSecondsPerGameHour(SimulationSpeed).ToString("0.###") +
+                    " real s/game h) | rat movement multiplier: " +
+                    GrowthSystem.RuntimeSimulationMultiplier.ToString("0.#") + "x | steps: " +
+                    GrowthSystem.LastSimulationStepCount + " | compressed visual actions: " +
+                    GrowthSystem.LastCompressedVisualActionCount + " | " +
                     "Maintenance passes: " + maintenancePassCount +
                     "  last " + lastMaintenanceDurationMs.ToString("0.00") + " ms" +
                     "  UI " + lastUiRefreshDurationMs.ToString("0.00") + " ms" +
@@ -1108,7 +1112,17 @@ namespace RatHabitat
 
                 if (pairingApproach.phaseTimeout <= 0f)
                 {
-                    CancelPairingApproach("the approach timed out");
+                    // At 1,440x one rendered frame can represent more than
+                    // the authored watchdog duration. If both roots are still
+                    // making route progress, extend the watchdog rather than
+                    // cancelling a valid approach solely because the visual
+                    // movement cap spreads it across a few frames. The
+                    // simulation-time stall detector above still cancels a
+                    // genuinely blocked route.
+                    if (maleMoved || femaleMoved)
+                        pairingApproach.phaseTimeout = PairingApproachTimeoutSeconds;
+                    else
+                        CancelPairingApproach("the approach timed out");
                 }
                 return;
             }

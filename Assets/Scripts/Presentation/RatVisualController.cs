@@ -229,7 +229,10 @@ namespace RatHabitat
             float elapsed = 0f;
             while (elapsed < duration)
             {
-                elapsed += Time.unscaledDeltaTime;
+                // Stage transitions are presentation-only, but their duration
+                // still follows the same authoritative behavior clock so a
+                // fast-forwarded growth step does not leave the visual behind.
+                elapsed += GrowthSystem.SimulationBehaviorDeltaSeconds(Time.unscaledDeltaTime);
                 float progress = Mathf.Clamp01(elapsed / Mathf.Max(0.01f, duration));
                 float eased = Mathf.SmoothStep(0f, 1f, progress);
                 float nextStageScale = Mathf.Lerp(fromScale, toScale, eased);

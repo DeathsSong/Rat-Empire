@@ -105,10 +105,7 @@ namespace RatHabitat
         public static float BehaviorSecondsFromGameMilliseconds(long gameMilliseconds)
         {
             if (gameMilliseconds <= 0L) return 0.75f;
-            float speed = Mathf.Max(1f, GrowthSystem.RuntimeSimulationSpeed);
-            double gameMillisecondsPerBehaviorSecond =
-                GrowthSystem.SimulationMillisecondsPerRealMillisecond(speed) * 1000d / speed;
-            return Mathf.Max(0.75f, (float)(gameMilliseconds / gameMillisecondsPerBehaviorSecond));
+            return Mathf.Max(0.75f, (float)(gameMilliseconds / GrowthSystem.GameMillisecondsPerBehaviorSecond));
         }
 
         /// <summary>
@@ -268,12 +265,8 @@ namespace RatHabitat
 
         private static long BehaviorSecondsToGameMilliseconds(float behaviorSeconds)
         {
-            float speed = Mathf.Max(1f, GrowthSystem.RuntimeSimulationSpeed);
-            double gameMillisecondsPerRealMillisecond =
-                GrowthSystem.SimulationMillisecondsPerRealMillisecond(speed);
-            double gameMillisecondsPerBehaviorSecond =
-                gameMillisecondsPerRealMillisecond * 1000d / speed;
-            return Math.Max(1L, (long)Math.Round(behaviorSeconds * gameMillisecondsPerBehaviorSecond));
+            return Math.Max(1L, (long)Math.Round(
+                behaviorSeconds * GrowthSystem.GameMillisecondsPerBehaviorSecond));
         }
 
         private static InteractionDefinition FindDefinition(string interactionId)
