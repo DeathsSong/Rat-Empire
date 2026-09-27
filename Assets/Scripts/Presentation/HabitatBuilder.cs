@@ -237,6 +237,12 @@ namespace RatHabitat
                 Mathf.Max(0.1f, placedBounds.size.x),
                 Mathf.Max(0.1f, placedBounds.size.y),
                 Mathf.Max(0.1f, placedBounds.size.z));
+            // The imported Pairing nest has one gameplay footprint above and
+            // one stable selectable marker on that footprint. The marker lets
+            // a tap focus the camera without selecting a rat or adding a
+            // persistent visual highlight.
+            var nestSelectable = collisionRoot.AddComponent<SelectableEntity>();
+            nestSelectable.Configure(SelectableKind.HabitatObject, "pairing_nest", "Pairing Nest");
             int ignoreRaycastLayer = LayerMask.NameToLayer("Ignore Raycast");
             if (ignoreRaycastLayer >= 0) collisionRoot.layer = ignoreRaycastLayer;
         }

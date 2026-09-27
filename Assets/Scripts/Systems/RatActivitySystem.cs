@@ -138,7 +138,10 @@ namespace RatHabitat
             {
                 DedicatedBreedingSessionData session = BreedingSystem.FindActiveDedicatedSession(save, rat.id);
                 if (session != null) return "Breeding";
-                if (BreedingSystem.FindPendingPregnancyForMother(save, rat.id) != null) return "Pregnant";
+                PregnancyData pregnancy = BreedingSystem.FindPendingPregnancyForMother(save, rat.id);
+                if (pregnancy != null)
+                    return pregnancy.birthApproachStarted && pregnancy.dueAt <= gameTimeMs
+                        ? "Going to nest" : "Pregnant";
             }
             if (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing)
             {
@@ -171,7 +174,10 @@ namespace RatHabitat
             if (save != null)
             {
                 if (BreedingSystem.FindActiveDedicatedSession(save, rat.id) != null) return "breeding";
-                if (BreedingSystem.FindPendingPregnancyForMother(save, rat.id) != null) return "pregnant";
+                PregnancyData pregnancy = BreedingSystem.FindPendingPregnancyForMother(save, rat.id);
+                if (pregnancy != null)
+                    return pregnancy.birthApproachStarted && pregnancy.dueAt <= gameTimeMs
+                        ? "birth-approach" : "pregnant";
             }
             if (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing) return "nursing";
             if (rat.reproductiveState == ReproductiveState.Recovery) return "recovery";
@@ -200,19 +206,23 @@ namespace RatHabitat
                     key = "breeding";
                     label = "Breeding";
                 }
-                else if (BreedingSystem.FindPendingPregnancyForMother(save, rat.id) != null)
+                else
                 {
-                    key = "pregnant";
-                    label = "Pregnant";
+                    PregnancyData pregnancy = BreedingSystem.FindPendingPregnancyForMother(save, rat.id);
+                    if (pregnancy != null)
+                    {
+                        key = pregnancy.birthApproachStarted && pregnancy.dueAt <= gameTimeMs
+                            ? "birth-approach" : "pregnant";
+                        label = key == "birth-approach" ? "Going to nest" : "Pregnant";
+                    }
                 }
-                else if (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing)
+                if (key == null && (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing))
                 {
                     key = "nursing";
                     label = rat.nursingInteractionUntil > gameTimeMs
-                        ? "Caring for pinkies"
-                        : "Nursing";
+                        ? "Caring for pinkies" : "Nursing";
                 }
-                else if (rat.reproductiveState == ReproductiveState.Recovery)
+                if (key == null && rat.reproductiveState == ReproductiveState.Recovery)
                 {
                     key = "recovery";
                     label = "Recovering";

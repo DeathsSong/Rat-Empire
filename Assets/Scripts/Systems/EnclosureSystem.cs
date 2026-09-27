@@ -24,6 +24,11 @@ namespace RatHabitat
         public const float PairingNestAdultExclusionRadiusX = 3.32f;
         public const float PairingNestAdultExclusionRadiusZ = 2.46f;
         private const float NestAvoidancePadding = 0.18f;
+        // Caregiving uses a smaller inset than the adult exclusion footprint.
+        // The inset leaves room for the mother's body and tail without
+        // selecting destinations on the nest's outer wall or front edge.
+        private const float NestCaregiverInset = 0.56f;
+        private const float NestCaregiverBodyMargin = 0.42f;
         private static Bounds pairingNestRendererBounds;
         private static bool pairingNestRendererBoundsRegistered;
 
@@ -342,8 +347,11 @@ namespace RatHabitat
                     (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing))
                 {
                     rat.nursing = false;
-                    rat.recoveryUntil = Math.Max(rat.recoveryUntil,
-                        gameTime + (long)(GameConfig.RecoveryDays * GameConfig.GameDayMs));
+                    // Birth owns the recovery deadline. Do not start a new
+                    // recovery period merely because the last pinkie grew or
+                    // left the nest; weaning and reproductive recovery are
+                    // independent timers.
+                    rat.recoveryUntil = Math.Max(rat.recoveryUntil, gameTime);
                     rat.reproductiveState = ReproductiveState.Recovery;
                     changed = true;
                 }
@@ -646,6 +654,52 @@ namespace RatHabitat
             GetNestExclusionRadii(enclosure, out nest, out radiusX, out radiusZ);
             return ClampToEnclosure(enclosure,
                 nest + Vector3.right * (radiusX + 0.08f), 0.48f);
+        }
+
+        /// <summary>
+        /// Returns whether a position is inside the smaller mother-only
+        /// caregiving zone. Pinkies use the full nest surface; adults use this
+        /// inset only during an authoritative birth or care interaction.
+        /// </summary>
+        public static bool IsInsideNestCaregiverZone(RatEnclosure enclosure, Vector3 position,
+            float bodyMargin = NestCaregiverBodyMargin)
+        {
+            if (!HasNest(enclosure)) return false;
+            Vector3 center;
+            float radiusX;
+            float radiusZ;
+            GetNestExclusionRadii(enclosure, out center, out radiusX, out radiusZ);
+            float inset = Mathf.Max(0.12f, bodyMargin) + NestCaregiverInset;
+            float innerX = Mathf.Max(0.20f, radiusX - inset);
+            float innerZ = Mathf.Max(0.20f, radiusZ - inset);
+            return Mathf.Abs(position.x - center.x) <= innerX &&
+                Mathf.Abs(position.z - center.z) <= innerZ;
+        }
+
+        /// <summary>
+        /// Projects a requested care destination into the safe inner nest
+        /// zone. This chooses a target only; the caller still reaches it via
+        /// normal movement and never teleports the mother.
+        /// </summary>
+        public static Vector3 ClampToNestCaregiverZone(RatEnclosure enclosure, Vector3 position,
+            float bodyMargin = NestCaregiverBodyMargin)
+        {
+            if (!HasNest(enclosure)) return ClampToEnclosure(enclosure, position);
+            Vector3 center;
+            float radiusX;
+            float radiusZ;
+            GetNestExclusionRadii(enclosure, out center, out radiusX, out radiusZ);
+            float inset = Mathf.Max(0.12f, bodyMargin) + NestCaregiverInset;
+            float innerX = Mathf.Max(0.20f, radiusX - inset);
+            float innerZ = Mathf.Max(0.20f, radiusZ - inset);
+            position.x = Mathf.Clamp(position.x, center.x - innerX, center.x + innerX);
+            position.z = Mathf.Clamp(position.z, center.z - innerZ, center.z + innerZ);
+            return ClampToEnclosureAllowNest(enclosure, position, 0.42f);
+        }
+
+        public static Vector3 GetNestCaregiverPosition(RatEnclosure enclosure)
+        {
+            return ClampToNestCaregiverZone(enclosure, GetNestPosition(enclosure));
         }
 
         public static Vector3 GetSpawnPosition(RatEnclosure enclosure, int slot)

@@ -151,6 +151,7 @@ namespace RatHabitat
         private float ratProfileScrollNormalized = 1f;
         private bool profileScrollResetRequested;
         private bool profileRefreshDeferred;
+        private bool immediateRefreshRequested;
         private string lastProfileStructureSignature;
         private string liveProfileRatId;
         private Text liveProfileActivityText;
@@ -186,6 +187,9 @@ namespace RatHabitat
             Fertility,
             Sex,
             Pregnancy,
+            Breeding,
+            // Retained only so older in-memory callers can still compile. The
+            // visible Generation sort was renamed to Breeding.
             Generation,
         }
 
@@ -199,6 +203,7 @@ namespace RatHabitat
         public void Initialize(GameBootstrap owner)
         {
             game = owner;
+            LoadRosterPreferences();
             portraitPreview = GetComponent<RatPortraitPreview>();
             if (portraitPreview == null) portraitPreview = gameObject.AddComponent<RatPortraitPreview>();
             portraitPreview.Configure(game.RatVisualFactory);
@@ -541,6 +546,8 @@ namespace RatHabitat
         public void Refresh(bool force)
         {
             if (!ready || game == null) return;
+            bool immediateRefresh = immediateRefreshRequested;
+            immediateRefreshRequested = false;
             RefreshHeader();
             if (game.BreedingOpen && activeMainPanel == MainPanel.None)
             {
@@ -573,7 +580,7 @@ namespace RatHabitat
                 RefreshTopNavigationState();
                 return;
             }
-            if (sameProfile && IsRatProfileScrollMoving())
+            if (sameProfile && IsRatProfileScrollMoving() && !immediateRefresh)
             {
                 profileRefreshDeferred = true;
                 return;
@@ -626,6 +633,18 @@ namespace RatHabitat
                 ratProfileScroll.verticalNormalizedPosition = ratProfileScrollNormalized;
             RefreshLiveRatProfile();
             RefreshTopNavigationState();
+        }
+
+        /// <summary>
+        /// Performs a structural UI refresh immediately, even when the action
+        /// was tapped inside the profile ScrollRect. Destructive-action
+        /// confirmations must replace their button during the same pointer
+        /// gesture instead of being mistaken for a profile drag.
+        /// </summary>
+        public void RefreshImmediate()
+        {
+            immediateRefreshRequested = true;
+            Refresh(true);
         }
 
         /// <summary>
@@ -2332,8 +2351,7 @@ namespace RatHabitat
 
             if (inlineSaleConfirmation)
             {
-                AddText(info, "Warnings: " + game.SaleWarningsFor(rat), 11,
-                    new Color(1f, 0.72f, 0.38f), TextAnchor.UpperLeft);
+                AddSaleWarningsIfAny(info, rat, 11);
                 AddInlineSaleControls(card, actionWidth);
             }
             else
@@ -3001,8 +3019,7 @@ namespace RatHabitat
             layout.childForceExpandHeight = false;
             AddText(confirmation, "Are you sure? Sell " + ColonyFactory.DisplayName(rat) + " for $" + game.SellValue(rat) + "?", 13,
                 new Color(1f, 0.80f, 0.42f), TextAnchor.UpperLeft);
-            AddText(confirmation, "Warnings: " + game.SaleWarningsFor(rat), 12,
-                new Color(1f, 0.72f, 0.38f), TextAnchor.UpperLeft);
+            AddSaleWarningsIfAny(confirmation, rat, 12);
             var actions = CreateRect("Profile Sale Confirmation Actions", confirmation);
             var actionLayout = actions.gameObject.AddComponent<HorizontalLayoutGroup>();
             actionLayout.spacing = 5f;
@@ -3014,6 +3031,15 @@ namespace RatHabitat
                 new Color(0.20f, 0.46f, 0.29f), 42f);
             AddButtonTo(actions, "Cancel", true, game.CancelSellSelectedRat,
                 new Color(0.20f, 0.30f, 0.34f), 42f);
+        }
+
+        private void AddSaleWarningsIfAny(Transform parent, RatData rat, int fontSize)
+        {
+            if (parent == null || game == null || rat == null) return;
+            string warnings = game.SaleWarningsFor(rat);
+            if (string.IsNullOrEmpty(warnings) || warnings == "None") return;
+            AddTextTo(parent, "Warnings: " + warnings + ".", fontSize,
+                new Color(1f, 0.72f, 0.38f), TextAnchor.UpperLeft);
         }
 
         private void AddObjectProfile(HabitatObjectData selected)
@@ -3597,6 +3623,7 @@ namespace RatHabitat
         {
             if (rosterSexFilter == filter) return;
             rosterSexFilter = filter;
+            PersistRosterPreferences();
             if (game != null) game.DeactivateMultipleSelection();
             if (!string.IsNullOrEmpty(expandedMyRatsId))
             {
@@ -3604,6 +3631,56 @@ namespace RatHabitat
                 if (!IsRosterRatVisible(expanded)) expandedMyRatsId = null;
             }
             Refresh(true);
+        }
+
+        private void LoadRosterPreferences()
+        {
+            rosterSortField = RosterSortField.Name;
+            rosterSortAscending = true;
+            rosterSexFilter = RosterSexFilter.All;
+            if (game == null || game.Save == null) return;
+
+            string savedField = game.Save.myRatsSortField ?? string.Empty;
+            switch (savedField.Trim().ToLowerInvariant())
+            {
+                case "age": rosterSortField = RosterSortField.Age; break;
+                case "size": rosterSortField = RosterSortField.Size; break;
+                case "health": rosterSortField = RosterSortField.Health; break;
+                case "fertility": rosterSortField = RosterSortField.Fertility; break;
+                case "sex": rosterSortField = RosterSortField.Sex; break;
+                case "pregnancy": rosterSortField = RosterSortField.Pregnancy; break;
+                case "breeding":
+                case "generation":
+                case "fertilitynextopportunity":
+                case "fertilityopportunity":
+                case "fertility (next opportunity)":
+                case "next opportunity":
+                    rosterSortField = RosterSortField.Breeding;
+                    rosterSortAscending = true;
+                    break;
+                default: rosterSortField = RosterSortField.Name; break;
+            }
+
+            if (rosterSortField != RosterSortField.Breeding && rosterSortField != RosterSortField.Pregnancy)
+                rosterSortAscending = game.Save.myRatsSortAscending;
+
+            switch ((game.Save.myRatsSexFilter ?? string.Empty).Trim().ToLowerInvariant())
+            {
+                case "males": rosterSexFilter = RosterSexFilter.Males; break;
+                case "females": rosterSexFilter = RosterSexFilter.Females; break;
+                default: rosterSexFilter = RosterSexFilter.All; break;
+            }
+        }
+
+        private void PersistRosterPreferences()
+        {
+            if (game == null || game.Save == null) return;
+            game.Save.myRatsSortField = rosterSortField == RosterSortField.Generation
+                ? "Breeding"
+                : rosterSortField.ToString();
+            game.Save.myRatsSortAscending = rosterSortAscending;
+            game.Save.myRatsSexFilter = rosterSexFilter.ToString();
+            SaveSystem.Save(game.Save);
         }
 
         private string RosterSexFilterLabel()
@@ -3642,7 +3719,7 @@ namespace RatHabitat
                 RosterSortField.Fertility,
                 RosterSortField.Sex,
                 RosterSortField.Pregnancy,
-                RosterSortField.Generation,
+                RosterSortField.Breeding,
             };
             for (int index = 0; index < fields.Length; index += 4)
             {
@@ -3658,7 +3735,7 @@ namespace RatHabitat
                     RosterSortField field = fields[index + offset];
                     bool active = rosterSortField == field;
                     Color color = active ? new Color(0.3f, 0.48f, 0.32f) : new Color(0.14f, 0.25f, 0.24f);
-                    bool fixedDirection = field == RosterSortField.Fertility || field == RosterSortField.Pregnancy;
+                    bool fixedDirection = field == RosterSortField.Breeding || field == RosterSortField.Pregnancy;
                     string direction = active && !fixedDirection
                         ? (rosterSortAscending ? " ↑" : " ↓")
                         : string.Empty;
@@ -3670,7 +3747,7 @@ namespace RatHabitat
 
         private void SetRosterSort(RosterSortField field)
         {
-            if (field == RosterSortField.Fertility || field == RosterSortField.Pregnancy)
+            if (field == RosterSortField.Breeding || field == RosterSortField.Pregnancy)
             {
                 rosterSortField = field;
                 rosterSortAscending = true;
@@ -3681,13 +3758,14 @@ namespace RatHabitat
                 rosterSortField = field;
                 rosterSortAscending = true;
             }
+            PersistRosterPreferences();
             Refresh(true);
         }
 
         private string RosterSortLabel()
         {
             if (rosterSortField == RosterSortField.Pregnancy) return "Pregnancy (soonest first)";
-            if (rosterSortField == RosterSortField.Fertility) return "Fertility (next opportunity)";
+            if (rosterSortField == RosterSortField.Breeding) return "Breeding (next opportunity)";
             return RosterFieldLabel(rosterSortField) + (rosterSortAscending ? " ascending" : " descending");
         }
 
@@ -3701,6 +3779,7 @@ namespace RatHabitat
                 case RosterSortField.Fertility: return "Fertility";
                 case RosterSortField.Sex: return "Sex";
                 case RosterSortField.Pregnancy: return "Pregnancy";
+                case RosterSortField.Breeding: return "Breeding";
                 case RosterSortField.Generation: return "Generation";
                 default: return "Name";
             }
@@ -3715,11 +3794,7 @@ namespace RatHabitat
                 case RosterSortField.Size: result = TraitValue(first, 0).CompareTo(TraitValue(second, 0)); break;
                 case RosterSortField.Health: result = TraitValue(first, 1).CompareTo(TraitValue(second, 1)); break;
                 case RosterSortField.Fertility:
-                    result = BreedingSystem.CompareFertilitySort(
-                        game == null ? null : game.Save,
-                        first,
-                        second,
-                        game == null ? 0L : game.GameTime);
+                    result = BreedingSystem.CompareFertilityStatSort(first, second, rosterSortAscending);
                     break;
                 case RosterSortField.Sex: result = first.sex.CompareTo(second.sex); break;
                 case RosterSortField.Pregnancy:
@@ -3728,12 +3803,20 @@ namespace RatHabitat
                         first,
                         second,
                         game == null ? 0L : game.GameTime,
-                        true);
+                         true);
+                    break;
+                case RosterSortField.Breeding:
+                    result = BreedingSystem.CompareBreedingSort(
+                        game == null ? null : game.Save,
+                        first,
+                        second,
+                        game == null ? 0L : game.GameTime);
                     break;
                 case RosterSortField.Generation: result = first.generation.CompareTo(second.generation); break;
                 default: result = string.Compare(first.name, second.name, StringComparison.OrdinalIgnoreCase); break;
             }
             if (!rosterSortAscending && rosterSortField != RosterSortField.Pregnancy &&
+                rosterSortField != RosterSortField.Breeding &&
                 rosterSortField != RosterSortField.Fertility) result = -result;
             if (result != 0) return result;
 
@@ -3756,7 +3839,7 @@ namespace RatHabitat
                     PregnancyData pregnancy = FindPregnancyForFemale(rat);
                     signature.Append(pregnancy == null ? 0L : pregnancy.dueAt);
                 }
-                else if (rosterSortField == RosterSortField.Fertility)
+                else if (rosterSortField == RosterSortField.Breeding)
                 {
                     BreedingSystem.BreedingOpportunitySortInfo opportunity =
                         BreedingSystem.GetBreedingOpportunitySortInfo(game.Save, rat, game.GameTime);
@@ -3764,6 +3847,10 @@ namespace RatHabitat
                         .Append(opportunity.upcoming ? '1' : '0')
                         .Append(opportunity.nextAvailableAt)
                         .Append(':').Append(opportunity.state);
+                }
+                else if (rosterSortField == RosterSortField.Fertility)
+                {
+                    signature.Append(TraitValue(rat, 2).ToString("R", System.Globalization.CultureInfo.InvariantCulture));
                 }
                 signature.Append(';');
             }
@@ -3774,7 +3861,9 @@ namespace RatHabitat
         {
             if (game == null || game.Save == null || activeMainPanel != MainPanel.MyRats ||
                 ratRosterScroll == null || ratRosterContent == null ||
-                (rosterSortField != RosterSortField.Pregnancy && rosterSortField != RosterSortField.Fertility))
+                (rosterSortField != RosterSortField.Pregnancy &&
+                 rosterSortField != RosterSortField.Breeding &&
+                 rosterSortField != RosterSortField.Fertility))
                 return;
 
             var roster = new List<RatData>();

@@ -96,6 +96,9 @@ namespace RatHabitat
         private bool pairingInteractionComplete;
         private Vector3 pairingApproachTarget;
         private Vector3 pairingFacingPoint;
+        private bool birthApproachActive;
+        private bool birthApproachArrived;
+        private Vector3 birthApproachTarget;
         private readonly List<Vector3> pairingRouteWaypoints = new List<Vector3>();
         private int pairingRouteWaypointIndex;
         private readonly List<Vector3> nestDetourWaypoints = new List<Vector3>();
@@ -128,6 +131,7 @@ namespace RatHabitat
         public RatBehaviorState State { get { return state; } }
         public bool PairingApproachAtTarget { get { return pairingApproachActive && pairingApproachArrived; } }
         public bool PairingInteractionComplete { get { return pairingInteractionActive && pairingInteractionComplete; } }
+        public bool BirthApproachAtNest { get { return birthApproachActive && birthApproachArrived; } }
         public bool NursingInteractionActive { get { return nursingInteractionActive; } }
         public float BaseWorldMovementSpeed { get { return movementSpeed; } }
         public float TargetWorldMovementSpeed
@@ -172,6 +176,7 @@ namespace RatHabitat
             {
                 if (nursingInteractionActive || nursingCareRestActive) return "nursing";
                 if (pairingApproachActive) return "breeding";
+                if (birthApproachActive) return "birth-approach";
                 if (state == RatBehaviorState.Dying) return "deceased";
                 if (currentTarget != null)
                 {
@@ -194,6 +199,7 @@ namespace RatHabitat
             {
                 if (nursingInteractionActive || nursingCareRestActive) return "Caring for pinkies";
                 if (pairingApproachActive) return "Breeding";
+                if (birthApproachActive) return "Going to nest";
                 if (state == RatBehaviorState.Dying) return "Deceased";
                 if (currentTarget != null)
                 {
@@ -305,6 +311,11 @@ namespace RatHabitat
                 // the stable root; reset only this behavior's local target so
                 // it cannot continue toward the previous enclosure.
                 configuredEnclosure = rat.enclosure;
+                if (birthApproachActive)
+                {
+                    birthApproachActive = false;
+                    birthApproachArrived = false;
+                }
                 currentTarget = null;
                 nursingInteractionActive = false;
                 nursingInteractionRemaining = 0f;
@@ -382,6 +393,52 @@ namespace RatHabitat
         }
 
         /// <summary>
+        /// Starts the persisted pre-birth walk. This is intentionally separate
+        /// from pairing courtship: the mother is allowed to cross the nest's
+        /// adult exclusion only for this authoritative birth route.
+        /// </summary>
+        public bool BeginBirthApproach(Vector3 target)
+        {
+            if (!configured || rat == null || rat.sex != RatSex.Female ||
+                rat.stage == RatStage.Pinkie || !EnclosureSystem.HasNest(rat.enclosure) ||
+                pairingApproachActive || nursingInteractionActive) return false;
+
+            birthApproachActive = true;
+            birthApproachArrived = false;
+            birthApproachTarget = EnclosureSystem.ClampToNestCaregiverZone(
+                rat.enclosure, new Vector3(target.x, transform.position.y, target.z));
+            currentTarget = null;
+            stateTimer = 60f;
+            EnterState(RatBehaviorState.WalkToTarget, stateTimer);
+
+            Vector3 horizontal = birthApproachTarget - transform.position;
+            horizontal.y = 0f;
+            if (horizontal.magnitude <= ArrivalDistance)
+            {
+                birthApproachArrived = true;
+                FaceBirthNest(0f);
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Ends the pre-birth route after BreedingSystem has created the
+        /// litter. The mother remains at her actual arrival position and
+        /// transitions into the normal inner-zone caregiving loop.
+        /// </summary>
+        public void FinishBirthApproach()
+        {
+            if (!birthApproachActive) return;
+            birthApproachActive = false;
+            birthApproachArrived = false;
+            currentTarget = null;
+            if (rat != null && rat.nursing && EnclosureSystem.HasNest(rat.enclosure))
+                BeginCaregivingRest();
+            else
+                BeginTravel();
+        }
+
+        /// <summary>
         /// Takes over the same movement/interaction state used by normal
         /// sniffing, but temporarily permits the recorded mother to cross the
         /// nest exclusion. Only NursingSystem can call this with a real pup
@@ -428,7 +485,7 @@ namespace RatHabitat
             Vector3 nursingStandPoint = pupPosition + fromPup.normalized * 0.46f;
             // The mother is allowed to enter the nest area, but the chosen
             // stand point remains just off the pup so the models do not stack.
-            nursingStandPoint = EnclosureSystem.ClampToEnclosureAllowNest(
+            nursingStandPoint = EnclosureSystem.ClampToNestCaregiverZone(
                 rat.enclosure, nursingStandPoint);
             nursingFacingPoint = new Vector3(pupPosition.x, transform.position.y, pupPosition.z);
             currentTarget = new RatBehaviorTarget
@@ -452,7 +509,7 @@ namespace RatHabitat
             nursingCareRestActive = true;
             nursingInteractionActive = false;
             nursingInteractionRemaining = 0f;
-            Vector3 nestSide = EnclosureSystem.GetNestSidePosition(rat.enclosure);
+            Vector3 nestSide = EnclosureSystem.GetNestCaregiverPosition(rat.enclosure);
             currentTarget = new RatBehaviorTarget
             {
                 id = "nursing-nest-rest",
@@ -535,7 +592,7 @@ namespace RatHabitat
             float deltaTime = GrowthSystem.SimulationBehaviorDeltaSeconds(Time.unscaledDeltaTime);
             int simulationSteps = GrowthSystem.BeginBehaviorUpdate(deltaTime);
             float stepDeltaTime = simulationSteps <= 0 ? 0f : deltaTime / simulationSteps;
-            float visualMovementBudget = pairingApproachActive || nursingInteractionActive || nursingCareRestActive
+            float visualMovementBudget = pairingApproachActive || birthApproachActive || nursingInteractionActive || nursingCareRestActive
                 ? GrowthSystem.MaximumFastRouteMovementUnitsPerFrame
                 : GrowthSystem.MaximumVisualMovementUnitsPerFrame;
             ApplySimulationAnimationSpeed();
@@ -556,6 +613,11 @@ namespace RatHabitat
             if (rat.enclosure != configuredEnclosure)
             {
                 if (pairingApproachActive) CancelPairingApproach();
+                if (birthApproachActive)
+                {
+                    birthApproachActive = false;
+                    birthApproachArrived = false;
+                }
                 configuredEnclosure = rat.enclosure;
                 currentTarget = null;
                 nursingInteractionActive = false;
@@ -580,6 +642,11 @@ namespace RatHabitat
             for (int simulationStep = 0; simulationStep < simulationSteps; simulationStep++)
             {
                 behaviorClockSeconds += stepDeltaTime;
+                if (birthApproachActive)
+                {
+                    UpdateBirthApproach(stepDeltaTime, ref visualMovementBudget);
+                    continue;
+                }
                 if (pairingApproachActive)
                 {
                     if (pairingInteractionActive) UpdatePairingInteraction(stepDeltaTime);
@@ -775,8 +842,7 @@ namespace RatHabitat
         {
             nestDetourWaypoints.Clear();
             nestDetourWaypointIndex = 0;
-            if (rat != null && rat.nursing && EnclosureSystem.HasNest(rat.enclosure) &&
-                random != null && random.NextDouble() < 0.72d)
+            if (rat != null && rat.nursing && EnclosureSystem.HasNest(rat.enclosure))
             {
                 BeginCaregivingRest();
                 return;
@@ -950,6 +1016,71 @@ namespace RatHabitat
                 // do not repeatedly issue the same route in a tight loop.
                 if (moved <= 0.0001f || moved + ArrivalDistance < distance) break;
             }
+        }
+
+        private void UpdateBirthApproach(float deltaTime, ref float visualMovementBudget)
+        {
+            if (birthApproachArrived)
+            {
+                FaceBirthNest(deltaTime);
+                return;
+            }
+
+            Vector3 destination = birthApproachTarget;
+            destination.y = transform.position.y;
+            Vector3 toTarget = destination - transform.position;
+            toTarget.y = 0f;
+            float distance = toTarget.magnitude;
+            if (distance <= ArrivalDistance)
+            {
+                birthApproachArrived = true;
+                FaceBirthNest(deltaTime);
+                return;
+            }
+
+            Vector3 direction = toTarget / Mathf.Max(0.0001f, distance);
+            Quaternion facing = RotationFacingWorldDirection(direction);
+            transform.rotation = Quaternion.RotateTowards(
+                transform.rotation, facing, MovementTurnSpeed * Mathf.Max(0f, deltaTime));
+            float step = GrowthSystem.SimulationMovementStep(
+                movementSpeed, deltaTime, ref visualMovementBudget);
+            Vector3 next = Vector3.MoveTowards(transform.position, destination, step);
+            // The mother is the only adult allowed to use the nest during this
+            // explicit route. Keep every movement step inside cage bounds and
+            // project it into the safe inner caregiver area.
+            bool hasEnteredCaregiverZone = EnclosureSystem.IsInsideNestCaregiverZone(
+                rat.enclosure, transform.position, NestBodyMarginForMovement()) ||
+                EnclosureSystem.IsInsideNestCaregiverZone(
+                    rat.enclosure, next, NestBodyMarginForMovement());
+            transform.position = hasEnteredCaregiverZone
+                ? EnclosureSystem.ClampToNestCaregiverZone(
+                    rat.enclosure, next, NestBodyMarginForMovement())
+                : EnclosureSystem.ClampToEnclosureAllowNest(rat.enclosure, next);
+
+            if (Vector3.Distance(new Vector3(transform.position.x, 0f, transform.position.z),
+                new Vector3(destination.x, 0f, destination.z)) <= ArrivalDistance)
+            {
+                birthApproachArrived = true;
+                FaceBirthNest(deltaTime);
+            }
+        }
+
+        private void FaceBirthNest(float deltaTime)
+        {
+            Vector3 toNest = EnclosureSystem.GetNestPosition(
+                rat == null ? RatEnclosure.FemaleColony : rat.enclosure) - transform.position;
+            toNest.y = 0f;
+            if (toNest.sqrMagnitude <= 0.001f) return;
+            Quaternion facing = RotationFacingWorldDirection(toNest.normalized);
+            transform.rotation = Quaternion.RotateTowards(
+                transform.rotation, facing, MovementTurnSpeed * Mathf.Max(0f, deltaTime));
+        }
+
+        private static float NestBodyMarginForMovement()
+        {
+            // The same conservative body margin is used by the caregiver-zone
+            // projection, keeping feet and tail away from the nest rim.
+            return 0.42f;
         }
 
         /// <summary>
@@ -1128,7 +1259,7 @@ namespace RatHabitat
         private void ResolveSpacing(float deltaTime)
         {
             if (rat == null || rat.stage == RatStage.Pinkie) return;
-            if (pairingApproachActive || nursingInteractionActive) return;
+            if (pairingApproachActive || birthApproachActive || nursingInteractionActive || nursingCareRestActive) return;
             bool adultSized = rat.stage == RatStage.Adult || rat.stage == RatStage.Mature ||
                 rat.stage == RatStage.Elderly;
             float minimum = adultSized ? MinimumRatSpacing : MinimumRatSpacing * 0.78f;
@@ -1424,7 +1555,16 @@ namespace RatHabitat
         {
             RatEnclosure enclosure = rat == null ? RatEnclosure.FemaleColony : rat.enclosure;
             if (nursingInteractionActive || nursingCareRestActive)
-                return EnclosureSystem.ClampToEnclosureAllowNest(enclosure, desired);
+            {
+                // If a saved position is outside the inner zone, let the
+                // normal movement step approach it first. Only project once
+                // the step reaches the zone, so recovery never teleports the
+                // mother to an inner point.
+                if (!EnclosureSystem.IsInsideNestCaregiverZone(enclosure, current, 0.42f) &&
+                    !EnclosureSystem.IsInsideNestCaregiverZone(enclosure, desired, 0.42f))
+                    return EnclosureSystem.ClampToEnclosureAllowNest(enclosure, desired);
+                return EnclosureSystem.ClampToNestCaregiverZone(enclosure, desired);
+            }
             if (!EnclosureSystem.HasNest(enclosure)) return ClampToAssignedEnclosure(desired);
 
             if (nestDetourWaypointIndex < nestDetourWaypoints.Count)

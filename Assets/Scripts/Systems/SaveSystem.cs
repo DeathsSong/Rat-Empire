@@ -139,6 +139,7 @@ namespace RatHabitat
 
             save.EnsureLists();
             EventLogPolicy.Prune(save);
+            EnsureMyRatsSortState(save);
             ColonyFactory.MigrateLegacyStarterStats(save);
             StoreSystem.EnsureStoreState(save);
             LitterNameSystem.EnsureLitterNames(save);
@@ -205,6 +206,7 @@ namespace RatHabitat
             try
             {
                 save.EnsureLists();
+                EnsureMyRatsSortState(save);
                 // Finalize any legacy trait-baseline migration before the
                 // document is serialized. This keeps explicit zero baselines
                 // and inherited values stable even when a caller saves
@@ -291,6 +293,7 @@ namespace RatHabitat
         {
             if (save == null) return string.Empty;
             save.EnsureLists();
+            EnsureMyRatsSortState(save);
             ColonyFactory.MigrateLegacyStarterStats(save);
             EventLogPolicy.Prune(save);
             RatActivitySystem.EnsureSaveState(save, save.clock.gameTimeMs);
@@ -305,6 +308,7 @@ namespace RatHabitat
                 var save = JsonUtility.FromJson<ColonySaveData>(json);
                 if (save == null) return null;
                 save.EnsureLists();
+                EnsureMyRatsSortState(save);
                 EventLogPolicy.Prune(save);
                 RatActivitySystem.EnsureSaveState(save,
                     save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
@@ -431,6 +435,58 @@ namespace RatHabitat
 #if UNITY_WEBGL && !UNITY_EDITOR
             RatHabitatBrowserFlush(key);
 #endif
+        }
+
+        /// <summary>
+        /// Normalizes the persisted My Rats sort preference. Earlier builds
+        /// used Fertility for the next-opportunity ordering; that ordering is
+        /// now named Breeding, while Fertility is the numeric stat sort.
+        /// </summary>
+        public static void EnsureMyRatsSortState(ColonySaveData save)
+        {
+            if (save == null) return;
+            save.EnsureLists();
+
+            string field = save.myRatsSortField;
+            if (string.IsNullOrEmpty(field)) field = "Name";
+
+            switch (field.Trim().ToLowerInvariant())
+            {
+                case "fertilitynextopportunity":
+                case "fertilityopportunity":
+                case "fertility (next opportunity)":
+                case "next opportunity":
+                case "generation":
+                    save.myRatsSortField = "Breeding";
+                    save.myRatsSortAscending = true;
+                    break;
+                case "breeding":
+                    save.myRatsSortField = "Breeding";
+                    save.myRatsSortAscending = true;
+                    break;
+                case "fertility":
+                    save.myRatsSortField = "Fertility";
+                    break;
+                case "name":
+                case "age":
+                case "size":
+                case "health":
+                case "sex":
+                case "pregnancy":
+                    save.myRatsSortField = char.ToUpperInvariant(field.Trim()[0]) + field.Trim().Substring(1);
+                    break;
+                default:
+                    save.myRatsSortField = "Name";
+                    save.myRatsSortAscending = true;
+                    break;
+            }
+
+            switch ((save.myRatsSexFilter ?? string.Empty).Trim().ToLowerInvariant())
+            {
+                case "males": save.myRatsSexFilter = "Males"; break;
+                case "females": save.myRatsSexFilter = "Females"; break;
+                default: save.myRatsSexFilter = "All"; break;
+            }
         }
     }
 

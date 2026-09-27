@@ -241,22 +241,6 @@ namespace RatHabitat
             }
         }
 
-        /// <summary>
-        /// Places a mother beside her enclosure's nest for the birth frame.
-        /// Pinkies remain on the nest; adults are routed through the same
-        /// logical exclusion used by normal movement so they cannot overlap
-        /// the nest geometry.
-        /// </summary>
-        public bool PlaceRatBesideNest(string ratId, RatEnclosure enclosure)
-        {
-            GameObject root;
-            if (string.IsNullOrEmpty(ratId) || !ratRoots.TryGetValue(ratId, out root) || root == null ||
-                !EnclosureSystem.HasNest(enclosure)) return false;
-
-            root.transform.position = EnclosureSystem.GetNestSidePosition(enclosure);
-            return true;
-        }
-
         private RatVisualFactory EnsureVisualFactory()
         {
             if (visualFactory == null) visualFactory = GetComponent<RatVisualFactory>();

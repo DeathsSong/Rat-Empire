@@ -21,7 +21,7 @@ namespace RatHabitat
         }
 
         /// <summary>
-        /// Stable, data-only ordering information for the My Rats Fertility
+        /// Stable, data-only ordering information for the My Rats Breeding
         /// sort. The UI must not derive this from a localized/display label.
         /// </summary>
         public struct BreedingOpportunitySortInfo
@@ -286,14 +286,18 @@ namespace RatHabitat
                 return Unavailable(ReproductiveState.Pregnant, label, "Currently pregnant.", pregnancy.dueAt);
             }
 
-            if (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing)
+            // Reproductive recovery is owned by the birth timestamp and is
+            // deliberately shorter than weaning. A mother may still be
+            // nursing/caring after recovery ends, so nursing alone must not
+            // block the normal live fertile-window calculation.
+            if ((rat.nursing || rat.reproductiveState == ReproductiveState.Nursing) &&
+                rat.recoveryUntil > gameTime)
             {
-                string label = "Nursing — weaning in " + FormatDuration(Math.Max(0L, rat.nursingUntil - gameTime));
-                return Unavailable(ReproductiveState.Nursing, label, "Nursing — weaning in " +
-                    FormatDuration(Math.Max(0L, rat.nursingUntil - gameTime)) + ".", rat.nursingUntil);
+                string label = "Recovering — fertile again in " + FormatDuration(Math.Max(0L, rat.recoveryUntil - gameTime));
+                return Unavailable(ReproductiveState.Recovery, label, label + ".", rat.recoveryUntil);
             }
 
-            if (rat.reproductiveState == ReproductiveState.Recovery)
+            if (rat.reproductiveState == ReproductiveState.Recovery && rat.recoveryUntil > gameTime)
             {
                 string label = "Recovering — fertile again in " + FormatDuration(Math.Max(0L, rat.recoveryUntil - gameTime));
                 return Unavailable(ReproductiveState.Recovery, label, label + ".", rat.recoveryUntil);
@@ -567,7 +571,7 @@ namespace RatHabitat
         /// pregnancy, nursing, recovery, maturity, cooldown, age cutoff, and
         /// fertile-window rules stay in one place.
         /// </summary>
-        public static int CompareFertilitySort(
+        public static int CompareBreedingSort(
             ColonySaveData save,
             RatData first,
             RatData second,
@@ -595,6 +599,37 @@ namespace RatHabitat
                 if (result != 0) return result;
             }
 
+            return CompareStableRatId(first, second);
+        }
+
+        /// <summary>
+        /// Compatibility wrapper for callers from older UI builds. The
+        /// next-opportunity ordering is now exposed as the Breeding sort.
+        /// </summary>
+        public static int CompareFertilitySort(
+            ColonySaveData save,
+            RatData first,
+            RatData second,
+            long gameTime)
+        {
+            return CompareBreedingSort(save, first, second, gameTime);
+        }
+
+        /// <summary>
+        /// Numeric My Rats Fertility sort. This intentionally reads the
+        /// current stored fertility stat and never evaluates breeding
+        /// eligibility or changes reproductive state.
+        /// </summary>
+        public static int CompareFertilityStatSort(
+            RatData first,
+            RatData second,
+            bool ascending)
+        {
+            float firstFertility = first == null || first.traits == null ? 0f : first.traits.fertility;
+            float secondFertility = second == null || second.traits == null ? 0f : second.traits.fertility;
+            int result = firstFertility.CompareTo(secondFertility);
+            if (!ascending) result = -result;
+            if (result != 0) return result;
             return CompareStableRatId(first, second);
         }
 
@@ -673,6 +708,18 @@ namespace RatHabitat
                 if (ClearLegacyMalePregnancyState(save, rat)) changed = true;
                 GrowthSystem.EnsureBiologyDefaults(rat);
                 ReproductiveState oldState = rat.reproductiveState;
+                long migratedRecoveryDeadline = RecoveryDeadlineFromLatestLitter(save, rat.id);
+                if (rat.sex == RatSex.Female && migratedRecoveryDeadline > 0L &&
+                    rat.recoveryUntil > migratedRecoveryDeadline &&
+                    (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing ||
+                        rat.reproductiveState == ReproductiveState.Recovery))
+                {
+                    // Older saves calculated recovery from weaning and used a
+                    // 60-day constant. Rebase that stale deadline to the
+                    // birth timestamp plus the current configurable period.
+                    rat.recoveryUntil = migratedRecoveryDeadline;
+                    changed = true;
+                }
                 PregnancyData pending = FindActivePregnancyForMother(save, rat);
                 if (rat.sex == RatSex.Female)
                 {
@@ -712,7 +759,12 @@ namespace RatHabitat
                     if (stillNursing)
                     {
                         rat.nursing = true;
-                        rat.reproductiveState = ReproductiveState.Nursing;
+                        // Once the post-birth deadline has elapsed, leave the
+                        // state available for live fertile-window evaluation
+                        // even while the mother continues caring for pups.
+                        rat.reproductiveState = rat.recoveryUntil > gameTime
+                            ? ReproductiveState.Recovery
+                            : ReproductiveState.Fertile;
                     }
                     else
                     {
@@ -720,9 +772,10 @@ namespace RatHabitat
                         rat.nursingPupId = null;
                         rat.nursingInteractionUntil = 0L;
                         rat.nursingInteractionType = null;
-                        rat.recoveryUntil = Math.Max(rat.recoveryUntil,
-                            gameTime + (long)(GameConfig.RecoveryDays * GameConfig.GameDayMs));
-                        rat.reproductiveState = ReproductiveState.Recovery;
+                        rat.recoveryUntil = Math.Max(rat.recoveryUntil, gameTime);
+                        rat.reproductiveState = rat.recoveryUntil > gameTime
+                            ? ReproductiveState.Recovery
+                            : ReproductiveState.Fertile;
                     }
                 }
                 else if (rat.reproductiveState == ReproductiveState.Recovery)
@@ -742,6 +795,19 @@ namespace RatHabitat
                 if (oldState != rat.reproductiveState) changed = true;
             }
             return changed;
+        }
+
+        private static long RecoveryDeadlineFromLatestLitter(ColonySaveData save, string motherId)
+        {
+            if (save == null || save.litters == null || string.IsNullOrEmpty(motherId)) return 0L;
+            long latestBirth = 0L;
+            foreach (LitterData litter in save.litters)
+            {
+                if (litter == null || litter.motherId != motherId || litter.birthTimestamp <= latestBirth) continue;
+                latestBirth = litter.birthTimestamp;
+            }
+            return latestBirth <= 0L ? 0L : latestBirth +
+                (long)(GameConfig.RecoveryDays * GameConfig.GameDayMs);
         }
 
         public static List<RatData> GetEligibleMates(ColonySaveData save, RatData parentA, long gameTime)
@@ -1026,8 +1092,10 @@ namespace RatHabitat
             father.pregnancyId = null;
             mother.nursing = true;
             mother.nursingUntil = litter.weaningTimestamp;
-            mother.recoveryUntil = litter.weaningTimestamp + (long)(GameConfig.RecoveryDays * GameConfig.GameDayMs);
-            mother.reproductiveState = ReproductiveState.Nursing;
+            // Recovery starts on the birth frame. It must not be extended by
+            // the independent 21-day weaning or 42-day sale timers.
+            mother.recoveryUntil = gameTime + (long)(GameConfig.RecoveryDays * GameConfig.GameDayMs);
+            mother.reproductiveState = ReproductiveState.Recovery;
             father.reproductiveState = ReproductiveState.Fertile;
             mother.breedingCooldownUntil = gameTime + GameConfig.BreedingCooldownMs;
             father.breedingCooldownUntil = gameTime + GameConfig.BreedingCooldownMs;
@@ -1039,22 +1107,22 @@ namespace RatHabitat
             return true;
         }
 
-        public static int FinishDuePregnancies(ColonySaveData save, long gameTime, out List<LitterData> newLitters)
+        /// <summary>
+        /// Returns due pregnancies without resolving them. GameBootstrap uses
+        /// this list to start/resume each mother's nest approach and only calls
+        /// FinishPregnancy after the live behavior confirms arrival.
+        /// </summary>
+        public static List<PregnancyData> GetDuePendingPregnancies(ColonySaveData save, long gameTime)
         {
-            newLitters = new List<LitterData>();
-            if (save == null) return 0;
-            var pendingIds = new List<string>();
-            foreach (var pregnancy in save.pregnancies)
+            var due = new List<PregnancyData>();
+            if (save == null || save.pregnancies == null) return due;
+            foreach (PregnancyData pregnancy in save.pregnancies)
             {
-                if (pregnancy != null && pregnancy.status == "pending" && pregnancy.dueAt <= gameTime) pendingIds.Add(pregnancy.id);
+                if (pregnancy == null || pregnancy.status != "pending") continue;
+                EnsurePregnancyTiming(pregnancy);
+                if (pregnancy.dueAt <= gameTime) due.Add(pregnancy);
             }
-            foreach (var id in pendingIds)
-            {
-                LitterData litter;
-                string reason;
-                if (FinishPregnancy(save, id, gameTime, out litter, out reason) && litter != null) newLitters.Add(litter);
-            }
-            return newLitters.Count;
+            return due;
         }
 
         public static void CancelPregnanciesForRat(ColonySaveData save, string ratId, long gameTime)

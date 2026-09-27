@@ -299,6 +299,11 @@ namespace RatHabitat
         // It belongs to the pregnancy record so reloads cannot announce it
         // twice through a stale selection or profile reference.
         public bool pregnancyAnnouncementLogged;
+        // Birth is resolved only after the mother reaches the nest. Persisting
+        // the approach state lets save/load resume the walk without replaying
+        // the birth or turning the due timestamp into a teleport instruction.
+        public bool birthApproachStarted;
+        public long birthApproachStartedAt;
     }
 
     [Serializable]
@@ -420,6 +425,12 @@ namespace RatHabitat
         // Top-alert preferences are separate from event history. Disabling a
         // category hides its live banner but never removes its history row.
         public List<AlertPreferenceData> alertPreferences = new List<AlertPreferenceData>();
+        // My Rats view preferences are persisted independently from rat data.
+        // The string form keeps this compatible with older JSON and lets the
+        // Fertility-next-opportunity migration remain explicit.
+        public string myRatsSortField = "Name";
+        public bool myRatsSortAscending = true;
+        public string myRatsSexFilter = "All";
         // Absolute real-time deadline for the next automatic Pairing Habitat
         // evaluation. Persisting the deadline keeps save/load from resetting
         // the 30-second cadence.
@@ -452,6 +463,8 @@ namespace RatHabitat
             usedLitterNames ??= new List<string>();
             alertPreferences ??= new List<AlertPreferenceData>();
             eventLog ??= new List<ColonyEventData>();
+            if (string.IsNullOrEmpty(myRatsSortField)) myRatsSortField = "Name";
+            if (string.IsNullOrEmpty(myRatsSexFilter)) myRatsSexFilter = "All";
         }
     }
 }

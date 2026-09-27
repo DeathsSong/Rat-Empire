@@ -104,6 +104,8 @@ namespace RatHabitat
         private float cameraZoomVelocity;
         private float habitatZoomOffset;
         private bool cameraPresentationReady;
+        private bool cameraFocusNest;
+        private RatEnclosure cameraFocusNestEnclosure = RatEnclosure.Pairing;
         // Habitat navigation starts on one full-size enclosure. Overview is
         // retained in the enum for save/backward compatibility, but is no
         // longer a player-facing combined four-cage presentation.
@@ -507,7 +509,8 @@ namespace RatHabitat
             if (key == "growing")
                 return rat != null && rat.removalDisposition == RatRemovalDisposition.None && rat.stage == RatStage.Pinkie;
             return key == "sold" || key == "euthanized" || key == "deceased" ||
-                key == "breeding" || key == "pregnant" || key == "nursing" || key == "recovery";
+                key == "breeding" || key == "pregnant" || key == "birth-approach" ||
+                key == "nursing" || key == "recovery";
         }
 
         private bool RefreshRatActivities()
@@ -1600,6 +1603,7 @@ namespace RatHabitat
             bool nursingChanged = false;
             bool nursingPassDue = false;
             bool alertAnnouncementStateChanged = false;
+            bool birthSequenceChanged = false;
             int completedSessionCount = 0;
             int births = 0;
             List<DedicatedBreedingSessionData> completedSessions = null;
@@ -1652,7 +1656,7 @@ namespace RatHabitat
                     reproductiveStateChanged = true;
                 }
 
-                births = BreedingSystem.FinishDuePregnancies(Save, GameTime, out newLitters);
+                births = ProcessDuePregnanciesAtNest(out newLitters, out birthSequenceChanged);
                 if (births > 0)
                 {
                     foreach (LitterData litter in newLitters)
@@ -1698,7 +1702,7 @@ namespace RatHabitat
             if (storeChanged)
                 StatusMessage = "Rat Market restocked.";
 
-            bool structuralPresentationChange = stageChanged || reproductiveStateChanged || enclosureChanged;
+            bool structuralPresentationChange = stageChanged || reproductiveStateChanged || enclosureChanged || births > 0;
             if (structuralPresentationChange)
             {
                 BeginPerformanceSample("Rat Empire/Presentation Render");
@@ -1711,19 +1715,6 @@ namespace RatHabitat
                     startupWarning = true;
                     Debug.LogException(exception);
                     StatusMessage = "Rat presentation update warning — see the Unity Console.";
-                }
-                if (births > 0 && rats != null)
-                {
-                    // Keep the mother beside, rather than on, the nest for
-                    // the birth event. Newborn roots are placed inside the
-                    // nest by BreedingSystem/RatPresenter and remain fixed.
-                    foreach (LitterData litter in newLitters)
-                    {
-                        if (litter == null) continue;
-                        RatData mother = BreedingSystem.FindRat(Save, litter.motherId);
-                        if (mother != null)
-                            rats.PlaceRatBesideNest(mother.id, mother.enclosure);
-                    }
                 }
                 EndPerformanceSample();
             }
@@ -1741,7 +1732,7 @@ namespace RatHabitat
 
             bool stateNeedsSave = activityChanged || nursingChanged || stageChanged ||
                 reproductiveStateChanged || enclosureChanged || storeChanged ||
-                births > 0 || completedSessionCount > 0 || alertAnnouncementStateChanged;
+                births > 0 || birthSequenceChanged || completedSessionCount > 0 || alertAnnouncementStateChanged;
             if (stateNeedsSave)
             {
                 SaveSystem.Save(Save);
@@ -1811,6 +1802,7 @@ namespace RatHabitat
                 // visual ring instead of leaving the previous profile open.
                 selectedRatId = null;
                 selectedObjectId = null;
+                cameraFocusNest = false;
                 cameraFollowSelectedRat = false;
                 cameraView = NormalizeHabitatView(cameraView);
                 if (rats != null) rats.SetSelected(null);
@@ -1827,6 +1819,7 @@ namespace RatHabitat
                 }
                 selectedRatId = entity.entityId;
                 selectedObjectId = null;
+                cameraFocusNest = false;
                 cameraView = CameraViewForRat(BreedingSystem.FindRat(Save, entity.entityId));
                 cameraFollowSelectedRat = true;
 
@@ -1846,8 +1839,28 @@ namespace RatHabitat
             }
             else
             {
+                if (IsNestEntity(entity))
+                {
+                    selectedRatId = null;
+                    selectedObjectId = null;
+                    cameraFollowSelectedRat = false;
+                    cameraFocusNest = true;
+                    cameraFocusNestEnclosure = entity.entityId == "pairing_nest"
+                        ? RatEnclosure.Pairing : RatEnclosure.FemaleColony;
+                    cameraView = cameraFocusNestEnclosure == RatEnclosure.Pairing
+                        ? HabitatCameraView.Pairing : HabitatCameraView.FemaleEnclosure;
+                    habitatZoomOffset = 0f;
+                    cameraMoveVelocity = Vector3.zero;
+                    cameraZoomVelocity = 0f;
+                    if (rats != null) rats.SetSelected(null);
+                    if (ui != null) ui.CloseTransientPanels();
+                    if (ui != null) ui.SuppressGeneratedUiActionsThisFrame();
+                    if (ui != null) ui.RefreshHeader();
+                    return true;
+                }
                 selectedObjectId = entity.entityId;
                 selectedRatId = null;
+                cameraFocusNest = false;
             }
             if (rats != null) rats.SetSelected(entity.kind == SelectableKind.Rat ? entity.entityId : null);
             if (ui != null) ui.SuppressGeneratedUiActionsThisFrame();
@@ -1911,6 +1924,7 @@ namespace RatHabitat
             ClearPendingSelectionActions();
             selectedRatId = null;
             selectedObjectId = null;
+            cameraFocusNest = false;
             cameraFollowSelectedRat = false;
             habitatZoomOffset = 0f;
             if (rats != null) rats.SetSelected(null);
@@ -1979,12 +1993,14 @@ namespace RatHabitat
 
             selectedRatId = null;
             selectedObjectId = null;
+            cameraFocusNest = false;
             cameraFollowSelectedRat = false;
             if (rats != null) rats.SetSelected(null);
             if (ui != null) ui.CloseTransientPanels();
 
             HabitatCameraView view = CameraViewForWorldPoint(worldPoint);
             cameraView = NormalizeHabitatView(view);
+            cameraFocusNest = false;
             habitatZoomOffset = 0f;
             cameraMoveVelocity = Vector3.zero;
             cameraZoomVelocity = 0f;
@@ -2580,6 +2596,7 @@ namespace RatHabitat
             if (next == current) return false;
 
             cameraView = HabitatPages[next];
+            cameraFocusNest = false;
             cameraFollowSelectedRat = false;
             habitatZoomOffset = 0f;
             cameraMoveVelocity = Vector3.zero;
@@ -2725,6 +2742,7 @@ namespace RatHabitat
         private void SetHabitatCameraView(HabitatCameraView view)
         {
             cameraView = NormalizeHabitatView(view);
+            cameraFocusNest = false;
             int settled = Array.IndexOf(HabitatPages, cameraView);
             habitatSettledPageIndex = settled < 0 ? habitatSettledPageIndex : settled;
             habitatPageSettling = false;
@@ -2971,15 +2989,21 @@ namespace RatHabitat
                 if (ui != null) ui.Refresh(false);
                 return;
             }
-            LitterData litter;
-            string reason;
-            if (!BreedingSystem.FinishPregnancy(Save, pending.id, GameTime, out litter, out reason))
+            // Developer birth testing still uses the production movement gate:
+            // make the pregnancy due now, then let the mother walk to the nest
+            // before the litter is created.
+            pending.dueAt = GameTime;
+            List<LitterData> litters;
+            bool sequenceChanged;
+            int births = ProcessDuePregnanciesAtNest(out litters, out sequenceChanged);
+            if (births <= 0)
             {
-                StatusMessage = reason;
-                if (ui != null) ui.Refresh(false);
+                StatusMessage = "The mother is going to the nest before giving birth.";
+                SaveSystem.Save(Save);
+                if (ui != null) ui.Refresh(true);
                 return;
             }
-            AnnounceBirth(litter);
+            foreach (LitterData litter in litters) AnnounceBirth(litter);
             EnclosureSystem.RecalculateAssignments(Save);
             SaveSystem.Save(Save);
             rats.Render(Save, habitat.NestPosition);
@@ -3022,6 +3046,67 @@ namespace RatHabitat
                 changed = true;
             }
             return changed;
+        }
+
+        /// <summary>
+        /// Starts/resumes due pregnancies at the nest and resolves them only
+        /// after the live mother behavior reports arrival. The pregnancy
+        /// record owns the persisted approach flag, so a reload resumes the
+        /// route rather than creating duplicate litters or teleporting the
+        /// mother for a birth frame.
+        /// </summary>
+        private int ProcessDuePregnanciesAtNest(out List<LitterData> newLitters,
+            out bool sequenceChanged)
+        {
+            newLitters = new List<LitterData>();
+            sequenceChanged = false;
+            if (Save == null || rats == null) return 0;
+
+            List<PregnancyData> duePregnancies = BreedingSystem.GetDuePendingPregnancies(Save, GameTime);
+            foreach (PregnancyData pregnancy in duePregnancies)
+            {
+                if (pregnancy == null || string.IsNullOrEmpty(pregnancy.motherId)) continue;
+                RatData mother = BreedingSystem.FindRat(Save, pregnancy.motherId);
+                if (mother == null || !EnclosureSystem.HasNest(mother.enclosure)) continue;
+
+                RatHabitatBehavior behavior;
+                if (!rats.TryGetRatBehavior(mother.id, out behavior) || behavior == null) continue;
+
+                if (!pregnancy.birthApproachStarted)
+                {
+                    pregnancy.birthApproachStarted = true;
+                    pregnancy.birthApproachStartedAt = GameTime;
+                    RatActivitySystem.SetCurrent(Save, mother, "birth-approach", "Going to nest", GameTime);
+                    sequenceChanged = true;
+                }
+
+                if (!behavior.BirthApproachAtNest)
+                {
+                    Vector3 caregiverTarget = EnclosureSystem.GetNestCaregiverPosition(mother.enclosure);
+                    if (!behavior.BeginBirthApproach(caregiverTarget)) continue;
+                }
+                if (!behavior.BirthApproachAtNest) continue;
+
+                LitterData litter;
+                string reason;
+                if (!BreedingSystem.FinishPregnancy(Save, pregnancy.id, GameTime, out litter, out reason) || litter == null)
+                {
+                    if (!string.IsNullOrEmpty(reason))
+                        Debug.LogWarning("[Rat Habitat] Birth is waiting for a valid nest arrival for " +
+                            ColonyFactory.DisplayName(mother) + ": " + reason);
+                    continue;
+                }
+
+                // FinishPregnancy has now written the litter and recovery
+                // deadline. Transition the existing root into caregiving at
+                // its actual arrival position before the render pass creates
+                // the new pinkie roots.
+                behavior.FinishBirthApproach();
+                newLitters.Add(litter);
+                sequenceChanged = true;
+            }
+
+            return newLitters.Count;
         }
 
         private bool AnnounceBirth(LitterData litter)
@@ -3219,7 +3304,10 @@ namespace RatHabitat
 
             if (EnclosureSystem.IsPregnant(Save, rat)) warnings.Add("Pregnant");
             if (rat.nursing || EnclosureSystem.HasDependentPinkies(Save, rat.id)) warnings.Add("Nursing");
-            if (rat.traits != null && rat.traits.health <= 40f) warnings.Add("Sick or injured");
+            // Do not infer illness or injury from a low Health stat. This
+            // project currently has no authoritative active sickness/injury
+            // record, so showing that warning here would falsely block or
+            // alarm otherwise healthy rats.
             if (hasActiveLitter) warnings.Add("Has offspring");
             if (hasAnyLitter) warnings.Add("Parent of a litter");
             if (rat.enclosure == RatEnclosure.Breeding || rat.enclosure == RatEnclosure.Pairing)
@@ -3297,14 +3385,14 @@ namespace RatHabitat
             sellConfirmationRatId = rat.id;
             euthanizeConfirmationRatId = null;
             StatusMessage = string.Empty;
-            if (ui != null) ui.Refresh(true);
+            if (ui != null) ui.RefreshImmediate();
         }
 
         public void CancelSellSelectedRat()
         {
             sellConfirmationRatId = null;
             StatusMessage = "Sale cancelled.";
-            if (ui != null) ui.Refresh(true);
+            if (ui != null) ui.RefreshImmediate();
         }
 
         public void ConfirmSellSelectedRat()
@@ -3622,6 +3710,14 @@ namespace RatHabitat
             return null;
         }
 
+        private bool IsNestEntity(SelectableEntity entity)
+        {
+            if (entity == null || entity.kind != SelectableKind.HabitatObject) return false;
+            if (entity.entityId == "pairing_nest") return true;
+            HabitatObjectData data = FindObject(entity.entityId);
+            return data != null && data.type == HabitatObjectType.Nest;
+        }
+
         private RatData FindRatByName(string name)
         {
             if (Save == null || string.IsNullOrEmpty(name)) return null;
@@ -3743,6 +3839,14 @@ namespace RatHabitat
                     ? PinkieInspectionOrthographicMultiplier
                     : InspectionOrthographicMultiplier);
             }
+            else if (cameraFocusNest && EnclosureSystem.HasNest(cameraFocusNestEnclosure))
+            {
+                Vector3 focusPoint = EnclosureSystem.GetNestPosition(cameraFocusNestEnclosure) +
+                    Vector3.up * 0.42f;
+                Vector3 cameraForward = normalCameraRotation * Vector3.forward;
+                desiredPosition = focusPoint - cameraForward * normalCameraDistance;
+                desiredSize = normalCameraOrthographicSize * 0.58f;
+            }
             else
             {
                 RatEnclosure enclosure;
@@ -3855,6 +3959,7 @@ namespace RatHabitat
 
         private float MinimumZoomForCurrentView(RatData selectedRat)
         {
+            if (cameraFocusNest) return 3.2f;
             if (selectedRat != null)
             {
                 return selectedRat.stage == RatStage.Pinkie

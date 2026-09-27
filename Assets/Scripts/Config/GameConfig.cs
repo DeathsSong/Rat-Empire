@@ -4,7 +4,7 @@ namespace RatHabitat
 {
     public static class GameConfig
     {
-        public const int SaveVersion = 7;
+        public const int SaveVersion = 8;
         public const long GameDayMs = 24L * 60L * 60L * 1000L;
         public const long StartGameTimeMs = 8L * 60L * 60L * 1000L;
         // Biological timing is expressed in simulated days. The legacy
@@ -44,7 +44,10 @@ namespace RatHabitat
         public const float MatureSaleValueMinimumMultiplier = 0.35f;
         public const float EstrousCycleDays = 4.5f;
         public const float EstrousFertileWindowDays = 1f;
-        public const float RecoveryDays = 60f;
+        // Post-birth reproductive recovery is independent from pup weaning
+        // and the six-week sale restriction. Mothers can resume the normal
+        // fertile-window calculation while still caring for their litter.
+        public const float RecoveryDays = 7f;
         public const float HealthDeclineStartDays = 365f;
         // Keep raw fertility decline aligned with the reproductive decline
         // boundary. A naturally low fertility trait is not an age stage.
