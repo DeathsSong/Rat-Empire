@@ -99,18 +99,18 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // phenotype. Keep only a restrained, centered shading signal so
             // the coat stays softly fur-like without inheriting those
             // geometric source regions.
-            float sourceShading = (sourceLuminance - 0.5) * 0.08;
+            float sourceShading = (sourceLuminance - 0.5) * 0.04;
             float furValue = (0.96 + sourceShading) * furNoise;
             fixed3 fur = _Color.rgb * furValue;
             float accentWave = sin(dot(input.uv_MainTex, float2(17.13, 31.71)) + _SpotSeed * 3.17);
-            float accentAmount = saturate(0.08 + (accentWave * 0.5 + 0.5) * 0.16);
-            fur = lerp(fur, _AccentColor.rgb * (0.88 + sourceLuminance * 0.20), accentAmount);
+            float accentAmount = saturate(0.035 + (accentWave * 0.5 + 0.5) * 0.05);
+            fur = lerp(fur, _AccentColor.rgb * (0.95 + sourceLuminance * 0.10), accentAmount);
 
             // Keep a small amount of the hand-painted source around feature
             // boundaries. This preserves natural ear/nose/tail shading on
             // the single-mesh import without allowing its old coat hue to
             // override the recorded phenotype.
-            fixed4 painted = fixed4(lerp(fur, source.rgb, 0.06), source.a);
+            fixed4 painted = fixed4(lerp(fur, source.rgb, 0.025), source.a);
             // The imported rat currently carries some eyes, mouth edges,
             // whisker roots, and tail segmentation in the same UV texture as
             // the fur. Preserve a restrained amount of those dark source
@@ -233,11 +233,11 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // separate decal floating over the skinned mesh.
             float featureVariation = sin(headAxis * 23.0 + ratUv.z * 9.0 + _SpotSeed * 2.3) * 0.08 +
                 sin(ratUv.y * 17.0 - headAxis * 13.0 + _SpotSeed * 4.1) * 0.05;
-            featureBlend = smoothstep(0.08, 0.86,
+            featureBlend = smoothstep(0.05, 0.68,
                 saturate(featureBlend + featureVariation * 0.30));
             // Keep dark eye/mouth/tail detail readable when a white facial or
             // belly region crosses the same imported texture island.
-            featureBlend *= saturate(1.0 - darkFeatureSignal * 0.72);
+            featureBlend *= saturate(1.0 - darkFeatureSignal * 0.48);
             whiteBlend = max(whiteBlend, featureBlend);
 
             // Adult and young rats use the mature skin treatment below. The

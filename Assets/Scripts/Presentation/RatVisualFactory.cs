@@ -835,7 +835,11 @@ namespace RatHabitat
         {
             float xJitter = Mathf.Min(0.030f, (maxX - minX) * 0.16f);
             float yJitter = Mathf.Min(0.024f, (maxY - minY) * 0.16f);
-            const int edgeSamples = 4;
+            // Use a denser, uneven perimeter so broad families such as
+            // hooded and bareback do not turn into four-sided UV decals.
+            // The mask is generated once per stable rat identity, so this
+            // extra construction work does not run during gameplay frames.
+            const int edgeSamples = 8;
             Vector2[] polygon = new Vector2[edgeSamples * 4];
             for (int sample = 0; sample < edgeSamples; sample++)
             {
@@ -868,14 +872,15 @@ namespace RatHabitat
                 {
                     int weighted = 0;
                     int weightTotal = 0;
-                    for (int offsetY = -1; offsetY <= 1; offsetY++)
+                    for (int offsetY = -2; offsetY <= 2; offsetY++)
                     {
                         int sampleY = Mathf.Clamp(y + offsetY, 0, OrganicSpotMaskHeight - 1);
-                        for (int offsetX = -1; offsetX <= 1; offsetX++)
+                        for (int offsetX = -2; offsetX <= 2; offsetX++)
                         {
                             int sampleX = Mathf.Clamp(x + offsetX, 0, OrganicSpotMaskWidth - 1);
-                            int weight = offsetX == 0 && offsetY == 0 ? 4 :
-                                (offsetX == 0 || offsetY == 0 ? 2 : 1);
+                            int distance = Mathf.Abs(offsetX) + Mathf.Abs(offsetY);
+                            int weight = distance == 0 ? 8 :
+                                (distance == 1 ? 4 : (distance == 2 ? 2 : 1));
                             weighted += pixels[sampleY * OrganicSpotMaskWidth + sampleX].r * weight;
                             weightTotal += weight;
                         }
