@@ -598,6 +598,12 @@ namespace RatHabitat
             var skinned = visual.GetComponentInChildren<SkinnedMeshRenderer>(true);
             Mesh mesh = skinned == null ? null : skinned.sharedMesh;
             if (mesh == null) return null;
+            // Some imported builds intentionally keep meshes non-readable.
+            // Fail closed to the normal body shader in that case instead of
+            // throwing a WebGL access error; the Hand Painted Rat importer is
+            // configured Read/Write enabled so the shipped mesh uses the
+            // stable feature mask path.
+            if (!mesh.isReadable) return null;
             if (cachedFeatureMask != null && cachedFeatureMaskMesh == mesh)
                 return cachedFeatureMask;
 
