@@ -20,7 +20,7 @@ namespace RatHabitat
         private const string ImportedPinkiePrefabName = "HandPaintedRat_Pinkie";
         private const string SpotShaderName = "Rat Habitat/Hand Painted Rat Coat";
         private const string PhenotypeMaterialMarker = "[Rat Habitat Phenotype]";
-        private const string MatureTailMaterialResourcePath = "HandPaintedRat/HandPaintedRat_MatureTailSkin";
+        private const string MatureTailMaterialResourcePath = "HandPaintedRat/HandPaintedRat_MatureTail";
         private const string MatureTailMaterialMarker = "[Rat Habitat Mature Tail]";
 
         [Header("Replaceable visual assets")]
