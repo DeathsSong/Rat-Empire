@@ -5,7 +5,7 @@
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
     <title>Unity WebGL Player | Rat Empire</title>
     <link rel="shortcut icon" href="TemplateData/favicon.ico">
-    <link rel="stylesheet" href="TemplateData/style.css?v=seam-fix-relay-20260927">
+    <link rel="stylesheet" href="TemplateData/style.css?v=seam-fix-clean-20260927">
   </head>
   <body>
     <div id="unity-container" class="unity-desktop">
@@ -57,7 +57,7 @@
       }
 
       var buildUrl = "Build";
-      var buildRevision = "seam-fix-relay-20260927";
+      var buildRevision = "seam-fix-clean-20260927";
       var buildAsset = function(name) { return buildUrl + "/" + name + "?v=" + buildRevision; };
       var loaderUrl = buildAsset("WebGL.loader.js");
       var config = {
@@ -94,10 +94,9 @@
 
 
       } else {
-        // Desktop style: the responsive stylesheet gives Unity a centered,
-        // height-driven canvas. Do not write fixed pixel dimensions here;
-        // Unity must receive the actual resized canvas aspect ratio so its
-        // CanvasScaler and habitat camera can reframe the world naturally.
+        // The responsive stylesheet gives Unity a centered, height-driven
+        // canvas. Do not write fixed desktop dimensions here; Unity needs the
+        // actual resized aspect ratio for its responsive CanvasScaler/camera.
         container.className = "unity-desktop";
         canvas.className = "unity-canvas";
       }
