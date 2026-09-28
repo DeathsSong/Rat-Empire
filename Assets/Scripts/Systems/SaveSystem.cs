@@ -35,6 +35,7 @@ namespace RatHabitat
         private static bool browserWriteInProgress;
         private static bool browserRemoveInProgress;
         private static bool browserFlushInProgress;
+        private static bool browserLifecyclePollUnavailable;
 
 #if UNITY_WEBGL && !UNITY_EDITOR
         [DllImport("__Internal")]
@@ -51,6 +52,9 @@ namespace RatHabitat
 
         [DllImport("__Internal")]
         private static extern void RatHabitatBrowserFlush(string key);
+
+        [DllImport("__Internal")]
+        private static extern int RatHabitatBrowserConsumeInactiveElapsedSeconds();
 #endif
 
         private static bool UsesBrowserStorage
@@ -522,6 +526,49 @@ namespace RatHabitat
             {
                 browserFlushInProgress = false;
             }
+#endif
+        }
+
+        /// <summary>
+        /// Consumes the browser lifecycle bridge's hidden-page elapsed-time
+        /// signal. The persisted real timestamp remains the authoritative
+        /// clock input: consuming this signal only makes the resume edge
+        /// explicit and calls the same AdvanceClock path used every frame.
+        /// This avoids replaying visual frames or applying the speed
+        /// multiplier a second time.
+        /// </summary>
+        public static bool ResumeFromBrowserLifecycle(ColonySaveData save, bool simulationPaused)
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            if (save == null || browserLifecyclePollUnavailable) return false;
+            try
+            {
+                int elapsedSeconds = RatHabitatBrowserConsumeInactiveElapsedSeconds();
+                if (elapsedSeconds <= 0) return false;
+
+                long now = GameConfig.NowMs();
+                if (simulationPaused)
+                {
+                    // A welcome modal intentionally pauses the colony. Do
+                    // not accumulate background wall time while it is open.
+                    if (save.clock != null) save.clock.lastRealTimestamp = now;
+                    return true;
+                }
+
+                // AdvanceClock reads the existing saved timestamp and the
+                // existing speed mapping. No alternate elapsed-time math is
+                // introduced here, so 1x/2x/3x remain unchanged.
+                return GrowthSystem.AdvanceClock(save, now);
+            }
+            catch
+            {
+                // A stale build or unavailable browser export must never
+                // break the game loop. Stop polling after the first failure.
+                browserLifecyclePollUnavailable = true;
+                return false;
+            }
+#else
+            return false;
 #endif
         }
 

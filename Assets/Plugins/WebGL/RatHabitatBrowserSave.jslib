@@ -140,6 +140,61 @@ mergeInto(LibraryManager.library, {
             if (window.__ratHabitatSaveLifecycleKeys[key]) return;
             window.__ratHabitatSaveLifecycleKeys[key] = true;
 
+            // Keep hidden-page elapsed time in a browser-owned namespace.
+            // Unity may be throttled or suspended while hidden, so this is a
+            // signal for the managed clock to consume on resume—not a request
+            // to replay thousands of browser frames.
+            if (!window.__ratHabitatGetLifecycleState) {
+                window.__ratHabitatGetLifecycleState = function () {
+                    if (!window.__ratHabitatBrowserLifecycleState) {
+                        window.__ratHabitatBrowserLifecycleState = {
+                            hiddenAt: 0,
+                            pendingElapsedMs: 0,
+                            listenersInstalled: false
+                        };
+                    }
+                    return window.__ratHabitatBrowserLifecycleState;
+                };
+            }
+            if (!window.__ratHabitatInstallLifecycleListeners) {
+                window.__ratHabitatInstallLifecycleListeners = function () {
+                    var state = window.__ratHabitatGetLifecycleState();
+                    if (state.listenersInstalled) return state;
+                    state.listenersInstalled = true;
+
+                    var markHidden = function () {
+                        var current = window.__ratHabitatGetLifecycleState();
+                        if (current.hiddenAt <= 0) current.hiddenAt = Date.now();
+                    };
+                    var markVisible = function () {
+                        var current = window.__ratHabitatGetLifecycleState();
+                        if (current.hiddenAt > 0) {
+                            current.pendingElapsedMs += Math.max(0, Date.now() - current.hiddenAt);
+                            current.hiddenAt = 0;
+                        }
+                    };
+
+                    document.addEventListener("visibilitychange", function () {
+                        if (document.visibilityState === "hidden") markHidden();
+                        else if (document.visibilityState === "visible") markVisible();
+                    }, false);
+                    window.addEventListener("pagehide", markHidden, false);
+                    window.addEventListener("pageshow", markVisible, false);
+                    window.addEventListener("blur", function () {
+                        // A visible unfocused desktop window must keep
+                        // simulating. Only a hidden document contributes
+                        // background elapsed time.
+                        if (document.visibilityState === "hidden") markHidden();
+                    }, false);
+                    window.addEventListener("focus", function () {
+                        if (document.visibilityState === "visible") markVisible();
+                    }, false);
+                    if (document.visibilityState === "hidden") markHidden();
+                    return state;
+                };
+            }
+            window.__ratHabitatInstallLifecycleListeners();
+
             var flush = function () {
                 var bridge = window.__ratHabitatGetSaveBridgeState();
                 if (bridge.flushInProgress) return;
@@ -156,11 +211,45 @@ mergeInto(LibraryManager.library, {
 
             window.addEventListener("pagehide", flush, false);
             window.addEventListener("beforeunload", flush, false);
+            // Focus loss is also a safe persistence boundary on desktop
+            // browsers. It does not pause simulation; it only flushes the
+            // already-written localStorage payload.
+            window.addEventListener("blur", flush, false);
             document.addEventListener("visibilitychange", function () {
                 if (document.visibilityState === "hidden") flush();
             }, false);
         } catch (error) {
             console.warn("Rat Habitat browser save lifecycle registration failed", error);
+        }
+    },
+
+    RatHabitatBrowserConsumeInactiveElapsedSeconds: function () {
+        // This export can be polled before another lifecycle call on a fresh
+        // page, so install the same guarded namespace helpers lazily here.
+        if (!window.__ratHabitatGetLifecycleState) {
+            window.__ratHabitatGetLifecycleState = function () {
+                if (!window.__ratHabitatBrowserLifecycleState) {
+                    window.__ratHabitatBrowserLifecycleState = {
+                        hiddenAt: 0,
+                        pendingElapsedMs: 0,
+                        listenersInstalled: false
+                    };
+                }
+                return window.__ratHabitatBrowserLifecycleState;
+            };
+        }
+        try {
+            var state = window.__ratHabitatGetLifecycleState();
+            if (!state) return 0;
+            var availableSeconds = Math.floor(Math.max(0, state.pendingElapsedMs) / 1000);
+            if (availableSeconds <= 0) return 0;
+            // Keep the return type within the safe signed range expected by
+            // the generated C# int import while retaining sub-second debt.
+            var consumedSeconds = Math.min(availableSeconds, 2147483647);
+            state.pendingElapsedMs = Math.max(0, state.pendingElapsedMs - consumedSeconds * 1000);
+            return consumedSeconds;
+        } catch (error) {
+            return 0;
         }
     },
 

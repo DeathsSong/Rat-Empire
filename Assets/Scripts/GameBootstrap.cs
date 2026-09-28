@@ -1572,6 +1572,11 @@ namespace RatHabitat
 
             bool welcomePaused = ui != null && ui.IsWelcomeOpen;
             GrowthSystem.SetSimulationPaused(welcomePaused);
+            // Browser visibility changes can suspend Unity's rendered loop.
+            // Consume the guarded lifecycle signal before the normal frame
+            // clock update so the same persisted timestamp advances the
+            // colony once on resume, without replaying visual frames.
+            SaveSystem.ResumeFromBrowserLifecycle(Save, welcomePaused);
             if (welcomePaused)
             {
                 // Keep the clock's real-time anchor at the current instant so
@@ -4081,14 +4086,34 @@ namespace RatHabitat
             Debug.Log("[Rat Habitat] EventSystem ready: exactly one EventSystem and one compatible UI input module.");
         }
 
+        private void SaveBeforeApplicationInactive()
+        {
+            if (Save == null) return;
+
+            // Keep the saved anchor current at the lifecycle edge. The next
+            // active frame then catches up only the real elapsed interval.
+            // Welcome-modal time remains intentionally paused.
+            if (Save.clock != null)
+            {
+                if (ui != null && ui.IsWelcomeOpen)
+                    Save.clock.lastRealTimestamp = GameConfig.NowMs();
+                else
+                    GrowthSystem.AdvanceClock(Save, GameConfig.NowMs());
+            }
+            SaveSystem.Save(Save);
+        }
+
         private void OnApplicationPause(bool paused)
         {
-            if (paused) SaveSystem.Save(Save);
+            if (paused) SaveBeforeApplicationInactive();
         }
 
         private void OnApplicationFocus(bool hasFocus)
         {
-            if (!hasFocus) SaveSystem.Save(Save);
+            // Focus loss must not pause simulation. It is only a persistence
+            // boundary; ProjectSettings.runInBackground keeps the visible
+            // WebGL game running while another window has focus.
+            if (!hasFocus) SaveBeforeApplicationInactive();
         }
 
         private void OnDestroy()
@@ -4098,7 +4123,7 @@ namespace RatHabitat
 
         private void OnApplicationQuit()
         {
-            SaveSystem.Save(Save);
+            SaveBeforeApplicationInactive();
         }
     }
 }
