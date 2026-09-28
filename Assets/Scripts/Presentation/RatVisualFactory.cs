@@ -122,6 +122,15 @@ namespace RatHabitat
                 return;
             }
             ApplyEnclosureVisualPlacement(visual, rat);
+            // Developer seam-isolation materials must survive ordinary live
+            // phenotype refreshes. Without this guard, the next activity or
+            // clock update would rebind the coat shader and invalidate the
+            // diagnostic comparison before it could be inspected.
+            if (RatVisualDiagnostics.Mode != RatVisualDiagnosticMode.Normal)
+            {
+                RatVisualDiagnostics.ApplyToVisual(visual);
+                return;
+            }
             if (rat.phenotype == null || !rat.phenotype.furRevealed)
             {
                 RatVisualDiagnostics.ApplyToVisual(visual);
