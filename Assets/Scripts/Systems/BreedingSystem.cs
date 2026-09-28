@@ -694,7 +694,7 @@ namespace RatHabitat
         {
             if (save == null) return false;
             save.EnsureLists();
-            bool changed = false;
+            bool changed = RepairBirthTransactions(save, gameTime);
             if (save.pregnancies != null)
             {
                 foreach (PregnancyData pregnancy in save.pregnancies)
@@ -793,6 +793,39 @@ namespace RatHabitat
                     rat.reproductiveState = ReproductiveState.Fertile;
                 }
                 if (oldState != rat.reproductiveState) changed = true;
+            }
+            return changed;
+        }
+
+        /// <summary>
+        /// Repairs the one state that must never be silently accepted: a
+        /// completed pregnancy with no durable litter. Older builds could
+        /// clear the pregnancy before a browser save completed. Reopening the
+        /// record makes the normal due/arrival path retry it safely.
+        /// </summary>
+        private static bool RepairBirthTransactions(ColonySaveData save, long gameTime)
+        {
+            if (save == null || save.pregnancies == null) return false;
+            bool changed = false;
+            foreach (PregnancyData pregnancy in save.pregnancies)
+            {
+                if (pregnancy == null || pregnancy.status != "finished" || string.IsNullOrEmpty(pregnancy.litterId)) continue;
+                LitterData litter = FindLitterById(save, pregnancy.litterId);
+                if (litter != null && PreparedLitterIsComplete(save, litter, litter.size)) continue;
+
+                pregnancy.status = "pending";
+                pregnancy.finishedAt = 0L;
+                pregnancy.litterId = null;
+                pregnancy.birthCommitState = 0;
+                pregnancy.birthFailureReason = "Previous birth had no saved litter; pregnancy reopened for retry.";
+                RatData mother = FindRat(save, pregnancy.motherId);
+                if (mother != null)
+                {
+                    mother.pregnancyId = pregnancy.id;
+                    mother.reproductiveState = ReproductiveState.Pregnant;
+                }
+                changed = true;
+                UnityEngine.Debug.LogWarning("[Rat Habitat] Reopened incomplete birth " + pregnancy.id + " at game time " + gameTime + ".");
             }
             return changed;
         }
@@ -1004,12 +1037,35 @@ namespace RatHabitat
                 return false;
             }
 
+            pregnancy.birthAttemptCount++;
+            pregnancy.lastBirthAttemptAt = gameTime;
+
             var mother = FindRat(save, pregnancy.motherId);
             var father = FindRat(save, pregnancy.fatherId);
             if (mother == null || father == null)
             {
                 reason = "Parent records are missing.";
+                MarkBirthBlocked(pregnancy, gameTime, reason);
                 return false;
+            }
+
+            // A prepared litter is the durable middle state of the birth
+            // transaction. It lets a browser save failure retry the final
+            // pregnancy-state commit without generating another litter or
+            // another set of pups.
+            if (!string.IsNullOrEmpty(pregnancy.litterId))
+            {
+                LitterData prepared = FindLitterById(save, pregnancy.litterId);
+                if (prepared == null || !PreparedLitterIsComplete(save, prepared, pregnancy.expectedLitterSize))
+                {
+                    reason = "A prepared litter is incomplete; pregnancy retained for retry.";
+                    MarkBirthBlocked(pregnancy, gameTime, reason);
+                    return false;
+                }
+                litter = prepared;
+                if (!FinalizePreparedBirth(save, pregnancy, mother, father, litter, gameTime, out reason))
+                    return false;
+                return true;
             }
 
             if (pregnancy.expectedLitterSize <= 0)
@@ -1032,62 +1088,117 @@ namespace RatHabitat
             };
             LitterNameSystem.AssignName(save, litter);
 
-            for (int i = 0; i < litterSize; i++)
+            var createdPups = new List<RatData>(litterSize);
+            try
             {
-                RatSex sex = UnityEngine.Random.Range(0, 2) == 0 ? RatSex.Female : RatSex.Male;
-                string pupId = ColonyFactory.NewId("rat");
-                string name = ColonyFactory.GeneratedName(pupId, sex);
-                var pup = ColonyFactory.CreateRat(
-                    pupId,
-                    name,
-                    sex,
-                    gameTime,
-                    generation,
-                    GeneticsSystem.InheritGenotype(mother.genotype, father.genotype, gameTime),
-                    GeneticsSystem.InheritTraits(mother.traits, father.traits),
-                    RatStage.Pinkie);
-                pup.motherId = mother.id;
-                pup.fatherId = father.id;
-                pup.litterId = litterId;
-                pup.birthTimestamp = gameTime;
-                pup.growthTimestamp = gameTime;
-                pup.ageDays = 0f;
-                pup.developerGrowthOverride = false;
-                pup.growthAnchorAgeDays = 0f;
-                pup.markingFamily = GeneticsSystem.ResolveOffspringMarkingFamily(mother, father, pup.genotype);
-                // Preserve the stable coat-family appearance through
-                // inheritance. The variant is chosen from both parents and
-                // the pup's stable ID, so a UI refresh or reload never
-                // rerolls an offspring's visible color.
-                pup.coatColorVariant = GeneticsSystem.ResolveOffspringCoatColorVariant(
-                    mother, father, pup.genotype, pup.id);
-                pup.coatTone = GeneticsSystem.DefaultCoatTone(pup.id, pup.genotype);
-                // A litter always stays with its mother in the habitat where
-                // the birth occurred. Nursery is no longer a valid runtime
-                // destination; Pairing therefore remains a valid nest
-                // habitat, while ordinary litters remain in Female/Breeding
-                // as appropriate.
-                pup.enclosure = mother.enclosure == RatEnclosure.Nursery
-                    ? EnclosureSystem.StandardEnclosure(save, mother)
-                    : mother.enclosure;
-                if (pup.enclosure == RatEnclosure.Nursery)
-                    pup.enclosure = mother.sex == RatSex.Male
-                        ? RatEnclosure.MaleColony
-                        : RatEnclosure.FemaleColony;
-                pup.pairingHabitatAssigned = pup.enclosure == RatEnclosure.Pairing;
-                GeneticsSystem.EnsureCoatAppearance(pup);
-                pup.phenotype = GeneticsSystem.DerivePhenotype(RatStage.Pinkie, pup.genotype,
-                    pup.coatColorVariant, pup.coatTone);
-                GeneticsSystem.ApplyMarkingFamily(pup.phenotype, pup.markingFamily);
-                RatActivitySystem.SetCurrent(save, pup, "nest", "Resting in nest", gameTime);
-                save.rats.Add(pup);
-                save.ratIds.Add(pup.id);
-                litter.pupIds.Add(pup.id);
+                for (int i = 0; i < litterSize; i++)
+                {
+                    RatSex sex = UnityEngine.Random.Range(0, 2) == 0 ? RatSex.Female : RatSex.Male;
+                    string pupId = ColonyFactory.NewId("rat");
+                    var pup = ColonyFactory.CreateRat(
+                        pupId,
+                        null,
+                        sex,
+                        gameTime,
+                        generation,
+                        GeneticsSystem.InheritGenotype(mother.genotype, father.genotype, gameTime),
+                        GeneticsSystem.InheritTraits(mother.traits, father.traits),
+                        RatStage.Pinkie);
+                    pup.motherId = mother.id;
+                    pup.fatherId = father.id;
+                    pup.litterId = litterId;
+                    pup.birthTimestamp = gameTime;
+                    pup.growthTimestamp = gameTime;
+                    pup.ageDays = 0f;
+                    pup.developerGrowthOverride = false;
+                    pup.growthAnchorAgeDays = 0f;
+                    pup.markingFamily = GeneticsSystem.ResolveOffspringMarkingFamily(mother, father, pup.genotype);
+                    // Preserve the stable coat-family appearance through
+                    // inheritance. The variant is chosen from both parents and
+                    // the pup's stable ID, so a UI refresh or reload never
+                    // rerolls an offspring's visible color.
+                    pup.coatColorVariant = GeneticsSystem.ResolveOffspringCoatColorVariant(
+                        mother, father, pup.genotype, pup.id);
+                    pup.coatTone = GeneticsSystem.DefaultCoatTone(pup.id, pup.genotype);
+                    // A litter always stays with its mother in the habitat where
+                    // the birth occurred. Nursery is no longer a valid runtime
+                    // destination; Pairing therefore remains a valid nest
+                    // habitat, while ordinary litters remain in Female/Breeding
+                    // as appropriate.
+                    pup.enclosure = mother.enclosure == RatEnclosure.Nursery
+                        ? EnclosureSystem.StandardEnclosure(save, mother)
+                        : mother.enclosure;
+                    if (pup.enclosure == RatEnclosure.Nursery)
+                        pup.enclosure = mother.sex == RatSex.Male
+                            ? RatEnclosure.MaleColony
+                            : RatEnclosure.FemaleColony;
+                    pup.pairingHabitatAssigned = pup.enclosure == RatEnclosure.Pairing;
+                    GeneticsSystem.EnsureCoatAppearance(pup);
+                    pup.phenotype = GeneticsSystem.DerivePhenotype(RatStage.Pinkie, pup.genotype,
+                        pup.coatColorVariant, pup.coatTone);
+                    GeneticsSystem.ApplyMarkingFamily(pup.phenotype, pup.markingFamily);
+                    RatActivitySystem.SetCurrent(save, pup, "nest", "Resting in nest", gameTime);
+                    save.rats.Add(pup);
+                    save.ratIds.Add(pup.id);
+                    RatNameSystem.EnsureUniqueName(save, pup, gameTime);
+                    createdPups.Add(pup);
+                    litter.pupIds.Add(pup.id);
+                }
             }
+            catch (Exception exception)
+            {
+                foreach (RatData pup in createdPups)
+                {
+                    save.rats.Remove(pup);
+                    save.ratIds.Remove(pup.id);
+                }
+                reason = "Litter creation failed and the pregnancy was retained: " + exception.Message;
+                MarkBirthBlocked(pregnancy, gameTime, reason);
+                return false;
+            }
+
+            // Commit the litter and its pups while the pregnancy remains
+            // pending. This save is the durable proof that the litter exists.
+            pregnancy.litterId = litterId;
+            pregnancy.birthCommitState = 1;
+            pregnancy.birthFailureReason = string.Empty;
+            save.litters.Add(litter);
+            if (!SaveSystem.Save(save))
+            {
+                reason = "Litter was created but could not be saved; retrying birth.";
+                MarkBirthBlocked(pregnancy, gameTime, reason);
+                return false;
+            }
+
+            if (!FinalizePreparedBirth(save, pregnancy, mother, father, litter, gameTime, out reason))
+                return false;
+            return true;
+        }
+
+        private static bool FinalizePreparedBirth(
+            ColonySaveData save,
+            PregnancyData pregnancy,
+            RatData mother,
+            RatData father,
+            LitterData litter,
+            long gameTime,
+            out string reason)
+        {
+            reason = string.Empty;
+            string oldMotherPregnancyId = mother.pregnancyId;
+            bool oldMotherNursing = mother.nursing;
+            long oldMotherNursingUntil = mother.nursingUntil;
+            long oldMotherRecoveryUntil = mother.recoveryUntil;
+            long oldMotherCooldown = mother.breedingCooldownUntil;
+            ReproductiveState oldMotherState = mother.reproductiveState;
+            string oldFatherPregnancyId = father.pregnancyId;
+            ReproductiveState oldFatherState = father.reproductiveState;
+            long oldFatherCooldown = father.breedingCooldownUntil;
 
             pregnancy.status = "finished";
             pregnancy.finishedAt = gameTime;
-            pregnancy.litterId = litterId;
+            pregnancy.birthCommitState = 2;
+            pregnancy.birthFailureReason = string.Empty;
             mother.pregnancyId = null;
             father.pregnancyId = null;
             mother.nursing = true;
@@ -1103,8 +1214,55 @@ namespace RatHabitat
             RatActivitySystem.Record(save, mother, "birth", "Giving birth", gameTime, "Giving birth");
             RatActivitySystem.Record(save, mother, "caring", "Caring for pinkies", gameTime, "Caring for pinkies");
             RatActivitySystem.SetCurrent(save, father, "exploring", "Exploring", gameTime);
-            save.litters.Add(litter);
+
+            if (SaveSystem.Save(save)) return true;
+
+            // Do not leave an in-memory finished pregnancy when its final
+            // commit did not reach browser storage. The prepared litter stays
+            // attached so the next pass can retry exactly this pregnancy.
+            pregnancy.status = "pending";
+            pregnancy.finishedAt = 0L;
+            pregnancy.birthCommitState = 1;
+            pregnancy.birthFailureReason = "Final birth state could not be saved; retrying.";
+            mother.pregnancyId = oldMotherPregnancyId ?? pregnancy.id;
+            mother.nursing = oldMotherNursing;
+            mother.nursingUntil = oldMotherNursingUntil;
+            mother.recoveryUntil = oldMotherRecoveryUntil;
+            mother.breedingCooldownUntil = oldMotherCooldown;
+            mother.reproductiveState = oldMotherState;
+            father.pregnancyId = oldFatherPregnancyId;
+            father.reproductiveState = oldFatherState;
+            father.breedingCooldownUntil = oldFatherCooldown;
+            reason = pregnancy.birthFailureReason;
+            return false;
+        }
+
+        private static LitterData FindLitterById(ColonySaveData save, string litterId)
+        {
+            if (save == null || save.litters == null || string.IsNullOrEmpty(litterId)) return null;
+            foreach (LitterData item in save.litters)
+                if (item != null && item.id == litterId) return item;
+            return null;
+        }
+
+        private static bool PreparedLitterIsComplete(ColonySaveData save, LitterData litter, int expectedSize)
+        {
+            if (litter == null || litter.pupIds == null || litter.pupIds.Count == 0) return false;
+            if (expectedSize > 0 && litter.pupIds.Count != expectedSize) return false;
+            foreach (string pupId in litter.pupIds)
+                if (FindHistoricalRat(save, pupId) == null) return false;
             return true;
+        }
+
+        public static bool MarkBirthBlocked(PregnancyData pregnancy, long gameTime, string reason)
+        {
+            if (pregnancy == null || string.IsNullOrEmpty(reason)) return false;
+            bool changed = !string.Equals(pregnancy.birthFailureReason, reason, StringComparison.Ordinal);
+            pregnancy.lastBirthAttemptAt = gameTime;
+            pregnancy.birthFailureReason = reason;
+            if (changed)
+                UnityEngine.Debug.LogWarning("[Rat Habitat] Birth retry " + pregnancy.id + ": " + reason);
+            return changed;
         }
 
         /// <summary>

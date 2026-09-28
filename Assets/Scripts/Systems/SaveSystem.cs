@@ -203,6 +203,7 @@ namespace RatHabitat
             GrowthSystem.RefreshRatStages(save);
             BreedingSystem.RefreshReproductiveStates(save, save.clock.gameTimeMs);
             StoreSystem.AdvanceRestock(save, save.clock.gameTimeMs);
+            RatNameSystem.EnsureUniqueNames(save, save.clock.gameTimeMs);
             // Reconcile legacy saves and all relationship-driven placement
             // state before the first scene render. New enclosure fields are
             // backward-compatible with older JSON because this pass derives
@@ -243,6 +244,8 @@ namespace RatHabitat
                 // and inherited values stable even when a caller saves
                 // immediately after a birth or stat change.
                 ColonyFactory.MigrateLegacyStarterStats(save);
+                RatNameSystem.EnsureUniqueNames(save,
+                    save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
                 EventLogPolicy.Prune(save);
                 RatActivitySystem.EnsureSaveState(save, save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
                 save.schemaVersion = GameConfig.SaveVersion;
@@ -326,6 +329,8 @@ namespace RatHabitat
             save.EnsureLists();
             EnsureMyRatsSortState(save);
             ColonyFactory.MigrateLegacyStarterStats(save);
+            RatNameSystem.EnsureUniqueNames(save,
+                save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
             EventLogPolicy.Prune(save);
             RatActivitySystem.EnsureSaveState(save, save.clock.gameTimeMs);
             return JsonUtility.ToJson(save, true);
@@ -344,6 +349,8 @@ namespace RatHabitat
                 RatActivitySystem.EnsureSaveState(save,
                     save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
                 ColonyFactory.MigrateLegacyStarterStats(save);
+                RatNameSystem.EnsureUniqueNames(save,
+                    save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
                 foreach (var rat in save.rats)
                     if (rat != null && rat.enclosure == RatEnclosure.Pairing) rat.pairingHabitatAssigned = true;
                 ColonyFactory.EnsureDefaultHabitatObjects(save);

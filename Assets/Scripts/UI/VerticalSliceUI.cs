@@ -4927,6 +4927,21 @@ namespace RatHabitat
             AddButton(developerToolsCard, "Grow all Young Rats to Adults", true, game.GrowAllYoungRats);
             bool hasPregnancy = game.PendingPregnancy != null;
             AddButton(developerToolsCard, hasPregnancy ? "Finish pregnancy" : "No pending pregnancy", hasPregnancy, game.FinishPregnancyTesting);
+            AddButton(developerToolsCard, "Create test pregnancy due soon", true, game.CreateDeveloperPregnancyDueSoon);
+            if (hasPregnancy)
+            {
+                PregnancyData pending = game.PendingPregnancy;
+                RatData mother = BreedingSystem.FindRat(game.Save, pending.motherId);
+                AddText(developerToolsCard,
+                    "Birth diagnostic  •  " + pending.id +
+                    "\nMother: " + (mother == null ? pending.motherId : ColonyFactory.DisplayName(mother)) +
+                    "\nDue: " + game.FormatSimulationTimestamp(pending.dueAt) +
+                    "\nApproach: " + pending.birthApproachStarted +
+                    "  •  Attempts: " + pending.birthAttemptCount +
+                    "\nCommit: " + pending.birthCommitState +
+                    (string.IsNullOrEmpty(pending.birthFailureReason) ? string.Empty : "\nStatus: " + pending.birthFailureReason),
+                    14, new Color(0.75f, 0.88f, 0.84f), TextAnchor.UpperLeft);
+            }
 
             AddText(developerToolsCard, "Colony maintenance", 17, Color.white, TextAnchor.UpperLeft);
             if (game.SelectedRat == null)

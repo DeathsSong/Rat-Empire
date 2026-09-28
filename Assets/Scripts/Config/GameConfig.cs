@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace RatHabitat
 {
@@ -12,6 +13,10 @@ namespace RatHabitat
         public const float GestationDays = 22f;
         public const long PregnancyMs = 22L * GameDayMs;
         public const float WeaningDays = 21f;
+        // Names are not reused immediately. The allocator still falls back
+        // deterministically when a pool is exhausted, but normal colonies
+        // should have many generations of unused names available first.
+        public const float RatNameReuseCooldownDays = 90f;
         // A pup must be both fully weaned and six weeks old before it can be
         // sold.  Keep this separate from PinkieStageDays and WeaningDays so a
         // visual growth transition cannot accidentally unlock a sale.
@@ -197,22 +202,51 @@ namespace RatHabitat
 
         public static readonly string[] Loci = { "B", "C", "D", "S" };
 
-        // Display names are intentionally not unique. Rat IDs remain the
-        // identity used by selection, breeding, history, and save data, so a
-        // repeated friendly name is safe and much more natural than adding a
-        // numeric suffix every time a name is reused.
-        public static readonly string[] MaleRatNames =
-        {
-            "Otto", "Randy", "Branch", "Biscuit", "Pickle", "Peanut", "Milo", "Jasper",
-            "Theo", "Gus", "Waffles", "Truffle", "Oatmeal", "Nugget", "Pippin", "Toby",
-            "Mochi", "Bean", "Sprout", "Pancake", "Toast", "Cricket", "Hobbes", "Bramble"
-        };
-        public static readonly string[] FemaleRatNames =
-        {
-            "Mabel", "Olive", "Mochi", "Noodle", "Peaches", "Marmalade", "Clover", "Bonnie",
-            "Honey", "Pudding", "Daisy", "Hazel", "Maple", "Poppy", "Willow", "Maisie",
-            "Taffy", "Toffee", "Cinnamon", "Biscuit", "Muffin", "Juniper", "Winnie", "Pearl"
-        };
+        // The first names preserve the established starter/store vocabulary.
+        // The pool is expanded from distinct sex-specific bases. Each base
+        // also has two natural compound forms, giving the allocator more than
+        // 300 deterministic choices per sex without cross-sex collisions.
+        public static readonly string[] MaleRatNames = ExpandRatNamePool(
+            new[]
+            {
+                "Otto", "Randy", "Branch", "Biscuit", "Pickle", "Peanut", "Milo", "Jasper",
+                "Theo", "Gus", "Waffles", "Truffle", "Oatmeal", "Nugget", "Pippin", "Toby",
+                "Bean", "Sprout", "Pancake", "Toast", "Cricket", "Hobbes", "Bramble", "Archie",
+                "Alfie", "Alvin", "Amos", "Arthur", "Augustus", "Barney", "Basil", "Benji",
+                "Benny", "Bo", "Bowie", "Bruno", "Buster", "Calvin", "Chester", "Clark",
+                "Clyde", "Cosmo", "Dexter", "Douglas", "Edgar", "Eddie", "Elvis", "Ernie",
+                "Felix", "Finnegan", "Finn", "Floyd", "Frankie", "Fritz", "George", "Gizmo",
+                "Gordon", "Harley", "Harvey", "Henry", "Hugo", "Iggy", "Irwin", "Jack",
+                "Jackson", "Jake", "Joey", "Jonah", "Jude", "Kirby", "Leo", "Leon",
+                "Lewis", "Loki", "Louie", "Mac", "Mango", "Marley", "Marshall", "Max",
+                "Merlin", "Mickey", "Morris", "Monty", "Murray", "Nico", "Oliver", "Oscar",
+                "Otis", "Ozzy", "Percy", "Peter", "Porter", "Ralph", "Remy", "Rex",
+                "Riley", "Robin", "Rocket", "Romeo", "Roscoe", "Rufus", "Rusty", "Sammy",
+                "Scout", "Simon", "Snoopy", "Sonny", "Stanley", "Stewie", "Teddy", "Thomas",
+                "Tiger", "Tucker", "Wallace", "Watson", "Winston", "Wolfie", "Yogi", "Ziggy"
+            }, "Jr", "Bear");
+        public static readonly string[] FemaleRatNames = ExpandRatNamePool(
+            new[]
+            {
+                "Mabel", "Olive", "Noodle", "Peaches", "Marmalade", "Clover", "Bonnie", "Honey",
+                "Pudding", "Daisy", "Hazel", "Maple", "Poppy", "Willow", "Maisie", "Taffy",
+                "Toffee", "Cinnamon", "Muffin", "Juniper", "Winnie", "Pearl", "Abby", "Addie",
+                "Alice", "Amber", "Annie", "Apple", "April", "Athena", "Aurora", "Autumn",
+                "Bailey", "Bambi", "Beatrice", "Bella", "Betsy", "Birdie", "Blossom", "Bluebell",
+                "Buffy", "Callie", "Cassie", "Celeste", "Chanel", "Charlotte", "Chloe", "Clara",
+                "Coco", "Coral", "Darcy", "Delilah", "Dolly", "Ellie", "Elsie", "Emma",
+                "Esme", "Eva", "Evie", "Fern", "Flora", "Frida", "Gemma", "Gigi",
+                "Ginger", "Gloria", "Grace", "Gracie", "Greta", "Gypsy", "Harper", "Heidi",
+                "Holly", "Hope", "Iris", "Isla", "Ivy", "Jade", "Jasmine", "Jellybean",
+                "Jemma", "Jill", "Josie", "Katie", "Kiki", "Lacey", "Lana", "Lavender",
+                "Lily", "Lola", "Lottie", "Lulu", "Luna", "Lyra", "Macy", "Maggie",
+                "Marigold", "Melody", "Mia", "Mimi", "Minnie", "Mocha", "Molly", "Nala",
+                "Nellie", "Nina", "Nova", "Opal", "Orchid", "Paisley", "Penny", "Phoebe",
+                "Piper", "Pixie", "Polly", "Queenie", "Raven", "Rosie", "Ruby", "Sadie",
+                "Sally", "Sasha", "Scarlet", "Serena", "Shelby", "Skye", "Snowdrop", "Sophie",
+                "Stella", "Sugar", "Sunny", "Suzie", "Tessa", "Tilly", "Trudy", "Violet",
+                "Vivian", "Wren", "Yara", "Zelda", "Zoe"
+            }, "Mae", "Belle");
         // Kept as a compatibility alias for older tooling. These are
         // individual rat names, not litter names.
         public static readonly string[] PupNames =
@@ -251,6 +285,15 @@ namespace RatHabitat
         public static long NowMs()
         {
             return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        }
+
+        private static string[] ExpandRatNamePool(string[] bases, string suffixA, string suffixB)
+        {
+            var result = new List<string>(bases.Length * 3);
+            foreach (string value in bases) result.Add(value);
+            foreach (string value in bases) result.Add(value + " " + suffixA);
+            foreach (string value in bases) result.Add(value + " " + suffixB);
+            return result.ToArray();
         }
     }
 }

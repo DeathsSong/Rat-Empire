@@ -48,6 +48,7 @@ namespace RatHabitat
             save.habitatObjects.Add(new HabitatObjectData { id = "object_exercise_wheel", type = HabitatObjectType.ExerciseWheel, label = "Exercise wheel", condition = 100f, lastServicedAt = save.clock.gameTimeMs });
             EnclosureSystem.RecalculateAssignments(save);
             StoreSystem.EnsureStoreState(save);
+            RatNameSystem.EnsureUniqueNames(save, save.clock.gameTimeMs);
             LitterNameSystem.EnsureLitterNames(save);
             return save;
         }
@@ -113,6 +114,8 @@ namespace RatHabitat
                 save.schemaVersion = GameConfig.SaveVersion;
                 changed = true;
             }
+            changed |= RatNameSystem.EnsureUniqueNames(save,
+                save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
             return changed;
         }
 
@@ -266,13 +269,11 @@ namespace RatHabitat
         public static string NormalizeDisplayName(string value)
         {
             if (string.IsNullOrWhiteSpace(value)) return value;
-            string result = value.Trim();
-            int end = result.Length;
-            int digitStart = end;
-            while (digitStart > 0 && char.IsDigit(result[digitStart - 1])) digitStart--;
-            if (digitStart < end && digitStart > 0 && char.IsWhiteSpace(result[digitStart - 1]))
-                result = result.Substring(0, digitStart).TrimEnd();
-            return result;
+            // Numeric suffixes are now legitimate deterministic fallbacks
+            // when a name pool is exhausted. Do not strip them during a save
+            // migration or a UI refresh, or the allocator would recreate the
+            // same collision on every load.
+            return value.Trim();
         }
 
         /// <summary>

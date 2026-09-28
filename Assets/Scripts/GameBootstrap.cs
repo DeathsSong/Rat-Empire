@@ -2681,6 +2681,7 @@ namespace RatHabitat
 
             Save.rats.Add(purchased);
             Save.ratIds.Add(purchased.id);
+            RatNameSystem.EnsureUniqueName(Save, purchased, GameTime);
             Save.colonyCredits -= listing.price;
             Save.storeRatListings.Remove(listing);
             EnclosureSystem.RecalculateAssignments(Save);
@@ -3031,6 +3032,61 @@ namespace RatHabitat
             if (ui != null) ui.Refresh(true);
         }
 
+        public void CreateDeveloperPregnancyDueSoon()
+        {
+            if (Save == null)
+            {
+                StatusMessage = "Colony data is not ready.";
+                if (ui != null) ui.Refresh(false);
+                return;
+            }
+
+            RatData female = null;
+            RatData male = null;
+            foreach (RatData candidate in Save.rats)
+            {
+                if (candidate == null) continue;
+                string reason;
+                if (candidate.sex == RatSex.Female && female == null &&
+                    BreedingSystem.IsBreedEligible(Save, candidate, GameTime, out reason)) female = candidate;
+                if (candidate.sex == RatSex.Male && male == null &&
+                    BreedingSystem.IsBreedEligible(Save, candidate, GameTime, out reason)) male = candidate;
+            }
+
+            if (female == null || male == null)
+            {
+                StatusMessage = "No eligible adult female and male are available for the pregnancy test.";
+                if (ui != null) ui.Refresh(true);
+                return;
+            }
+
+            PregnancyData pregnancy;
+            string startReason;
+            if (!BreedingSystem.StartBreeding(Save, female, male, GameTime, out pregnancy, out startReason) || pregnancy == null)
+            {
+                StatusMessage = string.IsNullOrEmpty(startReason) ? "The test pregnancy could not start." : startReason;
+                if (ui != null) ui.Refresh(true);
+                return;
+            }
+
+            // This deliberately shortens only this developer-created record;
+            // the production game-clock and normal gestation configuration are
+            // untouched. The standard due-pregnancy route still has to move
+            // the mother to the nest before it can create the litter.
+            long testDuration = Math.Max(1L, GameConfig.GameDayMs / 24L);
+            pregnancy.startedAt = GameTime;
+            pregnancy.dueAt = GameTime + testDuration;
+            pregnancy.gestationDurationMs = testDuration;
+            pregnancy.birthApproachStarted = false;
+            pregnancy.birthApproachStartedAt = 0L;
+            pregnancy.birthFailureReason = string.Empty;
+            pregnancy.birthCommitState = 0;
+            StatusMessage = "Test pregnancy " + pregnancy.id + " created for " +
+                ColonyFactory.DisplayName(female) + ". Due at " + FormatSimulationTimestamp(pregnancy.dueAt) + ".";
+            SaveSystem.Save(Save);
+            RefreshWorldAndUi(true);
+        }
+
         private bool AnnounceNewNaturalDeaths()
         {
             if (Save == null || Save.retiredRats == null) return false;
@@ -3088,10 +3144,26 @@ namespace RatHabitat
             {
                 if (pregnancy == null || string.IsNullOrEmpty(pregnancy.motherId)) continue;
                 RatData mother = BreedingSystem.FindRat(Save, pregnancy.motherId);
-                if (mother == null || !EnclosureSystem.HasNest(mother.enclosure)) continue;
+                if (mother == null)
+                {
+                    sequenceChanged |= BreedingSystem.MarkBirthBlocked(pregnancy, GameTime,
+                        "Mother record is unavailable; pregnancy retained for retry.");
+                    continue;
+                }
+                if (!EnclosureSystem.HasNest(mother.enclosure))
+                {
+                    sequenceChanged |= BreedingSystem.MarkBirthBlocked(pregnancy, GameTime,
+                        "No valid nest is available in the mother's habitat; pregnancy retained.");
+                    continue;
+                }
 
                 RatHabitatBehavior behavior;
-                if (!rats.TryGetRatBehavior(mother.id, out behavior) || behavior == null) continue;
+                if (!rats.TryGetRatBehavior(mother.id, out behavior) || behavior == null)
+                {
+                    sequenceChanged |= BreedingSystem.MarkBirthBlocked(pregnancy, GameTime,
+                        "Mother presentation is not ready; pregnancy retained for retry.");
+                    continue;
+                }
 
                 if (!pregnancy.birthApproachStarted)
                 {
@@ -3100,7 +3172,12 @@ namespace RatHabitat
                     // "Going to give birth" label when a presentation root
                     // is temporarily unavailable during a rebuild.
                     Vector3 caregiverTarget = EnclosureSystem.GetNestCaregiverPosition(mother.enclosure);
-                    if (!behavior.BeginBirthApproach(caregiverTarget)) continue;
+                    if (!behavior.BeginBirthApproach(caregiverTarget))
+                    {
+                        sequenceChanged |= BreedingSystem.MarkBirthBlocked(pregnancy, GameTime,
+                            "Mother could not start a safe route to the nest; retrying.");
+                        continue;
+                    }
                     pregnancy.birthApproachStarted = true;
                     pregnancy.birthApproachStartedAt = GameTime;
                     RatActivitySystem.SetCurrent(Save, mother, "birth-approach", "Going to give birth", GameTime);
@@ -3110,9 +3187,19 @@ namespace RatHabitat
                 else if (!behavior.BirthApproachAtNest)
                 {
                     Vector3 caregiverTarget = EnclosureSystem.GetNestCaregiverPosition(mother.enclosure);
-                    if (!behavior.BeginBirthApproach(caregiverTarget)) continue;
+                    if (!behavior.BeginBirthApproach(caregiverTarget))
+                    {
+                        sequenceChanged |= BreedingSystem.MarkBirthBlocked(pregnancy, GameTime,
+                            "The nest route needs replanning; pregnancy retained for retry.");
+                        continue;
+                    }
                 }
-                if (!behavior.BirthApproachAtNest) continue;
+                if (!behavior.BirthApproachAtNest)
+                {
+                    sequenceChanged |= BreedingSystem.MarkBirthBlocked(pregnancy, GameTime,
+                        "Going to give birth — waiting for nest arrival.");
+                    continue;
+                }
 
                 LitterData litter;
                 string reason;
@@ -3162,12 +3249,22 @@ namespace RatHabitat
             if (!SaveSystem.Save(Save)) return false;
 
             string pupWord = createdPups == 1 ? "pup" : "pups";
-            litter.birthAnnouncementLogged = true;
-            StatusMessage = ColonyFactory.DisplayName(mother) + " has given birth to " +
+            string announcement = ColonyFactory.DisplayName(mother) + " has given birth to " +
                 createdPups + " " + pupWord + "!";
+            StatusMessage = announcement;
+            ColonyEventData emittedEvent = Save.eventLog != null && Save.eventLog.Count > 0
+                ? Save.eventLog[0]
+                : null;
+            litter.birthAnnouncementLogged = true;
             // Persist both the one-time guard and the approved event entry.
-            SaveSystem.Save(Save);
-            return true;
+            // If the browser write fails, roll back the in-memory guard and
+            // event so the next deadline pass can retry without losing or
+            // duplicating the announcement.
+            if (SaveSystem.Save(Save)) return true;
+            litter.birthAnnouncementLogged = false;
+            if (emittedEvent != null && Save.eventLog != null)
+                Save.eventLog.Remove(emittedEvent);
+            return false;
         }
 
         public void GrowSelectedRat()
@@ -3310,6 +3407,7 @@ namespace RatHabitat
                 " materialAudit=deferred-to-RatVisualFactory");
             Save.rats.Add(rat);
             Save.ratIds.Add(rat.id);
+            RatNameSystem.EnsureUniqueName(Save, rat, GameTime);
             EnclosureSystem.RecalculateAssignments(Save);
             selectedRatId = rat.id;
             selectedObjectId = null;
@@ -3550,6 +3648,7 @@ namespace RatHabitat
                 disposition == RatRemovalDisposition.Euthanized ? "Euthanized" : "Removed";
             RatActivitySystem.SetCurrent(Save, rat, removalKey, removalLabel, GameTime, removalMessage);
             Save.retiredRats.Add(rat);
+            RatNameSystem.RecordUsage(Save, rat.name, rat.sex, rat.id, GameTime);
             if (awardCredits)
             {
                 Save.colonyCredits += saleDollars;

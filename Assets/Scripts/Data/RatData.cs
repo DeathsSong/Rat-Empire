@@ -304,6 +304,13 @@ namespace RatHabitat
         // the birth or turning the due timestamp into a teleport instruction.
         public bool birthApproachStarted;
         public long birthApproachStartedAt;
+        // Birth resolution is a persisted, retryable transaction. A litter
+        // may be prepared while the pregnancy is still pending; only after
+        // that prepared result is saved can the pregnancy be finalized.
+        public int birthAttemptCount;
+        public long lastBirthAttemptAt;
+        public string birthFailureReason;
+        public int birthCommitState;
     }
 
     [Serializable]
@@ -354,6 +361,17 @@ namespace RatHabitat
         public float coatTone = -1f;
         public GenotypeData genotype = new GenotypeData();
         public TraitData traits = new TraitData();
+    }
+
+    [Serializable]
+    public class RatNameUseData
+    {
+        public string normalizedName;
+        public string displayName;
+        public RatSex sex;
+        public string ratId;
+        public long lastUsedGameTime;
+        public long lastUsedRealTimestamp;
     }
 
     [Serializable]
@@ -422,6 +440,11 @@ namespace RatHabitat
         public long storeNextRestockGameTime;
         public int storeRestockCycle;
         public List<string> usedLitterNames = new List<string>();
+        // Names remain in this history after sale or death. It lets the
+        // allocator prefer never-used/long-unused names without changing
+        // established living names during a UI refresh.
+        public List<RatNameUseData> ratNameHistory = new List<RatNameUseData>();
+        public int ratNameMigrationVersion;
         // Top-alert preferences are separate from event history. Disabling a
         // category hides its live banner but never removes its history row.
         public List<AlertPreferenceData> alertPreferences = new List<AlertPreferenceData>();
@@ -461,6 +484,7 @@ namespace RatHabitat
             habitatObjects ??= new List<HabitatObjectData>();
             storeRatListings ??= new List<StoreRatListingData>();
             usedLitterNames ??= new List<string>();
+            ratNameHistory ??= new List<RatNameUseData>();
             alertPreferences ??= new List<AlertPreferenceData>();
             eventLog ??= new List<ColonyEventData>();
             if (string.IsNullOrEmpty(myRatsSortField)) myRatsSortField = "Name";

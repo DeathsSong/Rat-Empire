@@ -49,6 +49,7 @@ namespace RatHabitat
                 CreateInventory(save, StableHash((save.createdAt == 0 ? GameConfig.NowMs() : save.createdAt).ToString()), 0);
                 save.storeInventoryInitialized = true;
                 save.storeNextRestockGameTime = currentGameTime + GameConfig.StoreRestockIntervalGameMs;
+                RatNameSystem.EnsureUniqueNames(save, currentGameTime);
                 return;
             }
 
@@ -81,6 +82,7 @@ namespace RatHabitat
             CreateInventory(save, seed, save.storeRestockCycle);
             save.storeInventoryInitialized = true;
             save.storeNextRestockGameTime = gameTime + GameConfig.StoreRestockIntervalGameMs;
+            RatNameSystem.EnsureUniqueNames(save, gameTime);
         }
 
         /// <summary>
