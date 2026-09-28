@@ -4960,8 +4960,13 @@ namespace RatHabitat
         private void SetVisualDiagnosticMode(RatVisualDiagnosticMode mode)
         {
             RatVisualDiagnostics.SetMode(mode);
-            RebuildDeveloperToolsContent();
+            // Hide the modal so the same live rats can be inspected unobscured.
+            // Reopening Developer Tools preserves the temporary mode and lets
+            // the next isolation mode be selected without changing the colony.
+            developerToolsOpen = false;
+            activeMainPanel = MainPanel.None;
             SetOverlayVisibility();
+            RefreshTopNavigationState();
         }
 
         private RectTransform CreateCard(string title)
