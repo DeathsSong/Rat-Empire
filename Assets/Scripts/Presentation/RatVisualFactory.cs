@@ -293,8 +293,16 @@ namespace RatHabitat
                         }
                         if (material.HasProperty("_MatureTailColor"))
                         {
-                            material.SetColor("_MatureTailColor",
-                                ResolveMatureTailColor(rat, coat, albino));
+                            // The shared pinkie texture supplies the tail's
+                            // color and skin detail; leave its tint neutral so
+                            // coat and marking colors cannot cover it.
+                            material.SetColor("_MatureTailColor", Color.white);
+                        }
+                        if (material.HasProperty("_MatureTailTex"))
+                        {
+                            Texture pinkieSkinTexture = GetPinkieSkinTexture();
+                            if (pinkieSkinTexture != null)
+                                material.SetTexture("_MatureTailTex", pinkieSkinTexture);
                         }
                         if (material.HasProperty("_MatureTailStrength"))
                         {
@@ -485,23 +493,6 @@ namespace RatHabitat
             selected = Color.Lerp(selected, coat, 0.12f);
             selected.a = 1f;
             return selected;
-        }
-
-        private static Color ResolveMatureTailColor(RatData rat, Color coat, bool albino)
-        {
-            if (albino)
-                return new Color(0.86f, 0.42f, 0.46f, 1f);
-
-            // Rat tails are skin rather than fur. Keep a muted, translucent
-            // pink/brown base, then pull it slightly toward the recorded coat
-            // so the tail belongs to the same phenotype without becoming a
-            // pinkie-colored duplicate.
-            float luminance = coat.r * 0.299f + coat.g * 0.587f + coat.b * 0.114f;
-            Color skin = Color.Lerp(
-                new Color(0.33f, 0.18f, 0.19f, 1f),
-                new Color(0.66f, 0.37f, 0.36f, 1f),
-                Mathf.Clamp01(0.26f + luminance * 0.62f));
-            return Color.Lerp(skin, coat, 0.06f);
         }
 
         private static bool IsImportedVisual(GameObject visual)
@@ -1812,19 +1803,28 @@ namespace RatHabitat
             }
         }
 
+        private static void EnsurePinkieSkinMaterial()
+        {
+            if (pinkieSkinLookupResolved) return;
+            pinkieSkinLookupResolved = true;
+            cachedPinkieSkin = Resources.Load<Material>(PinkieSkinResourcePath);
+            if (cachedPinkieSkin == null)
+            {
+                Debug.LogWarning("[Rat Habitat] Pinkie skin material was not found at Resources path '" +
+                    PinkieSkinResourcePath + "'; preserving the imported pinkie material.");
+            }
+        }
+
+        private static Texture GetPinkieSkinTexture()
+        {
+            EnsurePinkieSkinMaterial();
+            return GetPinkieTexture(cachedPinkieSkin);
+        }
+
         private static void ApplyPinkieSkin(GameObject visual)
         {
             if (visual == null) return;
-            if (!pinkieSkinLookupResolved)
-            {
-                pinkieSkinLookupResolved = true;
-                cachedPinkieSkin = Resources.Load<Material>(PinkieSkinResourcePath);
-                if (cachedPinkieSkin == null)
-                {
-                    Debug.LogWarning("[Rat Habitat] Pinkie skin material was not found at Resources path '" +
-                        PinkieSkinResourcePath + "'; preserving the imported pinkie material.");
-                }
-            }
+            EnsurePinkieSkinMaterial();
 
             if (cachedPinkieSkin == null) return;
             foreach (var renderer in visual.GetComponentsInChildren<Renderer>(true))
