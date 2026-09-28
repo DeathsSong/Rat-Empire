@@ -50,6 +50,8 @@ namespace RatHabitat
         private static Texture2D cachedEyeMask;
         private static float cachedEyeMaskCoverage;
         private static Vector3 cachedFeatureMaskCoverage;
+        private static float cachedTailRegionCoverage;
+        private static Texture2D cachedMatureTailTexture;
         private static bool spotResourcesResolved;
         private static Material cachedPinkieSkin;
         private static bool pinkieSkinLookupResolved;
@@ -329,16 +331,20 @@ namespace RatHabitat
                         }
                         if (material.HasProperty("_MatureTailColor"))
                         {
-                            // The shared pinkie texture supplies the tail's
-                            // color and skin detail; leave its tint neutral so
-                            // coat and marking colors cannot cover it.
-                            material.SetColor("_MatureTailColor", Color.white);
+                            // Young and adult visuals use a dedicated mature
+                            // tail skin treatment. Albino tails stay pale and
+                            // neutral while other coats receive only a subtle
+                            // skin-tone tint; neither path uses pinkie fur.
+                            material.SetColor("_MatureTailColor", albino
+                                ? new Color(0.84f, 0.82f, 0.78f, 1f)
+                                : new Color(0.88f, 0.70f, 0.64f, 1f));
                         }
                         if (material.HasProperty("_MatureTailTex"))
                         {
-                            Texture pinkieSkinTexture = GetPinkieSkinTexture();
-                            if (pinkieSkinTexture != null)
-                                material.SetTexture("_MatureTailTex", pinkieSkinTexture);
+                            // GetPinkieSkinTexture is reserved for the
+                            // pinkie prefab. Mature stages always receive the
+                            // shared authored/procedural mature-tail resource.
+                            material.SetTexture("_MatureTailTex", GetOrCreateMatureTailTexture());
                         }
                         if (material.HasProperty("_MatureTailStrength"))
                         {
@@ -365,8 +371,11 @@ namespace RatHabitat
                         " eyeMaskCoverage=" + cachedEyeMaskCoverage.ToString("0.000") +
                         " faceMaskCoverage=" + cachedFeatureMaskCoverage.x.ToString("0.000") +
                         " tailMaskCoverage=" + cachedFeatureMaskCoverage.z.ToString("0.000") +
+                        " tailRegionCoverage=" + cachedTailRegionCoverage.ToString("0.000") +
                         " tailTexture=" + TexturePropertySummary(material, "_MatureTailTex") +
+                        " tailTextureIsPinkie=" + IsPinkieTailTexture(material) +
                         " tailStrength=" + FloatPropertySummary(material, "_MatureTailStrength") +
+                        " stage=" + rat.stage +
                         " albinoMode=" + AlbinoModeSummary(material) +
                         " finalAlbedoPath=" + (albino ? "AlbinoNeutralBodyThenEye" : "CoatThenEye");
                 }
@@ -600,6 +609,65 @@ namespace RatHabitat
             return texture;
         }
 
+        /// <summary>
+        /// Returns the shared tail-skin resource used by Young Rat and adult
+        /// stages. This is deliberately separate from the pinkie skin asset:
+        /// the imported mature model has its tail in the same skinned mesh as
+        /// the body, so the shader needs a neutral, repeatable skin source
+        /// that can be sampled only through the tail-region mask.
+        /// </summary>
+        private static Texture2D GetOrCreateMatureTailTexture()
+        {
+            if (cachedMatureTailTexture != null) return cachedMatureTailTexture;
+
+            const int width = 128;
+            const int height = 64;
+            var pixels = new Color[width * height];
+            for (int y = 0; y < height; y++)
+            {
+                float v = (y + 0.5f) / height;
+                for (int x = 0; x < width; x++)
+                {
+                    float u = (x + 0.5f) / width;
+                    // Fine horizontal bands and softer broad variation give
+                    // the mature tail a subtle ring/scale impression without
+                    // introducing the pinkie fur texture or a unique texture
+                    // per rat.
+                    float rings = Mathf.Sin(u * Mathf.PI * 2f * 24f +
+                        Mathf.Sin(v * Mathf.PI * 2f) * 0.65f) * 0.5f + 0.5f;
+                    float broad = Mathf.Sin(u * Mathf.PI * 2f * 3f + v * 4.7f) * 0.5f + 0.5f;
+                    float value = 0.90f + (rings - 0.5f) * 0.075f + (broad - 0.5f) * 0.035f;
+                    value = Mathf.Clamp01(value);
+                    pixels[y * width + x] = new Color(
+                        value,
+                        Mathf.Clamp01(value * 0.965f),
+                        Mathf.Clamp01(value * 0.93f),
+                        1f);
+                }
+            }
+
+            cachedMatureTailTexture = new Texture2D(width, height,
+                TextureFormat.RGBA32, false, true)
+            {
+                name = "Hand Painted Rat Mature Tail Skin",
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Bilinear,
+                anisoLevel = 0,
+                hideFlags = HideFlags.HideAndDontSave,
+            };
+            cachedMatureTailTexture.SetPixels(pixels);
+            cachedMatureTailTexture.Apply(false, true);
+            return cachedMatureTailTexture;
+        }
+
+        private static bool IsPinkieTailTexture(Material material)
+        {
+            if (material == null || !material.HasProperty("_MatureTailTex")) return false;
+            Texture texture = material.GetTexture("_MatureTailTex");
+            return texture != null &&
+                texture.name.IndexOf("Pinkie", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
         private static string TexturePropertySummary(Material material)
         {
             if (material == null) return "<null>";
@@ -780,17 +848,20 @@ namespace RatHabitat
             float faceCoverage = 0f;
             float legCoverage = 0f;
             float tailCoverage = 0f;
+            float tailRegionCoverage = 0f;
             for (int i = 0; i < pixels.Length; i++)
             {
                 faceCoverage += pixels[i].r;
                 legCoverage += pixels[i].g;
                 tailCoverage += pixels[i].b;
+                tailRegionCoverage += Mathf.SmoothStep(0.72f, 0.98f, pixels[i].b);
             }
             float inversePixelCount = 1f / Mathf.Max(1, pixels.Length);
             cachedFeatureMaskCoverage = new Vector3(
                 faceCoverage * inversePixelCount,
                 legCoverage * inversePixelCount,
                 tailCoverage * inversePixelCount);
+            cachedTailRegionCoverage = tailRegionCoverage * inversePixelCount;
 
             var texture = new Texture2D(width, height, TextureFormat.RGBA32, false, true)
             {
