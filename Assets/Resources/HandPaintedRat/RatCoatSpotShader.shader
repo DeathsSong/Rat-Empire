@@ -185,9 +185,14 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // Do not treat weakly weighted transition vertices as markings.
             // Those vertices sit at shoulders, hips, elbows, and knees; using
             // their small blended values creates the thin white joint seams.
-            float faceRegion = smoothstep(0.32, 0.75, featureMask.r);
-            float legRegion = smoothstep(0.32, 0.75, featureMask.g);
-            float bellyRegion = smoothstep(0.24, 0.78, featureMask.a);
+            // Require a feature to own the vertex before it can contribute a
+            // marking. The old lower thresholds painted the small blended
+            // bone weights at shoulders, hips, elbows, and knees. Those
+            // transition pixels appeared as thin white joint seams on every
+            // moving pose, even when the intended marking was elsewhere.
+            float faceRegion = smoothstep(0.56, 0.92, featureMask.r);
+            float legRegion = smoothstep(0.60, 0.94, featureMask.g);
+            float bellyRegion = smoothstep(0.38, 0.86, featureMask.a);
             float featureVariation = sin(input.uv_MainTex.x * 23.0 +
                 input.uv_MainTex.y * 9.0 + _SpotSeed * 2.3) * 0.08 +
                 sin(input.uv_MainTex.y * 17.0 - input.uv_MainTex.x * 13.0 +
@@ -204,8 +209,12 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // deterministic variation before feathering them. This keeps
             // face/leg/belly markings organic without animated noise or a
             // separate decal floating over the skinned mesh.
-            featureBlend = smoothstep(0.18, 0.78,
-                saturate(featureBlend + featureVariation * 0.30));
+            // Feather only the actual feature coverage. Adding variation
+            // before the threshold made tiny edge values become isolated
+            // bright lines; modulating after the threshold keeps organic
+            // variation inside the marking without outlining the seam.
+            featureBlend = smoothstep(0.34, 0.92, featureBlend);
+            featureBlend *= saturate(0.94 + featureVariation * 0.35);
             // Keep dark eye/mouth/tail detail readable when a white facial or
             // belly region crosses the same imported texture island.
             featureBlend *= saturate(1.0 - darkFeatureSignal * 0.48);

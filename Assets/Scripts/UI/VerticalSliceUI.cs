@@ -1808,7 +1808,6 @@ namespace RatHabitat
 
         public void CloseTransientPanels()
         {
-            RatVisualDiagnostics.Reset();
             if (game != null) game.DeactivateMultipleSelection();
             expandedMyRatsId = null;
             familyTreeSubjectId = null;
