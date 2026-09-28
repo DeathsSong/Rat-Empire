@@ -150,18 +150,16 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
                 ownedSkinRegion;
             fixed3 darkFeature = fixed3(0.07, 0.055, 0.06) *
                 (0.82 + saturate(paintedLuminance) * 0.45);
-            fixed3 pinkFeature = fixed3(0.66, 0.18, 0.28) *
-                (0.72 + saturate(paintedLuminance) * 0.24);
-            fixed3 featureColor = lerp(darkFeature, pinkFeature, _PinkEyeMode);
+            // Albino fur must not inherit pink/red source pixels on the face
+            // or legs. Eye color is restored separately below from
+            // _EyeColor, so removing this skin-color blend does not change
+            // the existing albino eye appearance.
+            fixed3 featureColor = darkFeature;
             fixed3 albinoPainted = lerp(albinoFur, featureColor, darkFeatureSignal * 0.94);
 
-            // Preserve pink/red accent pixels from the supplied hand-painted
-            // texture (ears, nose, paws, and eye accents) without allowing
-            // the source beige/tan coat to leak back into the albino body.
-            float pinkSignal = saturate((source.r - source.g) * 5.0) *
-                saturate(1.0 - abs(source.g - source.b) * 8.0) * ownedSkinRegion;
-            fixed3 pinkAccent = fixed3(1.0, 0.58, 0.62) * (0.82 + saturate(painted.r) * 0.16);
-            albinoPainted = lerp(albinoPainted, pinkAccent, pinkSignal * 0.78);
+            // Do not preserve source pink/red color on albino fur. The
+            // explicit eye pass below remains the only albino fur-shader
+            // color exception, keeping the recorded pink/red eye color.
             painted.rgb = lerp(painted.rgb, albinoPainted, _AlbinoMode);
             float bodyMask = SampleFeatheredBodyMask(input.uv_MainTex);
             // The organic patch mask is generated once per rat visual from
