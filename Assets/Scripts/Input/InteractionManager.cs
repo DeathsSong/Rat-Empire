@@ -647,8 +647,13 @@ namespace RatHabitat
             nearestInteractableCollider = null;
             nearestAnyCollider = null;
             anyInteractableMarker = false;
-            float nearestInteractableDistance = float.MaxValue;
             float nearestAnyDistance = float.MaxValue;
+            float nearestRatDistance = float.MaxValue;
+            float nearestOtherDistance = float.MaxValue;
+            SelectableEntity nearestRatEntity = null;
+            Collider nearestRatCollider = null;
+            SelectableEntity nearestOtherEntity = null;
+            Collider nearestOtherCollider = null;
 
             if (hits == null) return false;
             foreach (var hit in hits)
@@ -681,12 +686,39 @@ namespace RatHabitat
                     continue;
                 }
 
-                if (hit.distance < nearestInteractableDistance)
+                // The nest is intentionally a solid, selectable obstacle. When a
+                // mother is inside it, however, the nest collider can be the
+                // first surface hit by the ray even though the ray also reaches
+                // the mother's real selection collider. Prefer that actual rat
+                // hit so the caregiver remains selectable without weakening nest
+                // collision or nest-camera focus. Empty nest clicks still fall
+                // through to the nearest non-rat interactable below.
+                if (entity.kind == SelectableKind.Rat)
                 {
-                    nearestEntity = entity;
-                    nearestInteractableCollider = collider;
-                    nearestInteractableDistance = hit.distance;
+                    if (hit.distance < nearestRatDistance)
+                    {
+                        nearestRatEntity = entity;
+                        nearestRatCollider = collider;
+                        nearestRatDistance = hit.distance;
+                    }
                 }
+                else if (hit.distance < nearestOtherDistance)
+                {
+                    nearestOtherEntity = entity;
+                    nearestOtherCollider = collider;
+                    nearestOtherDistance = hit.distance;
+                }
+            }
+
+            if (nearestRatEntity != null)
+            {
+                nearestEntity = nearestRatEntity;
+                nearestInteractableCollider = nearestRatCollider;
+            }
+            else if (nearestOtherEntity != null)
+            {
+                nearestEntity = nearestOtherEntity;
+                nearestInteractableCollider = nearestOtherCollider;
             }
             return nearestEntity != null;
         }
