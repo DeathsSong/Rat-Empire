@@ -1,5 +1,4 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.EventSystems;
@@ -97,7 +96,6 @@ namespace RatHabitat
         // welcome acknowledgement.
         private bool welcomeOpen;
         private bool developerToolsOpen;
-        private Coroutine hideDiagnosticOverlayRoutine;
         private bool ratAnimationShowcaseOpen;
         private bool settingsOpen;
         private bool eventLogOpen;
@@ -1799,7 +1797,6 @@ namespace RatHabitat
 
         private void CloseDeveloperTools()
         {
-            RatVisualDiagnostics.Reset();
             developerToolsOpen = false;
             ratAnimationShowcaseOpen = false;
             settingsOpen = true;
@@ -4962,26 +4959,12 @@ namespace RatHabitat
         private void SetVisualDiagnosticMode(RatVisualDiagnosticMode mode)
         {
             RatVisualDiagnostics.SetMode(mode);
-            // Keep the modal blocking for the remainder of this input frame.
-            // Hiding it synchronously would let the same tap fall through to
-            // the habitat and call CloseTransientPanels, which would reset the
-            // diagnostic before it could be inspected.
-            if (hideDiagnosticOverlayRoutine != null)
-                StopCoroutine(hideDiagnosticOverlayRoutine);
-            hideDiagnosticOverlayRoutine = StartCoroutine(HideDiagnosticOverlayAfterInputFrame());
-        }
-
-        private IEnumerator HideDiagnosticOverlayAfterInputFrame()
-        {
-            yield return null;
-            hideDiagnosticOverlayRoutine = null;
-            // Hide the modal so the same live rats can be inspected unobscured.
-            // Reopening Developer Tools preserves the temporary mode and lets
-            // the next isolation mode be selected without changing the colony.
-            developerToolsOpen = false;
-            activeMainPanel = MainPanel.None;
+            // Keep the diagnostic modal open while changing modes. The
+            // existing Close Developer Tools -> Close Settings path hides the
+            // panel without resetting the temporary material, and the Normal
+            // button explicitly restores the saved materials.
+            RebuildDeveloperToolsContent();
             SetOverlayVisibility();
-            RefreshTopNavigationState();
         }
 
         private RectTransform CreateCard(string title)
