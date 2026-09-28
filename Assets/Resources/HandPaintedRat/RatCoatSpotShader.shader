@@ -9,6 +9,7 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
         _SpotMask ("Body Spot UV Mask", 2D) = "black" {}
         _SpotPattern ("Organic Spot Pattern", 2D) = "black" {}
         _FeatureMask ("Stable Skinned Feature Mask", 2D) = "black" {}
+        _EyeMask ("Precise Eye UV Mask", 2D) = "black" {}
         _SpotColor ("Spot Color", Color) = (1, 1, 1, 1)
         _SpotSeed ("Spot Seed", Float) = 0
         _SpotStrength ("Spot Strength", Range(0, 1)) = 0
@@ -41,6 +42,7 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
         sampler2D _SpotMask;
         sampler2D _SpotPattern;
         sampler2D _FeatureMask;
+        sampler2D _EyeMask;
         fixed4 _Color;
         fixed4 _AccentColor;
         fixed4 _SpotColor;
@@ -282,7 +284,14 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // recolored when the whole imported mesh is tinted. Restore a
             // small, localized eye signal last so ordinary rats always have
             // black eyes and albino/pink-eye phenotypes retain pink/red eyes.
-            float eyeRegion = saturate(darkFeatureSignal * featureMask.r * 1.35);
+            // IMPORTANT: featureMask.r is deliberately not used here. Its
+            // head/ear ownership is broad and would recolor an entire face
+            // when multiplied by _EyeColor. _EyeMask is a separate, stable
+            // UV mask containing only the two actual eye islands; the source
+            // luminance gate rejects surrounding fur and ear pixels.
+            float eyeMask = tex2D(_EyeMask, input.uv_MainTex).r;
+            float eyePixelSignal = 1.0 - smoothstep(0.06, 0.22, sourceLuminance);
+            float eyeRegion = saturate(eyeMask * eyePixelSignal);
             // Drive albino's final visible body color here, after markings
             // and tail sampling. This prevents any imported pink/beige map,
             // spot color, or broad feature overlay from becoming albino fur.

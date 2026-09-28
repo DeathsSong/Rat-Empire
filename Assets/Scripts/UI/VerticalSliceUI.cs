@@ -4901,6 +4901,8 @@ namespace RatHabitat
             AddButton(developerToolsCard, "Diluted Black  •  B/B C/C d/d s/s", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.DilutedBlack));
             AddButton(developerToolsCard, "Diluted Brown  •  b/b C/C d/d s/s", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.DilutedBrown));
             AddButton(developerToolsCard, "Albino  •  B/B c/c D/D s/s", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.Albino));
+            AddButton(developerToolsCard, "Force White Albino Preview  •  white fur, red eyes only", true,
+                () => game.SpawnDeveloperRat(DeveloperRatPreset.ForceWhiteAlbinoPreview));
             AddButton(developerToolsCard, "Spotted Black  •  B/B C/C D/D S/S", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.SpottedBlack));
             AddButton(developerToolsCard, "Spotted Brown  •  b/b C/C D/D S/S", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.SpottedBrown));
             AddButton(developerToolsCard, "Spawn Marked Test Rat  •  blended face, body, and legs", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.MarkedTest));

@@ -15,6 +15,7 @@ namespace RatHabitat
         DilutedBlack,
         DilutedBrown,
         Albino,
+        ForceWhiteAlbinoPreview,
         SpottedBlack,
         SpottedBrown,
         MarkedTest,
@@ -3233,6 +3234,9 @@ namespace RatHabitat
                 case DeveloperRatPreset.Albino:
                     genotype = GeneticsSystem.CreateFounder("B", "B", "c", "c", "D", "D", "s", "s");
                     break;
+                case DeveloperRatPreset.ForceWhiteAlbinoPreview:
+                    genotype = GeneticsSystem.CreateFounder("B", "B", "c", "c", "D", "D", "s", "s");
+                    break;
                 case DeveloperRatPreset.SpottedBlack:
                     genotype = GeneticsSystem.CreateFounder("B", "B", "C", "C", "D", "D", "S", "S");
                     break;
@@ -3280,6 +3284,23 @@ namespace RatHabitat
             rat.phenotype = GeneticsSystem.DerivePhenotype(RatStage.Adult, rat.genotype,
                 rat.coatColorVariant, rat.coatTone);
             GeneticsSystem.ApplyMarkingFamily(rat.phenotype, rat.markingFamily);
+            if (preset == DeveloperRatPreset.ForceWhiteAlbinoPreview)
+            {
+                // This is a visual fixture only. Keep the real c/c genotype,
+                // but make every stored phenotype color unambiguously neutral
+                // so Store, habitat, My Rats, and profile use the same white
+                // albino test rat through the normal presentation pipeline.
+                rat.coatColorVariant = "albino";
+                rat.coatTone = 1f;
+                rat.phenotype.coatColorId = "albino";
+                rat.phenotype.coatColorLabel = "Albino";
+                rat.phenotype.coatColorHex = "#F8F7F1";
+                rat.phenotype.accentHex = "#D9DCE2";
+                rat.phenotype.spotted = false;
+                rat.phenotype.markingFamily = "Albino masking";
+                rat.phenotype.markingsLabel = "Albino masking";
+                rat.phenotype.furRevealed = true;
+            }
             Debug.Log("[Rat Habitat] Developer spawn audit: rat=" + rat.name +
                 " genotype=" + DeveloperGeneSummary(rat.genotype) +
                 " coatColorId=" + rat.phenotype.coatColorId +

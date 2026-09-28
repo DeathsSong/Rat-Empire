@@ -47,6 +47,9 @@ namespace RatHabitat
         private static Texture2D cachedSpotMask;
         private static Mesh cachedFeatureMaskMesh;
         private static Texture2D cachedFeatureMask;
+        private static Texture2D cachedEyeMask;
+        private static float cachedEyeMaskCoverage;
+        private static Vector3 cachedFeatureMaskCoverage;
         private static bool spotResourcesResolved;
         private static Material cachedPinkieSkin;
         private static bool pinkieSkinLookupResolved;
@@ -76,6 +79,16 @@ namespace RatHabitat
             new Color(0.98f, 0.97f, 0.94f), // cream white
         };
         private string lastPhenotypeAuditSignature;
+
+        // The imported HandPaintedRat UV layout has two small eye islands in
+        // the central face island. Keep this mask separate from the broad
+        // head/ear ownership mask: using head ownership for eye color was the
+        // source of the red/pink face wash on albino previews.
+        private static readonly Vector2[] ImportedEyeUvCenters =
+        {
+            new Vector2(0.1836f, 0.5752f),
+            new Vector2(0.2850f, 0.5752f),
+        };
 
         public bool UsesImportedHandPaintedRat
         {
@@ -175,6 +188,9 @@ namespace RatHabitat
             Texture2D featureMask = useCoatShader
                 ? GetOrCreateFeatureRegionMask(visual)
                 : null;
+            Texture2D eyeMask = useCoatShader
+                ? GetOrCreateEyeRegionMask()
+                : null;
             string materialAudit = string.Empty;
             var renderers = visual.GetComponentsInChildren<Renderer>(true);
             foreach (var renderer in renderers)
@@ -254,6 +270,12 @@ namespace RatHabitat
                             material.SetTexture("_FeatureMask", featureMask == null
                                 ? Texture2D.blackTexture
                                 : featureMask);
+                        }
+                        if (material.HasProperty("_EyeMask"))
+                        {
+                            material.SetTexture("_EyeMask", eyeMask == null
+                                ? Texture2D.blackTexture
+                                : eyeMask);
                         }
                         material.SetFloat("_SpotSeed", SpotSeed01(string.IsNullOrEmpty(rat.id) ? rat.name : rat.id));
                         material.SetColor("_SpotColor", ResolveMarkingColor(rat));
@@ -339,6 +361,10 @@ namespace RatHabitat
                         " albinoBody=" + ColorPropertySummary(material, "_AlbinoBodyColor") +
                         " spotColor=" + ColorPropertySummary(material, "_SpotColor") +
                         " eyeColor=" + ColorPropertySummary(material, "_EyeColor") +
+                        " eyeMask=" + TexturePropertySummary(material, "_EyeMask") +
+                        " eyeMaskCoverage=" + cachedEyeMaskCoverage.ToString("0.000") +
+                        " faceMaskCoverage=" + cachedFeatureMaskCoverage.x.ToString("0.000") +
+                        " tailMaskCoverage=" + cachedFeatureMaskCoverage.z.ToString("0.000") +
                         " tailTexture=" + TexturePropertySummary(material, "_MatureTailTex") +
                         " tailStrength=" + FloatPropertySummary(material, "_MatureTailStrength") +
                         " albinoMode=" + AlbinoModeSummary(material) +
@@ -751,6 +777,21 @@ namespace RatHabitat
                 }
             }
 
+            float faceCoverage = 0f;
+            float legCoverage = 0f;
+            float tailCoverage = 0f;
+            for (int i = 0; i < pixels.Length; i++)
+            {
+                faceCoverage += pixels[i].r;
+                legCoverage += pixels[i].g;
+                tailCoverage += pixels[i].b;
+            }
+            float inversePixelCount = 1f / Mathf.Max(1, pixels.Length);
+            cachedFeatureMaskCoverage = new Vector3(
+                faceCoverage * inversePixelCount,
+                legCoverage * inversePixelCount,
+                tailCoverage * inversePixelCount);
+
             var texture = new Texture2D(width, height, TextureFormat.RGBA32, false, true)
             {
                 name = "Hand Painted Rat Stable Feature Mask",
@@ -764,6 +805,58 @@ namespace RatHabitat
             cachedFeatureMaskMesh = mesh;
             cachedFeatureMask = texture;
             return texture;
+        }
+
+        /// <summary>
+        /// Creates the eye-only UV mask for the imported rat. This is kept as
+        /// a tiny shared texture because the imported FBX has one skinned
+        /// renderer/material and does not expose separate eye submeshes.
+        /// The centers are the measured eye islands in the authored
+        /// rat_bege_psd UV layout; the shader additionally gates them by the
+        /// source's dark eye pixels. No head, ear, muzzle, leg, or belly
+        /// ownership channel participates in eye coloring.
+        /// </summary>
+        private static Texture2D GetOrCreateEyeRegionMask()
+        {
+            if (cachedEyeMask != null) return cachedEyeMask;
+
+            const int width = 128;
+            const int height = 128;
+            const float radiusX = 0.022f;
+            const float radiusY = 0.026f;
+            Color[] pixels = new Color[width * height];
+            float coverage = 0f;
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    Vector2 uv = new Vector2((x + 0.5f) / width, (y + 0.5f) / height);
+                    float value = 0f;
+                    for (int i = 0; i < ImportedEyeUvCenters.Length; i++)
+                    {
+                        Vector2 delta = uv - ImportedEyeUvCenters[i];
+                        float distance = Mathf.Sqrt(
+                            (delta.x * delta.x) / (radiusX * radiusX) +
+                            (delta.y * delta.y) / (radiusY * radiusY));
+                        value = Mathf.Max(value, 1f - Mathf.SmoothStep(0.52f, 1f, distance));
+                    }
+                    pixels[y * width + x] = new Color(value, value, value, 1f);
+                    coverage += value;
+                }
+            }
+
+            cachedEyeMaskCoverage = coverage / Mathf.Max(1, pixels.Length);
+            cachedEyeMask = new Texture2D(width, height, TextureFormat.RGBA32, false, true)
+            {
+                name = "Hand Painted Rat Precise Eye UV Mask",
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Bilinear,
+                anisoLevel = 0,
+                hideFlags = HideFlags.HideAndDontSave,
+            };
+            cachedEyeMask.SetPixels(pixels);
+            cachedEyeMask.Apply(false, true);
+            return cachedEyeMask;
         }
 
         private static void AddFeatureBone(ref Vector4 mask, int boneIndex, float weight, Transform[] bones)
