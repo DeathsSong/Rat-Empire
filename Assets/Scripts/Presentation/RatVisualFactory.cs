@@ -20,6 +20,8 @@ namespace RatHabitat
         private const string ImportedPinkiePrefabName = "HandPaintedRat_Pinkie";
         private const string SpotShaderName = "Rat Habitat/Hand Painted Rat Coat";
         private const string PhenotypeMaterialMarker = "[Rat Habitat Phenotype]";
+        private const string MatureTailMaterialResourcePath = "HandPaintedRat/HandPaintedRat_MatureTailSkin";
+        private const string MatureTailMaterialMarker = "[Rat Habitat Mature Tail]";
 
         [Header("Replaceable visual assets")]
         [Tooltip("Assign the imported TurboSquid Hand Painted Rat prefab here. The same prefab is used for Young Rat and Adult, with different scales.")]
@@ -53,7 +55,9 @@ namespace RatHabitat
         private static float cachedTailRegionCoverage;
         private static Vector2 cachedTailUvMin;
         private static Vector2 cachedTailUvSize = Vector2.one;
-        private static Texture2D cachedMatureTailTexture;
+        private static Material cachedMatureTailMaterial;
+        private static readonly Dictionary<Mesh, Mesh> matureTailMeshCache =
+            new Dictionary<Mesh, Mesh>();
         private static bool spotResourcesResolved;
         private static Material cachedPinkieSkin;
         private static bool pinkieSkinLookupResolved;
@@ -167,6 +171,8 @@ namespace RatHabitat
                 : ParseColor(rat.phenotype.coatColorHex, new Color(0.3f, 0.3f, 0.34f));
             bool spotted = rat.phenotype.spotted && !albino;
             bool importedVisual = IsImportedVisual(visual);
+            if (importedVisual)
+                EnsureMatureTailSubmesh(visual);
             // Keep the authored hand-painted map for albinos. The map contains
             // the eyes, mouth, whisker/tail shading, and other feature detail
             // on this asset's single skinned renderer. The albino shader
@@ -211,6 +217,25 @@ namespace RatHabitat
                 {
                     var material = materials[materialIndex];
                     if (material == null) continue;
+                    if (importedVisual && IsMatureTailMaterial(material))
+                    {
+                        ConfigureMatureTailMaterial(material, rat);
+                        materials[materialIndex] = material;
+                        if (materialAudit.Length > 0) materialAudit += "; ";
+                        materialAudit += renderer.gameObject.name + " slot=" + materialIndex +
+                            " material=" + material.name +
+                            " shader=" + (material.shader == null ? "none" : material.shader.name) +
+                            " tailTexture=" + TexturePropertySummary(material, "_MainTex") +
+                            " tailTextureLoaded=" + (material.HasProperty("_MainTex") && material.GetTexture("_MainTex") != null) +
+                            " tailTextureIsPinkie=" + IsPinkieTailTexture(material) +
+                            " tailColor=" + ColorPropertySummary(material) +
+                            " tailUvMin=" + cachedTailUvMin +
+                            " tailUvSize=" + cachedTailUvSize +
+                            " tailMaskCoverage=" + cachedFeatureMaskCoverage.z.ToString("0.000") +
+                            " tailRegionCoverage=" + cachedTailRegionCoverage.ToString("0.000") +
+                            " tailSubmesh=1 stage=" + rat.stage;
+                        continue;
+                    }
                     if (!material.name.Contains(PhenotypeMaterialMarker))
                     {
                         material = new Material(material);
@@ -331,37 +356,6 @@ namespace RatHabitat
                                     : new Color(0.012f, 0.010f, 0.012f, 1f));
                             }
                         }
-                        if (material.HasProperty("_MatureTailColor"))
-                        {
-                            // Young and adult visuals use a dedicated mature
-                            // tail skin treatment. Albino tails stay pale and
-                            // neutral while other coats receive only a subtle
-                            // skin-tone tint; neither path uses pinkie fur.
-                            material.SetColor("_MatureTailColor", albino
-                                ? new Color(0.99f, 0.965f, 0.93f, 1f)
-                                : new Color(0.88f, 0.70f, 0.64f, 1f));
-                        }
-                        if (material.HasProperty("_MatureTailTex"))
-                        {
-                            // GetPinkieSkinTexture is reserved for the
-                            // pinkie prefab. Mature stages always receive the
-                            // shared authored/procedural mature-tail resource.
-                            material.SetTexture("_MatureTailTex", GetOrCreateMatureTailTexture());
-                        }
-                        if (material.HasProperty("_MatureTailStrength"))
-                        {
-                            // This material is only assigned to adult/young
-                            // imported models. Keeping this explicit prevents
-                            // a pinkie skin assignment from being reused by a
-                            // later stage transition.
-                            material.SetFloat("_MatureTailStrength", 1f);
-                        }
-                        if (material.HasProperty("_TailUvMin"))
-                            material.SetVector("_TailUvMin", new Vector4(
-                                cachedTailUvMin.x, cachedTailUvMin.y, 0f, 0f));
-                        if (material.HasProperty("_TailUvSize"))
-                            material.SetVector("_TailUvSize", new Vector4(
-                                cachedTailUvSize.x, cachedTailUvSize.y, 0f, 0f));
                         if (material.HasProperty("_AlbinoMode")) material.SetFloat("_AlbinoMode", albino ? 1f : 0f);
                         if (material.HasProperty("_AlbinoBodyColor")) material.SetColor("_AlbinoBodyColor", new Color(0.98f, 0.965f, 0.92f, 1f));
                     }
@@ -382,11 +376,11 @@ namespace RatHabitat
                         " tailRegionCoverage=" + cachedTailRegionCoverage.ToString("0.000") +
                         " tailUvMin=" + cachedTailUvMin +
                         " tailUvSize=" + cachedTailUvSize +
-                        " tailTexture=" + TexturePropertySummary(material, "_MatureTailTex") +
-                        " tailTextureLoaded=" + (material.HasProperty("_MatureTailTex") && material.GetTexture("_MatureTailTex") != null) +
-                        " tailTextureIsPinkie=" + IsPinkieTailTexture(material) +
-                        " tailColor=" + ColorPropertySummary(material, "_MatureTailColor") +
-                        " tailStrength=" + FloatPropertySummary(material, "_MatureTailStrength") +
+                        " tailTexture=separate-submesh" +
+                        " tailTextureLoaded=separate-submesh" +
+                        " tailTextureIsPinkie=separate-submesh" +
+                        " tailColor=separate-submesh" +
+                        " tailStrength=separate-submesh" +
                         " stage=" + rat.stage +
                         " albinoMode=" + AlbinoModeSummary(material) +
                         " finalAlbedoPath=" + (albino ? "AlbinoNeutralBodyThenEye" : "CoatThenEye");
@@ -621,63 +615,142 @@ namespace RatHabitat
             return texture;
         }
 
-        /// <summary>
-        /// Returns the shared tail-skin resource used by Young Rat and adult
-        /// stages. This is deliberately separate from the pinkie skin asset:
-        /// the imported mature model has its tail in the same skinned mesh as
-        /// the body, so the shader needs a neutral, repeatable skin source
-        /// that can be sampled only through the tail-region mask.
-        /// </summary>
-        private static Texture2D GetOrCreateMatureTailTexture()
+        private static SkinnedMeshRenderer EnsureMatureTailSubmesh(GameObject visual)
         {
-            if (cachedMatureTailTexture != null) return cachedMatureTailTexture;
+            if (visual == null) return null;
+            var renderer = visual.GetComponentInChildren<SkinnedMeshRenderer>(true);
+            if (renderer == null || renderer.sharedMesh == null) return renderer;
 
-            const int width = 128;
-            const int height = 64;
-            var pixels = new Color[width * height];
-            for (int y = 0; y < height; y++)
+            Material[] materials = renderer.sharedMaterials;
+            if (renderer.sharedMesh.subMeshCount > 1 && materials != null &&
+                materials.Length > 1 && IsMatureTailMaterial(materials[1]))
+                return renderer;
+
+            Material matureTailSource = ResolveMatureTailMaterial();
+            if (matureTailSource == null)
             {
-                float v = (y + 0.5f) / height;
-                for (int x = 0; x < width; x++)
-                {
-                    float u = (x + 0.5f) / width;
-                    // The audited imported tail island is long in UV-V, so
-                    // the visible ring bands run along V rather than across
-                    // the body-map U axis. Keep the contrast strong enough
-                    // to survive the small habitat and Store preview sizes;
-                    // the shader adds a second, tail-local pore layer.
-                    float rings = Mathf.Sin(v * Mathf.PI * 2f * 24f +
-                        Mathf.Sin(u * Mathf.PI * 2f) * 0.85f) * 0.5f + 0.5f;
-                    float broad = Mathf.Sin(v * Mathf.PI * 2f * 3f + u * 4.7f) * 0.5f + 0.5f;
-                    float pores = Mathf.Sin(v * Mathf.PI * 2f * 61f + u * 37f) * 0.5f + 0.5f;
-                    float value = 0.48f + rings * 0.36f + broad * 0.10f + pores * 0.06f;
-                    value = Mathf.Clamp01(value);
-                    pixels[y * width + x] = new Color(
-                        value,
-                        Mathf.Clamp01(value * 0.95f),
-                        Mathf.Clamp01(value * 0.91f),
-                        1f);
-                }
+                Debug.LogError("[Rat Habitat] Dedicated mature tail material is missing; " +
+                    "young/adult tails were not given a white fallback.");
+                return renderer;
             }
 
-            cachedMatureTailTexture = new Texture2D(width, height,
-                TextureFormat.RGBA32, false, true)
+            Mesh sourceMesh = renderer.sharedMesh;
+            if (sourceMesh.subMeshCount != 1 || !sourceMesh.isReadable)
             {
-                name = "Hand Painted Rat Mature Tail Skin",
-                wrapMode = TextureWrapMode.Clamp,
-                filterMode = FilterMode.Bilinear,
-                anisoLevel = 0,
-                hideFlags = HideFlags.HideAndDontSave,
+                Debug.LogError("[Rat Habitat] Mature tail split requires the imported rat mesh " +
+                    "to be readable and to have one source submesh. Found submeshes=" +
+                    sourceMesh.subMeshCount + " readable=" + sourceMesh.isReadable + ".");
+                return renderer;
+            }
+
+            Mesh splitMesh;
+            if (!matureTailMeshCache.TryGetValue(sourceMesh, out splitMesh) || splitMesh == null)
+            {
+                BoneWeight[] weights = sourceMesh.boneWeights;
+                Transform[] bones = renderer.bones;
+                int[] sourceTriangles = sourceMesh.GetTriangles(0);
+                var bodyTriangles = new List<int>(sourceTriangles.Length);
+                var tailTriangles = new List<int>(sourceTriangles.Length / 5);
+                for (int i = 0; i + 2 < sourceTriangles.Length; i += 3)
+                {
+                    int i0 = sourceTriangles[i];
+                    int i1 = sourceTriangles[i + 1];
+                    int i2 = sourceTriangles[i + 2];
+                    bool tail = IsTailTriangle(weights, bones, i0, i1, i2);
+                    var target = tail ? tailTriangles : bodyTriangles;
+                    target.Add(i0);
+                    target.Add(i1);
+                    target.Add(i2);
+                }
+
+                if (tailTriangles.Count == 0 || bodyTriangles.Count == 0)
+                {
+                    Debug.LogError("[Rat Habitat] Imported rat mesh did not produce separate " +
+                        "body and tail triangle sets; refusing to assign an unverified tail material.");
+                    return renderer;
+                }
+
+                splitMesh = UnityEngine.Object.Instantiate(sourceMesh);
+                splitMesh.name = sourceMesh.name + " Mature Tail Submesh";
+                splitMesh.subMeshCount = 2;
+                splitMesh.SetTriangles(bodyTriangles, 0, false);
+                splitMesh.SetTriangles(tailTriangles, 1, false);
+                splitMesh.RecalculateBounds();
+                splitMesh.hideFlags = HideFlags.HideAndDontSave;
+                matureTailMeshCache[sourceMesh] = splitMesh;
+                Debug.Log("[Rat Habitat] Mature tail mesh audit: source=" + sourceMesh.name +
+                    " vertices=" + sourceMesh.vertexCount +
+                    " sourceSubmeshes=1 splitSubmeshes=2" +
+                    " bodyTriangles=" + (bodyTriangles.Count / 3) +
+                    " tailTriangles=" + (tailTriangles.Count / 3) +
+                    " sourceMaterial=" + (materials == null || materials.Length == 0 || materials[0] == null
+                        ? "<null>" : materials[0].name));
+            }
+
+            renderer.sharedMesh = splitMesh;
+            Material[] splitMaterials = renderer.sharedMaterials;
+            if (splitMaterials == null || splitMaterials.Length < 2)
+                Array.Resize(ref splitMaterials, 2);
+            Material tailInstance = new Material(matureTailSource)
+            {
+                name = matureTailSource.name + " " + MatureTailMaterialMarker,
             };
-            cachedMatureTailTexture.SetPixels(pixels);
-            cachedMatureTailTexture.Apply(false, true);
-            return cachedMatureTailTexture;
+            splitMaterials[1] = tailInstance;
+            renderer.sharedMaterials = splitMaterials;
+            return renderer;
+        }
+
+        private static bool IsTailTriangle(BoneWeight[] weights, Transform[] bones, int i0, int i1, int i2)
+        {
+            if (weights == null || i0 < 0 || i1 < 0 || i2 < 0 ||
+                i0 >= weights.Length || i1 >= weights.Length || i2 >= weights.Length)
+                return false;
+            float w0 = TailBoneWeight(weights[i0], bones);
+            float w1 = TailBoneWeight(weights[i1], bones);
+            float w2 = TailBoneWeight(weights[i2], bones);
+            int ownedVertices = (w0 >= 0.24f ? 1 : 0) +
+                (w1 >= 0.24f ? 1 : 0) + (w2 >= 0.24f ? 1 : 0);
+            return ownedVertices >= 2 && (w0 + w1 + w2) / 3f >= 0.24f;
+        }
+
+        private static Material ResolveMatureTailMaterial()
+        {
+            if (cachedMatureTailMaterial != null) return cachedMatureTailMaterial;
+            cachedMatureTailMaterial = Resources.Load<Material>(MatureTailMaterialResourcePath);
+            if (cachedMatureTailMaterial == null)
+                Debug.LogError("[Rat Habitat] Resources.Load<Material> returned null for dedicated " +
+                    "mature tail material at '" + MatureTailMaterialResourcePath + "'.");
+            return cachedMatureTailMaterial;
+        }
+
+        private static bool IsMatureTailMaterial(Material material)
+        {
+            return material != null &&
+                (material.name.IndexOf(MatureTailMaterialMarker, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 (material.shader != null && material.shader.name == "Rat Habitat/Mature Rat Tail Skin"));
+        }
+
+        private static void ConfigureMatureTailMaterial(Material material, RatData rat)
+        {
+            if (material == null || rat == null) return;
+            bool albino = IsAlbinoLikePhenotype(rat);
+            if (material.HasProperty("_Color"))
+            {
+                Color tint = albino
+                    ? new Color(0.90f, 0.88f, 0.86f, 1f)
+                    : new Color(0.78f, 0.58f, 0.54f, 1f);
+                material.SetColor("_Color", tint);
+            }
+            if (material.HasProperty("_MainTex") && material.GetTexture("_MainTex") == null)
+                material.SetTexture("_MainTex", ResolveMatureTailMaterial().GetTexture("_MainTex"));
         }
 
         private static bool IsPinkieTailTexture(Material material)
         {
-            if (material == null || !material.HasProperty("_MatureTailTex")) return false;
-            Texture texture = material.GetTexture("_MatureTailTex");
+            if (material == null) return false;
+            Texture texture = material.HasProperty("_MainTex")
+                ? material.GetTexture("_MainTex")
+                : (material.HasProperty("_MatureTailTex") ? material.GetTexture("_MatureTailTex") : null);
             return texture != null &&
                 texture.name.IndexOf("Pinkie", StringComparison.OrdinalIgnoreCase) >= 0;
         }
