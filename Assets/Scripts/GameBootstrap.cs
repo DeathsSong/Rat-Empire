@@ -239,7 +239,7 @@ namespace RatHabitat
                     liveEventExpiresAt = 0L;
                     return string.Empty;
                 }
-                return liveEventMessage;
+                return StripSexSymbolsFromEventMessage(liveEventMessage);
             }
         }
         public string LatestEnabledEventMessage
