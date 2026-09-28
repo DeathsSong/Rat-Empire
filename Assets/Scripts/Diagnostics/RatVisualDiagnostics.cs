@@ -17,6 +17,8 @@ namespace RatHabitat
         MaterialIds,
         Normals,
         Tangents,
+        TailRegion,
+        MatureTailMaterial,
     }
 
     public static class RatVisualDiagnostics
@@ -48,9 +50,16 @@ namespace RatHabitat
                     case RatVisualDiagnosticMode.MaterialIds: return "Material / renderer IDs";
                     case RatVisualDiagnosticMode.Normals: return "World normals";
                     case RatVisualDiagnosticMode.Tangents: return "World tangents";
+                    case RatVisualDiagnosticMode.TailRegion: return "Tail region (bright diagnostic)";
+                    case RatVisualDiagnosticMode.MatureTailMaterial: return "Mature tail material";
                     default: return "Normal coat + markings";
                 }
             }
+        }
+
+        public static bool UsesNormalCoatPipeline
+        {
+            get { return mode == RatVisualDiagnosticMode.Normal || IsTailMode(mode); }
         }
 
         public static void SetMode(RatVisualDiagnosticMode requested)
@@ -61,6 +70,7 @@ namespace RatHabitat
                 return;
             }
 
+            if (IsTailMode(mode)) ApplyTailModeToAllLiveVisuals(0f);
             RestoreOriginalMaterials();
             mode = requested;
             if (mode != RatVisualDiagnosticMode.Normal)
@@ -82,7 +92,13 @@ namespace RatHabitat
         /// </summary>
         public static void ApplyToVisual(GameObject visual)
         {
-            if (mode == RatVisualDiagnosticMode.Normal || visual == null) return;
+            if (visual == null) return;
+            if (IsTailMode(mode))
+            {
+                ApplyTailMode(visual, TailModeValue(mode));
+                return;
+            }
+            if (mode == RatVisualDiagnosticMode.Normal) return;
             ApplyToRenderers(visual.GetComponentsInChildren<Renderer>(true));
         }
 
@@ -96,6 +112,50 @@ namespace RatHabitat
                 GameObject visual;
                 if (controller.TryGetCurrentVisual(out visual)) ApplyToVisual(visual);
             }
+        }
+
+        private static void ApplyTailModeToAllLiveVisuals(float value)
+        {
+            var controllers = UnityEngine.Object.FindObjectsOfType<RatVisualController>(true);
+            for (int i = 0; i < controllers.Length; i++)
+            {
+                RatVisualController controller = controllers[i];
+                if (controller == null) continue;
+                GameObject visual;
+                if (controller.TryGetCurrentVisual(out visual)) ApplyTailMode(visual, value);
+            }
+        }
+
+        private static void ApplyTailMode(GameObject visual, float value)
+        {
+            if (visual == null) return;
+            var renderers = visual.GetComponentsInChildren<Renderer>(true);
+            for (int rendererIndex = 0; rendererIndex < renderers.Length; rendererIndex++)
+            {
+                Renderer renderer = renderers[rendererIndex];
+                if (renderer == null || !renderer.enabled) continue;
+                Material[] materials = renderer.sharedMaterials;
+                if (materials == null) continue;
+                for (int materialIndex = 0; materialIndex < materials.Length; materialIndex++)
+                {
+                    Material material = materials[materialIndex];
+                    if (material == null || !material.HasProperty("_TailDiagnosticMode")) continue;
+                    propertyBlock.Clear();
+                    propertyBlock.SetFloat("_TailDiagnosticMode", value);
+                    renderer.SetPropertyBlock(propertyBlock, materialIndex);
+                }
+            }
+        }
+
+        private static bool IsTailMode(RatVisualDiagnosticMode diagnosticMode)
+        {
+            return diagnosticMode == RatVisualDiagnosticMode.TailRegion ||
+                diagnosticMode == RatVisualDiagnosticMode.MatureTailMaterial;
+        }
+
+        private static float TailModeValue(RatVisualDiagnosticMode diagnosticMode)
+        {
+            return diagnosticMode == RatVisualDiagnosticMode.TailRegion ? 1f : 2f;
         }
 
         private static void ApplyToRenderers(Renderer[] renderers)

@@ -20,6 +20,9 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
         _MatureTailTex ("Mature Rat Tail Skin", 2D) = "white" {}
         _MatureTailColor ("Mature Tail Skin Tint", Color) = (1, 1, 1, 1)
         _MatureTailStrength ("Mature Tail Strength", Range(0, 1)) = 1
+        _TailUvMin ("Mature Tail UV Minimum", Vector) = (0, 0, 0, 0)
+        _TailUvSize ("Mature Tail UV Size", Vector) = (1, 1, 0, 0)
+        _TailDiagnosticMode ("Tail Diagnostic Mode", Float) = 0
         _MarkingFamily ("Marking Family", Float) = 0
         _FaceMarkingStrength ("Face Marking Strength", Range(0, 1)) = 0
         _LegMarkingStrength ("Leg Marking Strength", Range(0, 1)) = 0
@@ -55,6 +58,9 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
         sampler2D _MatureTailTex;
         fixed4 _MatureTailColor;
         float _MatureTailStrength;
+        float4 _TailUvMin;
+        float4 _TailUvSize;
+        float _TailDiagnosticMode;
         float _MarkingFamily;
         float _FaceMarkingStrength;
         float _LegMarkingStrength;
@@ -266,7 +272,14 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // strongly owned tail region. The texture is shared and sampled
             // in the existing UVs, so it stays attached while the tail bends
             // and rotates.
-            fixed4 matureTailSource = tex2D(_MatureTailTex, input.uv_MainTex);
+            // The imported body and tail share one renderer, but their UVs
+            // occupy only a small tail island. Remap through the measured
+            // tail-island bounds before sampling the dedicated mature-tail
+            // resource; sampling it with full body UVs made the previous
+            // treatment appear almost flat on the actual tail.
+            float2 tailUv = saturate((input.uv_MainTex - _TailUvMin.xy) /
+                max(_TailUvSize.xy, float2(0.001, 0.001)));
+            fixed4 matureTailSource = tex2D(_MatureTailTex, tailUv);
             float tailFine = sin(input.uv_MainTex.x * 211.0 +
                 input.uv_MainTex.y * 97.0 + _SpotSeed * 5.1) * 0.5 + 0.5;
             float tailBroad = sin(input.uv_MainTex.x * 31.0 -
@@ -277,8 +290,8 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
                 (tailFine - 0.5) * 0.045 + (tailRings - 0.5) * 0.035;
             fixed3 matureTail = matureTailSource.rgb *
                 _MatureTailColor.rgb * tailSkinValue;
-            fixed3 coatWithMarkings = lerp(painted.rgb, _SpotColor.rgb, whiteBlend);
-            coatWithMarkings = lerp(coatWithMarkings, matureTail,
+            fixed3 coatWithoutTail = lerp(painted.rgb, _SpotColor.rgb, whiteBlend);
+            fixed3 coatWithMarkings = lerp(coatWithoutTail, matureTail,
                 tailRegion * _MatureTailStrength);
 
             // The source texture contains eye detail, but its hue can be
@@ -299,9 +312,20 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // The eye pass remains the only red/pink exception on an albino.
             fixed3 albinoFinal = lerp(albinoFur, matureTail,
                 tailRegion * _MatureTailStrength);
-            output.Albedo = _AlbinoMode > 0.5
+            fixed3 finalAlbedo = _AlbinoMode > 0.5
                 ? lerp(albinoFinal, _EyeColor.rgb, eyeRegion)
                 : lerp(coatWithMarkings, _EyeColor.rgb, eyeRegion);
+            // Developer-only modes are intentionally shader-local so the
+            // real tail mask and remapped mature-tail pixels are tested on
+            // the exact production renderer/material path.
+            if (_TailDiagnosticMode > 0.5 && _TailDiagnosticMode < 1.5)
+            {
+                fixed3 brightTail = fixed3(0.05, 0.95, 1.0);
+                fixed3 bodyWithoutTail = _AlbinoMode > 0.5
+                    ? albinoFur : coatWithoutTail;
+                finalAlbedo = lerp(bodyWithoutTail, brightTail, tailRegion);
+            }
+            output.Albedo = finalAlbedo;
             output.Metallic = 0.0;
             output.Smoothness = 0.08;
             output.Alpha = painted.a;

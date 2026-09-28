@@ -51,6 +51,8 @@ namespace RatHabitat
         private static float cachedEyeMaskCoverage;
         private static Vector3 cachedFeatureMaskCoverage;
         private static float cachedTailRegionCoverage;
+        private static Vector2 cachedTailUvMin;
+        private static Vector2 cachedTailUvSize = Vector2.one;
         private static Texture2D cachedMatureTailTexture;
         private static bool spotResourcesResolved;
         private static Material cachedPinkieSkin;
@@ -148,7 +150,7 @@ namespace RatHabitat
             // phenotype refreshes. Without this guard, the next activity or
             // clock update would rebind the coat shader and invalidate the
             // diagnostic comparison before it could be inspected.
-            if (RatVisualDiagnostics.Mode != RatVisualDiagnosticMode.Normal)
+            if (!RatVisualDiagnostics.UsesNormalCoatPipeline)
             {
                 RatVisualDiagnostics.ApplyToVisual(visual);
                 return;
@@ -336,7 +338,7 @@ namespace RatHabitat
                             // neutral while other coats receive only a subtle
                             // skin-tone tint; neither path uses pinkie fur.
                             material.SetColor("_MatureTailColor", albino
-                                ? new Color(0.84f, 0.82f, 0.78f, 1f)
+                                ? new Color(0.99f, 0.965f, 0.93f, 1f)
                                 : new Color(0.88f, 0.70f, 0.64f, 1f));
                         }
                         if (material.HasProperty("_MatureTailTex"))
@@ -354,6 +356,12 @@ namespace RatHabitat
                             // later stage transition.
                             material.SetFloat("_MatureTailStrength", 1f);
                         }
+                        if (material.HasProperty("_TailUvMin"))
+                            material.SetVector("_TailUvMin", new Vector4(
+                                cachedTailUvMin.x, cachedTailUvMin.y, 0f, 0f));
+                        if (material.HasProperty("_TailUvSize"))
+                            material.SetVector("_TailUvSize", new Vector4(
+                                cachedTailUvSize.x, cachedTailUvSize.y, 0f, 0f));
                         if (material.HasProperty("_AlbinoMode")) material.SetFloat("_AlbinoMode", albino ? 1f : 0f);
                         if (material.HasProperty("_AlbinoBodyColor")) material.SetColor("_AlbinoBodyColor", new Color(0.98f, 0.965f, 0.92f, 1f));
                     }
@@ -372,8 +380,12 @@ namespace RatHabitat
                         " faceMaskCoverage=" + cachedFeatureMaskCoverage.x.ToString("0.000") +
                         " tailMaskCoverage=" + cachedFeatureMaskCoverage.z.ToString("0.000") +
                         " tailRegionCoverage=" + cachedTailRegionCoverage.ToString("0.000") +
+                        " tailUvMin=" + cachedTailUvMin +
+                        " tailUvSize=" + cachedTailUvSize +
                         " tailTexture=" + TexturePropertySummary(material, "_MatureTailTex") +
+                        " tailTextureLoaded=" + (material.HasProperty("_MatureTailTex") && material.GetTexture("_MatureTailTex") != null) +
                         " tailTextureIsPinkie=" + IsPinkieTailTexture(material) +
+                        " tailColor=" + ColorPropertySummary(material, "_MatureTailColor") +
                         " tailStrength=" + FloatPropertySummary(material, "_MatureTailStrength") +
                         " stage=" + rat.stage +
                         " albinoMode=" + AlbinoModeSummary(material) +
@@ -629,19 +641,20 @@ namespace RatHabitat
                 for (int x = 0; x < width; x++)
                 {
                     float u = (x + 0.5f) / width;
-                    // Fine horizontal bands and softer broad variation give
-                    // the mature tail a subtle ring/scale impression without
-                    // introducing the pinkie fur texture or a unique texture
-                    // per rat.
-                    float rings = Mathf.Sin(u * Mathf.PI * 2f * 24f +
-                        Mathf.Sin(v * Mathf.PI * 2f) * 0.65f) * 0.5f + 0.5f;
-                    float broad = Mathf.Sin(u * Mathf.PI * 2f * 3f + v * 4.7f) * 0.5f + 0.5f;
-                    float value = 0.90f + (rings - 0.5f) * 0.075f + (broad - 0.5f) * 0.035f;
+                    // The audited imported tail island is long in UV-V, so
+                    // the visible ring bands run along V rather than across
+                    // the body-map U axis. Higher contrast is intentional:
+                    // the previous nearly-white texture was technically
+                    // valid but read as a flat strip at gameplay distance.
+                    float rings = Mathf.Sin(v * Mathf.PI * 2f * 18f +
+                        Mathf.Sin(u * Mathf.PI * 2f) * 0.65f) * 0.5f + 0.5f;
+                    float broad = Mathf.Sin(v * Mathf.PI * 2f * 3f + u * 4.7f) * 0.5f + 0.5f;
+                    float value = 0.70f + rings * 0.24f + broad * 0.06f;
                     value = Mathf.Clamp01(value);
                     pixels[y * width + x] = new Color(
                         value,
-                        Mathf.Clamp01(value * 0.965f),
-                        Mathf.Clamp01(value * 0.93f),
+                        Mathf.Clamp01(value * 0.95f),
+                        Mathf.Clamp01(value * 0.91f),
                         1f);
                 }
             }
@@ -783,6 +796,9 @@ namespace RatHabitat
             Vector4[] vertexMasks = new Vector4[vertices.Length];
             Bounds bounds = mesh.bounds;
             float heightRange = Mathf.Max(0.0001f, bounds.size.y);
+            Vector2 tailUvMin = new Vector2(float.MaxValue, float.MaxValue);
+            Vector2 tailUvMax = new Vector2(float.MinValue, float.MinValue);
+            int tailUvVertexCount = 0;
             for (int i = 0; i < vertices.Length; i++)
             {
                 Vector4 mask = Vector4.zero;
@@ -791,6 +807,14 @@ namespace RatHabitat
                 AddFeatureBone(ref mask, weight.boneIndex1, weight.weight1, bones);
                 AddFeatureBone(ref mask, weight.boneIndex2, weight.weight2, bones);
                 AddFeatureBone(ref mask, weight.boneIndex3, weight.weight3, bones);
+
+                float tailWeight = TailBoneWeight(weight, bones);
+                if (tailWeight >= 0.24f)
+                {
+                    tailUvMin = Vector2.Min(tailUvMin, uvs[i]);
+                    tailUvMax = Vector2.Max(tailUvMax, uvs[i]);
+                    tailUvVertexCount++;
+                }
 
                 float normalizedHeight = Mathf.Clamp01(
                     (vertices[i].y - bounds.min.y) / heightRange);
@@ -862,6 +886,18 @@ namespace RatHabitat
                 legCoverage * inversePixelCount,
                 tailCoverage * inversePixelCount);
             cachedTailRegionCoverage = tailRegionCoverage * inversePixelCount;
+            if (tailUvVertexCount > 0 && tailUvMax.x >= tailUvMin.x && tailUvMax.y >= tailUvMin.y)
+            {
+                cachedTailUvMin = tailUvMin;
+                cachedTailUvSize = new Vector2(
+                    Mathf.Max(0.001f, tailUvMax.x - tailUvMin.x),
+                    Mathf.Max(0.001f, tailUvMax.y - tailUvMin.y));
+            }
+            else
+            {
+                cachedTailUvMin = Vector2.zero;
+                cachedTailUvSize = Vector2.one;
+            }
 
             var texture = new Texture2D(width, height, TextureFormat.RGBA32, false, true)
             {
@@ -956,6 +992,23 @@ namespace RatHabitat
                 mask.y = Mathf.Max(mask.y, weight);
             if (boneName.IndexOf("tail", StringComparison.OrdinalIgnoreCase) >= 0)
                 mask.z = Mathf.Max(mask.z, weight);
+        }
+
+        private static float TailBoneWeight(BoneWeight weight, Transform[] bones)
+        {
+            return Mathf.Max(
+                TailBoneWeight(weight.boneIndex0, weight.weight0, bones),
+                TailBoneWeight(weight.boneIndex1, weight.weight1, bones),
+                TailBoneWeight(weight.boneIndex2, weight.weight2, bones),
+                TailBoneWeight(weight.boneIndex3, weight.weight3, bones));
+        }
+
+        private static float TailBoneWeight(int boneIndex, float weight, Transform[] bones)
+        {
+            if (bones == null || boneIndex < 0 || boneIndex >= bones.Length || bones[boneIndex] == null)
+                return 0f;
+            return bones[boneIndex].name.IndexOf("tail", StringComparison.OrdinalIgnoreCase) >= 0
+                ? weight : 0f;
         }
 
         private static bool TryGetUvTriangleDenominator(Vector2 a, Vector2 b, Vector2 c, out float denominator)
