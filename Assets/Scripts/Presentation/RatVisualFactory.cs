@@ -714,18 +714,22 @@ namespace RatHabitat
 
         private static void AddFeatureBone(ref Vector4 mask, int boneIndex, float weight, Transform[] bones)
         {
-            // Do not turn ordinary skinning blends into marking coverage. At
-            // shoulders, hips, elbows, and knees a vertex is often shared by
-            // the torso and a limb with several small bone weights. Treating
-            // those transition weights as a feature produced the thin white
-            // joint lines seen on otherwise unmarked coats. Only a bone that
-            // clearly owns the vertex contributes to a face, leg, or tail
-            // region; the organic body mask still supplies the softer coat
-            // pattern around it.
-            const float clearFeatureOwnership = 0.72f;
-            if (weight < clearFeatureOwnership || bones == null || boneIndex < 0 || boneIndex >= bones.Length)
+            if (bones == null || boneIndex < 0 || boneIndex >= bones.Length)
                 return;
             string boneName = bones[boneIndex] == null ? string.Empty : bones[boneIndex].name;
+            // Do not turn ordinary skinning blends into face/leg marking
+            // coverage. At shoulders, hips, elbows, and knees a vertex is
+            // often shared by the torso and a limb with several small bone
+            // weights. Tail segments are different: the imported model uses
+            // several short tail bones and their root vertices are commonly
+            // split across two adjacent segments. Keep a lower, tail-only
+            // ownership threshold so the complete mature tail can receive
+            // its skin treatment without reopening the white joint seam bug.
+            float clearOwnership = boneName.IndexOf("tail", StringComparison.OrdinalIgnoreCase) >= 0
+                ? 0.24f
+                : 0.72f;
+            if (weight < clearOwnership)
+                return;
             if (boneName.IndexOf("head", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 boneName.IndexOf("ear", StringComparison.OrdinalIgnoreCase) >= 0)
                 mask.x = Mathf.Max(mask.x, weight);
