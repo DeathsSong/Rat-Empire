@@ -714,7 +714,16 @@ namespace RatHabitat
 
         private static void AddFeatureBone(ref Vector4 mask, int boneIndex, float weight, Transform[] bones)
         {
-            if (weight <= 0.10f || bones == null || boneIndex < 0 || boneIndex >= bones.Length)
+            // Do not turn ordinary skinning blends into marking coverage. At
+            // shoulders, hips, elbows, and knees a vertex is often shared by
+            // the torso and a limb with several small bone weights. Treating
+            // those transition weights as a feature produced the thin white
+            // joint lines seen on otherwise unmarked coats. Only a bone that
+            // clearly owns the vertex contributes to a face, leg, or tail
+            // region; the organic body mask still supplies the softer coat
+            // pattern around it.
+            const float clearFeatureOwnership = 0.72f;
+            if (weight < clearFeatureOwnership || bones == null || boneIndex < 0 || boneIndex >= bones.Length)
                 return;
             string boneName = bones[boneIndex] == null ? string.Empty : bones[boneIndex].name;
             if (boneName.IndexOf("head", StringComparison.OrdinalIgnoreCase) >= 0 ||

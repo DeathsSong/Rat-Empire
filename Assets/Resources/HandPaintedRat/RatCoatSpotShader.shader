@@ -190,8 +190,13 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // bone weights at shoulders, hips, elbows, and knees. Those
             // transition pixels appeared as thin white joint seams on every
             // moving pose, even when the intended marking was elsewhere.
-            float faceRegion = smoothstep(0.56, 0.92, featureMask.r);
-            float legRegion = smoothstep(0.60, 0.94, featureMask.g);
+            // The feature mask is built from clear bone ownership rather
+            // than every skinning influence. Keep its final threshold high
+            // enough that a bilinear pixel at a torso/limb transition cannot
+            // become a one-pixel white seam while the owned head and leg
+            // regions remain available for real facial and sock markings.
+            float faceRegion = smoothstep(0.74, 0.98, featureMask.r);
+            float legRegion = smoothstep(0.78, 0.99, featureMask.g);
             float bellyRegion = smoothstep(0.38, 0.86, featureMask.a);
             float featureVariation = sin(input.uv_MainTex.x * 23.0 +
                 input.uv_MainTex.y * 9.0 + _SpotSeed * 2.3) * 0.08 +
