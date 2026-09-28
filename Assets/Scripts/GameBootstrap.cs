@@ -250,7 +250,8 @@ namespace RatHabitat
                 for (int index = 0; index < Save.eventLog.Count; index++)
                 {
                     ColonyEventData entry = Save.eventLog[index];
-                    if (EventLogPolicy.IsAlertEnabled(Save, entry)) return entry.message ?? string.Empty;
+                    if (EventLogPolicy.IsAlertEnabled(Save, entry))
+                        return StripSexSymbolsFromEventMessage(entry.message);
                 }
                 return string.Empty;
             }
@@ -285,7 +286,8 @@ namespace RatHabitat
                 ColonyEventData latest = Save.eventLog[0];
                 int count = Save.eventLog.Count;
                 long gameTime = latest == null ? 0L : latest.gameTimeMs;
-                string message = latest == null ? string.Empty : (latest.message ?? string.Empty);
+                string message = latest == null ? string.Empty :
+                    StripSexSymbolsFromEventMessage(latest.message);
                 if (count == cachedEventLogCount && gameTime == cachedEventLogTime &&
                     string.Equals(message, cachedEventLogMessage, StringComparison.Ordinal))
                     return cachedEventLogSignature ?? string.Empty;
@@ -463,7 +465,8 @@ namespace RatHabitat
         public string FormatEventLogEntry(ColonyEventData entry)
         {
             if (entry == null) return string.Empty;
-            return FormatSimulationTimestamp(entry.gameTimeMs) + "  " + (entry.message ?? string.Empty);
+            return FormatSimulationTimestamp(entry.gameTimeMs) + "  " +
+                StripSexSymbolsFromEventMessage(entry.message);
         }
 
         public string FormatSimulationTimestamp(long gameTimeMs)
@@ -535,7 +538,10 @@ namespace RatHabitat
         private bool RecordStatusEvent(string value)
         {
             if (Save == null || string.IsNullOrWhiteSpace(value)) return false;
-            string compact = CompactEventMessage(value);
+            // Sex symbols remain part of normal rat identification everywhere
+            // else. The global top-right event stream is intentionally more
+            // conversational, so normalize them only at this event boundary.
+            string compact = CompactEventMessage(StripSexSymbolsFromEventMessage(value));
             string category = EventLogPolicy.CategoryForMessage(compact);
             if (string.IsNullOrEmpty(category)) return false;
 
@@ -575,6 +581,14 @@ namespace RatHabitat
             return compact.Length > MaximumEventMessageLength
                 ? compact.Substring(0, MaximumEventMessageLength - 3) + "..."
                 : compact;
+        }
+
+        private static string StripSexSymbolsFromEventMessage(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return string.Empty;
+            string message = value.Replace("♂", string.Empty).Replace("♀", string.Empty);
+            while (message.Contains("  ")) message = message.Replace("  ", " ");
+            return message.Trim();
         }
 
         public string UiSignature
