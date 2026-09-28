@@ -464,7 +464,7 @@ namespace RatHabitat
         private static Color ResolveMatureTailColor(RatData rat, Color coat, bool albino)
         {
             if (albino)
-                return new Color(0.83f, 0.46f, 0.49f, 1f);
+                return new Color(0.86f, 0.42f, 0.46f, 1f);
 
             // Rat tails are skin rather than fur. Keep a muted, translucent
             // pink/brown base, then pull it slightly toward the recorded coat
@@ -472,10 +472,10 @@ namespace RatHabitat
             // pinkie-colored duplicate.
             float luminance = coat.r * 0.299f + coat.g * 0.587f + coat.b * 0.114f;
             Color skin = Color.Lerp(
-                new Color(0.38f, 0.25f, 0.25f, 1f),
-                new Color(0.72f, 0.48f, 0.47f, 1f),
-                Mathf.Clamp01(0.30f + luminance * 0.75f));
-            return Color.Lerp(skin, coat, 0.12f);
+                new Color(0.33f, 0.18f, 0.19f, 1f),
+                new Color(0.66f, 0.37f, 0.36f, 1f),
+                Mathf.Clamp01(0.26f + luminance * 0.62f));
+            return Color.Lerp(skin, coat, 0.06f);
         }
 
         private static bool IsImportedVisual(GameObject visual)

@@ -243,13 +243,23 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // Adult and young rats use the mature skin treatment below. The
             // pinkie prefab returns before this shader is assigned, so its
             // dedicated pinkie material can never leak onto mature stages.
-            // The transition is intentionally broad and feathered around the
-            // rump/tail base so it does not create a hard color seam.
-            float tailAxis = smoothstep(0.70, 0.98, ratUv.x);
-            float tailHeight = 1.0 - smoothstep(0.16, 0.43, abs(ratUv.y - 0.39));
-            float tailWidth = 1.0 - smoothstep(0.10, 0.40, abs(centeredSide));
-            float tailRegion = saturate(tailAxis * tailHeight * tailWidth);
-            tailRegion *= 0.76 + 0.24 *
+            // The imported mesh has a single renderer, but its tail vertices
+            // occupy the upper/back edge of the object bounds and a distinct
+            // UV island. The old mask looked for a mid-height side region,
+            // evaluated to zero on this mesh, and left the tail using the
+            // hand-painted/pinkie-like appearance. Gate both the measured
+            // object-space tail strip and its UV island so the actual tail is
+            // recolored without painting the rump.
+            float tailObjectX = 1.0 - smoothstep(0.16, 0.42, abs(ratUv.x - 0.50));
+            float tailObjectZ = 1.0 - smoothstep(0.16, 0.44, ratUv.z);
+            float tailObjectY = smoothstep(0.58, 0.82, ratUv.y);
+            float tailUvU = smoothstep(0.25, 0.31, input.uv_MainTex.x) *
+                (1.0 - smoothstep(0.82, 0.88, input.uv_MainTex.x));
+            float tailUvV = smoothstep(0.01, 0.08, input.uv_MainTex.y) *
+                (1.0 - smoothstep(0.36, 0.44, input.uv_MainTex.y));
+            float tailRegion = saturate(tailObjectX * tailObjectZ * tailObjectY *
+                tailUvU * tailUvV);
+            tailRegion *= 0.84 + 0.16 *
                 (sin(headAxis * 29.0 + ratUv.y * 11.0 + _SpotSeed * 3.7) * 0.5 + 0.5);
             fixed3 coatWithMarkings = lerp(painted.rgb, _SpotColor.rgb, whiteBlend);
             coatWithMarkings = lerp(coatWithMarkings, _MatureTailColor.rgb,
