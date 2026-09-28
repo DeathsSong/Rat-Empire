@@ -229,14 +229,19 @@ namespace RatHabitat
                     renderer.SetPropertyBlock(null, materialIndex);
                     if (material.HasProperty("_BaseColor")) material.SetColor("_BaseColor", target);
                     if (material.HasProperty("_Color")) material.SetColor("_Color", target);
-                    if (importedVisual && !featureMaterial && coatTexture != null)
+                    if (importedVisual && !featureMaterial)
                     {
-                        // Always restore the intended source map on a cloned
-                        // material. This also repairs an already-instantiated
-                        // visual that was created by the old albino path and
-                        // still has Texture2D.whiteTexture assigned.
-                        if (material.HasProperty("_BaseMap")) material.SetTexture("_BaseMap", coatTexture);
-                        if (material.HasProperty("_MainTex")) material.SetTexture("_MainTex", coatTexture);
+                        // Albino uses an explicit neutral main albedo texture.
+                        // The imported map remains available through the
+                        // shader's feature-only sampler for eyes and small
+                        // authored details, but its pink/beige fur pixels can
+                        // no longer reach the final body albedo. Other coats
+                        // continue using their recorded coat texture normally.
+                        Texture2D featureSourceTexture = coatTexture == null ? Texture2D.whiteTexture : coatTexture;
+                        Texture2D mainCoatTexture = albino ? Texture2D.whiteTexture : featureSourceTexture;
+                        if (material.HasProperty("_BaseMap")) material.SetTexture("_BaseMap", mainCoatTexture);
+                        if (material.HasProperty("_MainTex")) material.SetTexture("_MainTex", mainCoatTexture);
+                        if (material.HasProperty("_FeatureSourceTex")) material.SetTexture("_FeatureSourceTex", featureSourceTexture);
                     }
                     if (material.shader != null && material.shader.name == SpotShaderName && !featureMaterial)
                     {
@@ -329,8 +334,15 @@ namespace RatHabitat
                     materialAudit += renderer.gameObject.name + "=" + material.name + " instanceId=" + material.GetInstanceID() +
                         " shader=" + (material.shader == null ? "none" : material.shader.name) +
                         " texture=" + TexturePropertySummary(material) +
+                        " featureSource=" + TexturePropertySummary(material, "_FeatureSourceTex") +
                         " color=" + ColorPropertySummary(material) +
-                        " albinoMode=" + AlbinoModeSummary(material);
+                        " albinoBody=" + ColorPropertySummary(material, "_AlbinoBodyColor") +
+                        " spotColor=" + ColorPropertySummary(material, "_SpotColor") +
+                        " eyeColor=" + ColorPropertySummary(material, "_EyeColor") +
+                        " tailTexture=" + TexturePropertySummary(material, "_MatureTailTex") +
+                        " tailStrength=" + FloatPropertySummary(material, "_MatureTailStrength") +
+                        " albinoMode=" + AlbinoModeSummary(material) +
+                        " finalAlbedoPath=" + (albino ? "AlbinoNeutralBodyThenEye" : "CoatThenEye");
                 }
             }
             if (materialAudit.Length == 0) materialAudit = "none";
@@ -580,12 +592,34 @@ namespace RatHabitat
             return property + "=" + (texture == null ? "<null>" : texture.name);
         }
 
+        private static string TexturePropertySummary(Material material, string property)
+        {
+            if (material == null || string.IsNullOrEmpty(property) || !material.HasProperty(property))
+                return property + "=n/a";
+            Texture texture = material.GetTexture(property);
+            return property + "=" + (texture == null ? "<null>" : texture.name);
+        }
+
         private static string ColorPropertySummary(Material material)
         {
             if (material == null) return "<null>";
             if (material.HasProperty("_Color")) return "_Color=" + material.GetColor("_Color").ToString();
             if (material.HasProperty("_BaseColor")) return "_BaseColor=" + material.GetColor("_BaseColor").ToString();
             return "none";
+        }
+
+        private static string ColorPropertySummary(Material material, string property)
+        {
+            if (material == null || string.IsNullOrEmpty(property) || !material.HasProperty(property))
+                return property + "=n/a";
+            return property + "=" + material.GetColor(property).ToString();
+        }
+
+        private static string FloatPropertySummary(Material material, string property)
+        {
+            if (material == null || string.IsNullOrEmpty(property) || !material.HasProperty(property))
+                return property + "=n/a";
+            return property + "=" + material.GetFloat(property).ToString("0.###");
         }
 
         private static string AlbinoModeSummary(Material material)
