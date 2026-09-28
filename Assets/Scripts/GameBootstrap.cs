@@ -78,6 +78,9 @@ namespace RatHabitat
         private int maintenancePassCount;
         private float lastMaintenanceDurationMs;
         private float lastUiRefreshDurationMs;
+        private float lastViewportFrameDurationMs;
+        private float lastClockFrameDurationMs;
+        private float lastMovementFrameDurationMs;
         private string selectedRatId;
         private string selectedObjectId;
         private string parentAId;
@@ -335,6 +338,9 @@ namespace RatHabitat
                     "Maintenance passes: " + maintenancePassCount +
                     "  last " + lastMaintenanceDurationMs.ToString("0.00") + " ms" +
                     "  UI " + lastUiRefreshDurationMs.ToString("0.00") + " ms" +
+                    "  frame viewport " + lastViewportFrameDurationMs.ToString("0.00") +
+                    " ms clock " + lastClockFrameDurationMs.ToString("0.00") +
+                    " ms movement " + lastMovementFrameDurationMs.ToString("0.00") + " ms" +
                     "  tick: " + (ColonyMaintenanceIntervalGameMs / (60L * 1000L)) + " game minutes";
             }
         }
@@ -1571,11 +1577,13 @@ namespace RatHabitat
 
         private void Update()
         {
+            float frameSampleStartedAt = Time.realtimeSinceStartup;
             BeginPerformanceSample("Rat Empire/Frame/Viewport and Camera");
             UpdateWorldViewport();
             UpdateCameraPresentation();
             UpdateHabitatPageSettling();
             EndPerformanceSample();
+            lastViewportFrameDurationMs = (Time.realtimeSinceStartup - frameSampleStartedAt) * 1000f;
 
             wakeLockPollTimer -= Time.unscaledDeltaTime;
             if (wakeLockPollTimer <= 0f)
@@ -1601,19 +1609,23 @@ namespace RatHabitat
                 return;
             }
 
+            frameSampleStartedAt = Time.realtimeSinceStartup;
             BeginPerformanceSample("Rat Empire/Frame/Clock and Age");
             GrowthSystem.AdvanceClock(Save, GameConfig.NowMs());
             bool ageThresholdCrossed = GrowthSystem.RefreshRatAges(Save, GameTime);
             EndPerformanceSample();
+            lastClockFrameDurationMs = (Time.realtimeSinceStartup - frameSampleStartedAt) * 1000f;
 
             // Movement and the active pairing interaction stay per-frame. All
             // biological deadlines and relationship reconciliation below are
             // gated by simulation time or a known deadline instead of running
             // as a full-colony scan on every rendered frame.
+            frameSampleStartedAt = Time.realtimeSinceStartup;
             BeginPerformanceSample("Rat Empire/Frame/Movement and Pairing");
             UpdatePairingApproach();
             PruneGroupSelection();
             EndPerformanceSample();
+            lastMovementFrameDurationMs = (Time.realtimeSinceStartup - frameSampleStartedAt) * 1000f;
 
             bool stageChanged = false;
             bool reproductiveStateChanged = false;
@@ -2640,13 +2652,13 @@ namespace RatHabitat
             if (ui != null) ui.RefreshHeader();
         }
 
-        public void BuyStoreRat(string listingId)
+        public bool BuyStoreRat(string listingId)
         {
             if (Save == null)
             {
                 StatusMessage = "Store data is not ready.";
                 if (ui != null) ui.Refresh(false);
-                return;
+                return false;
             }
 
             StoreSystem.EnsureStoreState(Save);
@@ -2655,20 +2667,20 @@ namespace RatHabitat
             {
                 StatusMessage = "Colony capacity reached (" + colonyCapacity + "). Buy a capacity upgrade first.";
                 if (ui != null) ui.Refresh(false);
-                return;
+                return false;
             }
             StoreRatListingData listing = StoreSystem.FindListing(Save, listingId);
             if (listing == null)
             {
                 StatusMessage = "That market rat is no longer available.";
                 if (ui != null) ui.Refresh(true);
-                return;
+                return false;
             }
             if (Save.colonyCredits < listing.price)
             {
                 StatusMessage = "Not enough dollars — need $" + listing.price + " to buy " + ColonyFactory.DisplayName(listing) + ".";
                 if (ui != null) ui.Refresh(false);
-                return;
+                return false;
             }
 
             RatData purchased = StoreSystem.CreatePurchasedRat(listing, GameTime);
@@ -2676,7 +2688,7 @@ namespace RatHabitat
             {
                 StatusMessage = "The market rat could not be created.";
                 if (ui != null) ui.Refresh(false);
-                return;
+                return false;
             }
 
             Save.rats.Add(purchased);
@@ -2691,7 +2703,9 @@ namespace RatHabitat
             cameraFollowSelectedRat = true;
             StatusMessage = ColonyFactory.DisplayName(purchased) + " joined the colony for $" + listing.price + ".";
             SaveSystem.Save(Save);
-            RefreshWorldAndUi(true);
+            if (ui != null) ui.CompleteStorePurchaseAttempt(listingId, true);
+            RefreshWorldAndUi(true, true);
+            return true;
         }
 
         public int ColonyCapacity
@@ -3909,8 +3923,17 @@ namespace RatHabitat
 
         private void RefreshWorldAndUi(bool forceUi)
         {
+            RefreshWorldAndUi(forceUi, false);
+        }
+
+        private void RefreshWorldAndUi(bool forceUi, bool waitForPointerRelease)
+        {
             if (rats != null && habitat != null) rats.Render(Save, habitat.NestPosition);
-            if (ui != null) ui.Refresh(forceUi);
+            if (ui != null)
+            {
+                if (waitForPointerRelease) ui.RequestRefreshAfterPointerRelease(forceUi);
+                else ui.Refresh(forceUi);
+            }
         }
 
         private void ConfigureCamera()

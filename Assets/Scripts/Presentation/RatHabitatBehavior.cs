@@ -88,6 +88,7 @@ namespace RatHabitat
         private Quaternion chestMicroOffset = Quaternion.identity;
         private float microAnimationPhase;
         private bool microAnimationBound;
+        private bool microAnimationOffsetsActive;
         private Vector3 previousPositionForFacing;
         private bool hasPreviousPositionForFacing;
         private bool deathPoseHeld;
@@ -121,6 +122,7 @@ namespace RatHabitat
         private Vector3 diagnosticsPreviousPosition;
         private bool diagnosticsHavePreviousPosition;
         private float lastActualWorldMovementSpeed;
+        private float spacingTimer;
 
         private const float MinimumWalkSpeed = 0.55f;
         private const float MaximumWalkSpeed = 0.92f;
@@ -134,6 +136,7 @@ namespace RatHabitat
         private const float IdleDwellScale = 1.75f;
         private const float MinimumSniffDuration = 1.0f;
         private const float MaximumSniffDuration = 3.0f;
+        private const float SpacingRefreshIntervalSeconds = 0.12f;
 
         public RatBehaviorState State { get { return state; } }
         public bool PairingApproachAtTarget { get { return pairingApproachActive && pairingApproachArrived; } }
@@ -307,6 +310,10 @@ namespace RatHabitat
             else if (configuredStage != rat.stage)
             {
                 configuredStage = rat.stage;
+                animator = null;
+                animatorLookupAttempted = false;
+                microAnimationRoot = null;
+                microAnimationBound = false;
                 currentTarget = null;
                 nursingInteractionActive = false;
                 nursingInteractionRemaining = 0f;
@@ -667,7 +674,7 @@ namespace RatHabitat
         private void Update()
         {
             if (!configured || rat == null || habitat == null) return;
-            if (!animatorLookupAttempted)
+            if (!animatorLookupAttempted || animator == null)
             {
                 animator = GetComponentInChildren<Animator>(true);
                 animatorLookupAttempted = true;
@@ -690,7 +697,7 @@ namespace RatHabitat
                 return;
             }
 
-            BindMicroAnimationBones();
+            if (!microAnimationBound) BindMicroAnimationBones();
 
             if (rat.stage == RatStage.Pinkie)
             {
@@ -783,8 +790,6 @@ namespace RatHabitat
             diagnosticsPreviousPosition = transform.position;
             diagnosticsHavePreviousPosition = true;
             UpdateMovementFacingFromPositionDelta();
-            BindMicroAnimationBones();
-
             // A removed rat does not receive a fake death loop. Clear the
             // additive offsets so removal remains the only dying behavior.
             if (state == RatBehaviorState.Dying || rat.stage == RatStage.Pinkie)
@@ -875,6 +880,7 @@ namespace RatHabitat
 
         private void ApplyMicroAnimations()
         {
+            microAnimationOffsetsActive = true;
             float time = behaviorClockSeconds;
             float lookYaw = Mathf.Sin(time * 0.72f + microAnimationPhase) * 4.5f;
             float lookPitch = Mathf.Sin(time * 0.91f + microAnimationPhase * 0.63f) * 1.8f;
@@ -905,11 +911,13 @@ namespace RatHabitat
 
         private void ClearMicroAnimationOffsets()
         {
+            if (!microAnimationOffsetsActive) return;
             RemoveAdditiveRotation(headMicroBone, ref headMicroOffset);
             RemoveAdditiveRotation(leftEarMicroBone, ref leftEarMicroOffset);
             RemoveAdditiveRotation(rightEarMicroBone, ref rightEarMicroOffset);
             RemoveAdditiveRotation(tailMicroBone, ref tailMicroOffset);
             RemoveAdditiveRotation(chestMicroBone, ref chestMicroOffset);
+            microAnimationOffsetsActive = false;
         }
 
         private static void RemoveAdditiveRotation(Transform bone, ref Quaternion previousOffset)
@@ -1072,7 +1080,12 @@ namespace RatHabitat
                     step);
                 transform.position = MoveTowardAvoidingNest(transform.position, nextPosition, step);
             }
-            ResolveSpacing(deltaTime);
+            spacingTimer -= deltaTime;
+            if (spacingTimer <= 0f)
+            {
+                spacingTimer = SpacingRefreshIntervalSeconds;
+                ResolveSpacing(deltaTime);
+            }
         }
 
         private void UpdatePairingApproach(float deltaTime, ref float visualMovementBudget)

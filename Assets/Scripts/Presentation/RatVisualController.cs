@@ -1,5 +1,6 @@
 using System.Collections;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace RatHabitat
 {
@@ -22,6 +23,11 @@ namespace RatHabitat
         // when the visual is replaced or its scale changes materially.
         private Renderer[] cachedRenderers;
         private Renderer selectionBoundsRenderer;
+        private Animator cachedAnimator;
+        private ShadowCastingMode[] cachedShadowCastingModes;
+        private bool presentationCullingInitialized;
+        private bool presentationVisible = true;
+        private bool presentationNear = true;
         private int selectionBoundsVersion;
         private float lastColliderVisualScale = -1f;
         // The factory-normalized scale is kept separate from the age-driven
@@ -119,6 +125,48 @@ namespace RatHabitat
                 }
             }
             return found;
+        }
+
+        /// <summary>
+        /// Keeps simulation and selection active for every rat, but stops the
+        /// imported Animator and expensive shadow casters for rats that are
+        /// outside the live camera. The presenter calls this on a bounded
+        /// cadence because camera/frustum state does not need a per-frame
+        /// hierarchy walk.
+        /// </summary>
+        public void UpdatePresentationCulling(Camera camera, Plane[] frustumPlanes)
+        {
+            if (currentVisual == null || !hasVisual || cachedAnimator == null) return;
+
+            Bounds bounds;
+            if (!TryGetWorldBounds(out bounds)) return;
+
+            bool visible = camera == null || frustumPlanes == null ||
+                GeometryUtility.TestPlanesAABB(frustumPlanes, bounds);
+            float distanceSquared = camera == null
+                ? 0f
+                : (bounds.center - camera.transform.position).sqrMagnitude;
+            bool near = distanceSquared <= 26f * 26f;
+            if (presentationCullingInitialized && visible == presentationVisible && near == presentationNear)
+                return;
+
+            presentationCullingInitialized = true;
+            presentationVisible = visible;
+            presentationNear = near;
+            cachedAnimator.cullingMode = visible
+                ? AnimatorCullingMode.AlwaysAnimate
+                : AnimatorCullingMode.CullCompletely;
+
+            if (cachedRenderers == null || cachedShadowCastingModes == null) return;
+            bool castShadows = visible && near;
+            for (int index = 0; index < cachedRenderers.Length; index++)
+            {
+                Renderer renderer = cachedRenderers[index];
+                if (renderer == null) continue;
+                renderer.shadowCastingMode = castShadows
+                    ? cachedShadowCastingModes[index]
+                    : ShadowCastingMode.Off;
+            }
         }
 
         public void Configure(RatVisualFactory visualFactory)
@@ -306,6 +354,11 @@ namespace RatHabitat
             transitioningOutVisual = null;
             cachedRenderers = null;
             selectionBoundsRenderer = null;
+            cachedAnimator = null;
+            cachedShadowCastingModes = null;
+            presentationCullingInitialized = false;
+            presentationVisible = true;
+            presentationNear = true;
             hasVisual = false;
             currentBaseScale = Vector3.one;
             currentVisualScale = GameConfig.AdultVisualScale;
@@ -322,6 +375,23 @@ namespace RatHabitat
             cachedRenderers = visual == null
                 ? null
                 : visual.GetComponentsInChildren<Renderer>(true);
+            cachedAnimator = visual == null
+                ? null
+                : visual.GetComponentInChildren<Animator>(true);
+            cachedShadowCastingModes = cachedRenderers == null
+                ? null
+                : new ShadowCastingMode[cachedRenderers.Length];
+            if (cachedRenderers != null)
+            {
+                for (int index = 0; index < cachedRenderers.Length; index++)
+                {
+                    Renderer renderer = cachedRenderers[index];
+                    cachedShadowCastingModes[index] = renderer == null
+                        ? ShadowCastingMode.Off
+                        : renderer.shadowCastingMode;
+                }
+            }
+            presentationCullingInitialized = false;
             selectionBoundsRenderer = null;
             if (cachedRenderers == null) return;
 

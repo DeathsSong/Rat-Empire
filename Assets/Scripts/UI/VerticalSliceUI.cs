@@ -112,6 +112,16 @@ namespace RatHabitat
         private Vector2 fallbackMouseDownPosition;
         private Vector2 fallbackTouchDownPosition;
         private int fallbackTouchFingerId = -1;
+        private readonly HashSet<int> activeUiPointerIds = new HashSet<int>();
+        private int lastUiActionPointerId = int.MinValue;
+        private int lastUiActionFrame = -1;
+        private int deferredRefreshFrame = -1;
+        private bool deferredRefreshPending;
+        private bool deferredRefreshForce;
+        private bool storePurchaseInProgress;
+        private bool storePurchaseSucceeded;
+        private string storePurchaseListingId;
+        private readonly Dictionary<string, Button> storePurchaseButtons = new Dictionary<string, Button>();
         private RatPortraitPreview portraitPreview;
         private RatAnimationShowcase ratAnimationShowcase;
         private RawImage animationShowcasePreviewImage;
@@ -125,14 +135,18 @@ namespace RatHabitat
         private const float LiveUiRefreshIntervalSeconds = 0.15f;
         private float liveUiRefreshTimer;
         private readonly Dictionary<MainPanel, Button> topNavigationButtons = new Dictionary<MainPanel, Button>();
+        private readonly Dictionary<MainPanel, Image> topNavigationImages = new Dictionary<MainPanel, Image>();
+        private readonly Dictionary<MainPanel, Text> topNavigationLabels = new Dictionary<MainPanel, Text>();
         private readonly Dictionary<int, Button> simulationSpeedButtons = new Dictionary<int, Button>();
+        private readonly Dictionary<int, Image> simulationSpeedImages = new Dictionary<int, Image>();
+        private readonly Dictionary<int, Text> simulationSpeedLabels = new Dictionary<int, Text>();
+        private Text eventLogLabel;
         // A generated page control can be reached by both Unity's normal
         // Button/EventSystem path and InteractionManager's manual fallback
         // path in the same frame. Refreshing the page destroys the old relay,
         // so a per-relay guard alone is not enough: the replacement relay
         // could invoke the same action a second time. Keep one UI action per
         // frame across regenerated controls.
-        private static int lastUiActionFrame = -1;
         private MainPanel activeMainPanel = MainPanel.None;
         private RosterSortField rosterSortField = RosterSortField.Name;
         private bool rosterSortAscending = true;
@@ -240,6 +254,7 @@ namespace RatHabitat
                         fallbackTouchFingerId = touch.fingerId;
                         fallbackTouchDownPosition = touch.position;
                         fallbackTouchRelay = FindFallbackRelay(touch.position);
+                        RegisterUiPointerDown(touch.fingerId);
                     }
                     else if (touch.phase == TouchPhase.Ended && touch.fingerId == fallbackTouchFingerId)
                     {
@@ -247,13 +262,15 @@ namespace RatHabitat
                         bool moved = Vector2.Distance(fallbackTouchDownPosition, touch.position) > 24f;
                         fallbackTouchRelay = null;
                         fallbackTouchFingerId = -1;
+                        RegisterUiPointerUp(touch.fingerId);
                         if (!moved && relay != null && relay.ContainsScreenPoint(touch.position))
-                            relay.InvokeFallback();
+                            relay.InvokeFallback(touch.fingerId);
                     }
                     else if (touch.phase == TouchPhase.Canceled && touch.fingerId == fallbackTouchFingerId)
                     {
                         fallbackTouchRelay = null;
                         fallbackTouchFingerId = -1;
+                        RegisterUiPointerUp(touch.fingerId);
                     }
                 }
                 return;
@@ -263,14 +280,16 @@ namespace RatHabitat
             {
                 fallbackMouseDownPosition = Input.mousePosition;
                 fallbackMouseRelay = FindFallbackRelay(fallbackMouseDownPosition);
+                RegisterUiPointerDown(-1);
             }
             else if (Input.GetMouseButtonUp(0))
             {
                 DirectUiClickRelay relay = fallbackMouseRelay;
                 bool moved = Vector2.Distance(fallbackMouseDownPosition, Input.mousePosition) > 8f;
                 fallbackMouseRelay = null;
+                RegisterUiPointerUp(-1);
                 if (!moved && relay != null && relay.ContainsScreenPoint(Input.mousePosition))
-                    relay.InvokeFallback();
+                    relay.InvokeFallback(-1);
             }
         }
 
@@ -287,6 +306,76 @@ namespace RatHabitat
             fallbackMouseDownPosition = Vector2.zero;
             fallbackTouchDownPosition = Vector2.zero;
             fallbackTouchFingerId = -1;
+            activeUiPointerIds.Clear();
+        }
+
+        private void RegisterUiPointerDown(int pointerId)
+        {
+            activeUiPointerIds.Add(pointerId);
+        }
+
+        private void RegisterUiPointerUp(int pointerId)
+        {
+            activeUiPointerIds.Remove(pointerId);
+        }
+
+        private bool CanInvokeUiAction(int pointerId)
+        {
+            // This is the final one-action-per-pointer guard. The relay also
+            // guards its own EventSystem callbacks, but this owner-level guard
+            // survives a page rebuild that replaces the relay GameObject.
+            if (lastUiActionFrame == Time.frameCount) return false;
+            if (lastUiActionPointerId == pointerId && pointerId != int.MinValue &&
+                lastUiActionFrame >= Time.frameCount - 1)
+                return false;
+            return true;
+        }
+
+        private void RecordUiAction(int pointerId)
+        {
+            lastUiActionPointerId = pointerId;
+            lastUiActionFrame = Time.frameCount;
+        }
+
+        public void RequestRefreshAfterPointerRelease(bool force)
+        {
+            deferredRefreshPending = true;
+            deferredRefreshForce |= force;
+            // Always wait one rendered frame after pointer-up. This prevents
+            // the new listing hierarchy from receiving the pointer sequence
+            // that purchased the previous listing.
+            deferredRefreshFrame = Mathf.Max(deferredRefreshFrame, Time.frameCount + 1);
+        }
+
+        public bool BeginStorePurchaseAttempt(string listingId)
+        {
+            if (storePurchaseInProgress) return false;
+            storePurchaseInProgress = true;
+            storePurchaseSucceeded = false;
+            storePurchaseListingId = listingId;
+            Button button;
+            if (!string.IsNullOrEmpty(listingId) && storePurchaseButtons.TryGetValue(listingId, out button) && button != null)
+                button.interactable = false;
+            return true;
+        }
+
+        public void CompleteStorePurchaseAttempt(string listingId, bool succeeded)
+        {
+            if (!storePurchaseInProgress || storePurchaseListingId != listingId) return;
+            if (!succeeded)
+            {
+                Button button;
+                if (!string.IsNullOrEmpty(listingId) && storePurchaseButtons.TryGetValue(listingId, out button) && button != null)
+                    button.interactable = true;
+                storePurchaseInProgress = false;
+                storePurchaseListingId = null;
+                storePurchaseSucceeded = false;
+                return;
+            }
+            // Keep this transaction active until the pointer sequence has
+            // released and the deferred Store rebuild runs. This prevents a
+            // replacement listing button from inheriting the current tap.
+            storePurchaseSucceeded = true;
         }
 
         private DirectUiClickRelay FindFallbackRelay(Vector2 screenPoint)
@@ -333,7 +422,7 @@ namespace RatHabitat
             if (!ready) return false;
             DirectUiClickRelay relay = FindFallbackRelay(screenPoint);
             if (relay == null) return IsModalOverlayOpen;
-            relay.InvokeFallback();
+            relay.InvokeFallback(int.MinValue);
             return true;
         }
 
@@ -570,6 +659,11 @@ namespace RatHabitat
                 activeMainPanel = MainPanel.Breeding;
             }
             RefreshTopNavigationState();
+            if (storePurchaseInProgress && activeMainPanel == MainPanel.Store && storeCategory == StoreCategory.Buy)
+            {
+                RequestRefreshAfterPointerRelease(force);
+                return;
+            }
             string signature = game.UiSignature;
             if (!force && signature == lastSignature) return;
 
@@ -674,11 +768,13 @@ namespace RatHabitat
         {
             if (!ready || game == null) return;
             UpdateResponsiveLayoutIfNeeded();
-            if (clockText != null) clockText.text = game.ClockLabel;
+            string clockLabel = game.ClockLabel;
+            if (clockText != null && clockText.text != clockLabel) clockText.text = clockLabel;
             if (walletText != null)
             {
                 int balance = game.Save == null ? 0 : game.Save.colonyCredits;
-                walletText.text = "Wallet  $" + balance.ToString("N0");
+                string walletLabel = "Wallet  $" + balance.ToString("N0");
+                if (walletText.text != walletLabel) walletText.text = walletLabel;
             }
             if (liveEventText != null)
             {
@@ -691,17 +787,14 @@ namespace RatHabitat
                     liveMessage = game.LatestEnabledEventMessage;
                 if (string.IsNullOrEmpty(liveMessage) && game.AllAlertCategoriesDisabled)
                     liveMessage = "Alerts muted";
-                liveEventText.text = liveMessage;
+                if (liveEventText.text != liveMessage) liveEventText.text = liveMessage;
             }
-            if (eventLogToggleButton != null)
+            if (eventLogLabel != null)
             {
-                Text eventLabel = eventLogToggleButton.GetComponentInChildren<Text>();
-                if (eventLabel != null)
-                {
-                    eventLabel.text = game.RecentEventCount > 0
-                        ? "Events (" + game.RecentEventCount + ")"
-                        : "Events";
-                }
+                string eventLabelText = game.RecentEventCount > 0
+                    ? "Events (" + game.RecentEventCount + ")"
+                    : "Events";
+                if (eventLogLabel.text != eventLabelText) eventLogLabel.text = eventLabelText;
             }
             string eventLogSignature = game.EventLogSignature;
             if (eventLogOpen && eventLogSignature != lastEventLogSignature)
@@ -801,6 +894,7 @@ namespace RatHabitat
 
             eventLogToggleButton = AddButtonTo(headerContent, "Events", true, ToggleEventLog,
                 new Color(0.11f, 0.25f, 0.25f, 1f), 30f);
+            eventLogLabel = eventLogToggleButton.GetComponentInChildren<Text>();
             RectTransform eventLogButtonRect = eventLogToggleButton.GetComponent<RectTransform>();
             eventLogButtonRect.anchorMin = new Vector2(0.55f, 0.59f);
             eventLogButtonRect.anchorMax = new Vector2(1f, 0.77f);
@@ -831,6 +925,8 @@ namespace RatHabitat
             navigationLayout.childForceExpandHeight = false;
 
             topNavigationButtons.Clear();
+            topNavigationImages.Clear();
+            topNavigationLabels.Clear();
             AddTopNavigationButton(navigation, MainPanel.Habitat, "Habitat");
             AddTopNavigationButton(navigation, MainPanel.MyRats, "My Rats");
             AddTopNavigationButton(navigation, MainPanel.Store, "Store");
@@ -1545,6 +1641,8 @@ namespace RatHabitat
             labelText.rectTransform.offsetMin = new Vector2(2f, 1f);
             labelText.rectTransform.offsetMax = new Vector2(-2f, -1f);
             topNavigationButtons[panel] = button;
+            topNavigationImages[panel] = image;
+            topNavigationLabels[panel] = labelText;
             return button;
         }
 
@@ -1555,6 +1653,8 @@ namespace RatHabitat
                 () => game.SetSimulationSpeed(speed), new Color(0.14f, 0.29f, 0.29f), 46f);
             button.gameObject.name = "Simulation Speed " + speedInt + "x";
             simulationSpeedButtons[speedInt] = button;
+            simulationSpeedImages[speedInt] = button.GetComponent<Image>();
+            simulationSpeedLabels[speedInt] = button.GetComponentInChildren<Text>();
             return button;
         }
 
@@ -1663,32 +1763,44 @@ namespace RatHabitat
             {
                 Button button = entry.Value;
                 if (button == null) continue;
-                Image image = button.GetComponent<Image>();
+                Image image;
+                if (!topNavigationImages.TryGetValue(entry.Key, out image))
+                    image = button.GetComponent<Image>();
                 if (image == null) continue;
                 bool open = entry.Key == activeMainPanel ||
                     (entry.Key == MainPanel.Settings && settingsOpen) ||
                     (entry.Key == MainPanel.DeveloperTools && developerToolsOpen);
-                Text label = button.GetComponentInChildren<Text>();
+                Text label;
+                if (!topNavigationLabels.TryGetValue(entry.Key, out label))
+                    label = button.GetComponentInChildren<Text>();
                 if (label != null && entry.Key == MainPanel.MyRats)
                 {
-                    label.text = "My Rats (" + CountColonyRats() + ")";
+                    string rosterLabel = "My Rats (" + CountColonyRats() + ")";
+                    if (label.text != rosterLabel) label.text = rosterLabel;
                 }
-                image.color = open
+                Color targetColor = open
                     ? new Color(0.22f, 0.48f, 0.36f, 1f)
                     : new Color(0.11f, 0.25f, 0.25f, 1f);
+                if (image.color != targetColor) image.color = targetColor;
             }
             foreach (var entry in simulationSpeedButtons)
             {
                 if (entry.Value == null) continue;
-                Image image = entry.Value.GetComponent<Image>();
+                Image image;
+                if (!simulationSpeedImages.TryGetValue(entry.Key, out image))
+                    image = entry.Value.GetComponent<Image>();
                 if (image != null)
                 {
-                    image.color = Mathf.Abs(game.SimulationSpeed - entry.Key) < 0.01f
+                    Color targetColor = Mathf.Abs(game.SimulationSpeed - entry.Key) < 0.01f
                         ? new Color(0.28f, 0.56f, 0.38f, 1f)
                         : new Color(0.14f, 0.29f, 0.29f, 1f);
+                    if (image.color != targetColor) image.color = targetColor;
                 }
-                Text label = entry.Value.GetComponentInChildren<Text>();
-                if (label != null) label.text = entry.Key + "×";
+                Text label;
+                if (!simulationSpeedLabels.TryGetValue(entry.Key, out label))
+                    label = entry.Value.GetComponentInChildren<Text>();
+                string speedLabel = entry.Key + "×";
+                if (label != null && label.text != speedLabel) label.text = speedLabel;
             }
         }
 
@@ -1851,6 +1963,28 @@ namespace RatHabitat
 
         private void Update()
         {
+            bool physicalPointerDown = Input.GetMouseButton(0) || Input.touchCount > 0;
+            if (deferredRefreshPending && Time.frameCount > deferredRefreshFrame && !physicalPointerDown)
+            {
+                // A browser/EventSystem pointer can outlive a generated relay
+                // when the page is rebuilt. At this point Unity reports no
+                // physical button/touch, so treat that sequence as released
+                // and discard any stale relay bookkeeping.
+                activeUiPointerIds.Clear();
+                fallbackMouseRelay = null;
+                fallbackTouchRelay = null;
+                bool force = deferredRefreshForce;
+                deferredRefreshPending = false;
+                deferredRefreshForce = false;
+                deferredRefreshFrame = -1;
+                if (storePurchaseSucceeded)
+                {
+                    storePurchaseInProgress = false;
+                    storePurchaseSucceeded = false;
+                    storePurchaseListingId = null;
+                }
+                Refresh(force);
+            }
             if (profileRefreshDeferred && !IsRatProfileScrollMoving())
                 Refresh(true);
             if (profileActivityHistoryDeferred && !IsRatProfileScrollMoving())
@@ -2010,6 +2144,7 @@ namespace RatHabitat
             liveProfileActivityHistorySignature = null;
             liveActivityHistoryRatId = null;
             profileActivityHistoryDeferred = false;
+            storePurchaseButtons.Clear();
             familyTreeScroll = null;
             familyTreeViewport = null;
             familyTreeContent = null;
@@ -2468,8 +2603,16 @@ namespace RatHabitat
                 12, Color.white, TextAnchor.UpperLeft);
 
             bool canBuy = game.Save.colonyCredits >= listing.price;
-            var actionButton = AddButtonTo(card, "BUY\n$" + listing.price, canBuy,
-                () => game.BuyStoreRat(listing.id), new Color(0.16f, 0.40f, 0.34f), 58f);
+            Button actionButton = null;
+            string listingId = listing.id;
+            actionButton = AddButtonTo(card, "BUY\n$" + listing.price, canBuy,
+                () =>
+                {
+                    if (game == null || !BeginStorePurchaseAttempt(listingId)) return;
+                    if (!game.BuyStoreRat(listingId))
+                        CompleteStorePurchaseAttempt(listingId, false);
+                }, new Color(0.16f, 0.40f, 0.34f), 58f);
+            storePurchaseButtons[listingId] = actionButton;
             var actionLayout = actionButton.GetComponent<LayoutElement>();
             actionLayout.minWidth = 94f;
             actionLayout.preferredWidth = 94f;
@@ -3409,7 +3552,7 @@ namespace RatHabitat
             button.targetGraphic = image;
             button.navigation = new Navigation { mode = Navigation.Mode.None };
             var relay = node.gameObject.AddComponent<DirectUiClickRelay>();
-            relay.Configure(button, () => SelectFamilyTreeSubject(ratId));
+            relay.Configure(this, button, () => SelectFamilyTreeSubject(ratId));
 
             string coat = entry.rat.phenotype == null || !entry.rat.phenotype.furRevealed
                 ? "Hidden" : entry.rat.phenotype.coatColorLabel;
@@ -3964,7 +4107,7 @@ namespace RatHabitat
             rowButton.navigation = new Navigation { mode = Navigation.Mode.None };
             string ratId = rat.id;
             var rowClickRelay = rowRoot.AddComponent<DirectUiClickRelay>();
-            rowClickRelay.Configure(rowButton, () =>
+            rowClickRelay.Configure(this, rowButton, () =>
             {
                 if (game.MultipleSelectionMode) game.ToggleRatGroupSelection(ratId);
                 else ToggleExpandedMyRat(ratId);
@@ -4645,7 +4788,7 @@ namespace RatHabitat
             rowButton.navigation = new Navigation { mode = Navigation.Mode.None };
             string mateId = mate.id;
             var rowClickRelay = rowRoot.AddComponent<DirectUiClickRelay>();
-            rowClickRelay.Configure(rowButton, () => game.SelectBreedingParent(mateId));
+            rowClickRelay.Configure(this, rowButton, () => game.SelectBreedingParent(mateId));
 
             var rowLayout = rowRoot.AddComponent<LayoutElement>();
             rowLayout.preferredHeight = 96f;
@@ -5111,7 +5254,7 @@ namespace RatHabitat
             // page viewport is an active UI hit surface, so the world input
             // path will not receive the same tap.
             var clickRelay = objectRoot.AddComponent<DirectUiClickRelay>();
-            clickRelay.Configure(button, enabled ? action : null);
+            clickRelay.Configure(this, button, enabled ? action : null);
             var layout = objectRoot.AddComponent<LayoutElement>();
             layout.preferredHeight = height;
             layout.minHeight = height;
@@ -5125,14 +5268,18 @@ namespace RatHabitat
 
         private sealed class DirectUiClickRelay : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, IPointerClickHandler
         {
+            private VerticalSliceUI owner;
             private Button button;
             private UnityEngine.Events.UnityAction action;
             private bool pointerSequenceActive;
+            private bool pointerSequenceActionInvoked;
+            private int pointerSequenceId = int.MinValue;
 
-            public void Configure(Button owner, UnityEngine.Events.UnityAction callback)
+            public void Configure(VerticalSliceUI uiOwner, Button ownerButton, UnityEngine.Events.UnityAction callback)
             {
                 if (button != null) button.onClick.RemoveListener(HandleButtonClick);
-                button = owner;
+                owner = uiOwner;
+                button = ownerButton;
                 action = callback;
                 if (button != null) button.onClick.AddListener(HandleButtonClick);
             }
@@ -5141,7 +5288,7 @@ namespace RatHabitat
 
             private void HandleButtonClick()
             {
-                InvokeOnce();
+                InvokeOnce(pointerSequenceId);
             }
 
             // Button.onClick can be skipped when a parent ScrollRect owns the
@@ -5151,9 +5298,13 @@ namespace RatHabitat
             // paths from running the action twice.
             public void OnPointerDown(PointerEventData eventData)
             {
+                pointerSequenceId = eventData == null ? int.MinValue : eventData.pointerId;
+                pointerSequenceActionInvoked = false;
                 pointerSequenceActive = eventData != null &&
                     eventData.button == PointerEventData.InputButton.Left &&
                     IsFallbackInteractable;
+                if (pointerSequenceActive && owner != null)
+                    owner.RegisterUiPointerDown(pointerSequenceId);
             }
 
             public void OnPointerUp(PointerEventData eventData)
@@ -5162,14 +5313,19 @@ namespace RatHabitat
                     eventData.button == PointerEventData.InputButton.Left &&
                     Vector2.Distance(eventData.pressPosition, eventData.position) <= 8f;
                 pointerSequenceActive = false;
-                if (validTap) InvokeOnce();
+                if (owner != null && eventData != null)
+                    owner.RegisterUiPointerUp(eventData.pointerId);
+                if (validTap)
+                    pointerSequenceActionInvoked = InvokeOnce(pointerSequenceId);
             }
 
             public void OnPointerClick(PointerEventData eventData)
             {
                 pointerSequenceActive = false;
+                int pointerId = eventData == null ? pointerSequenceId : eventData.pointerId;
+                if (pointerSequenceActionInvoked) return;
                 if (eventData == null || eventData.button == PointerEventData.InputButton.Left)
-                    InvokeOnce();
+                    pointerSequenceActionInvoked = InvokeOnce(pointerId);
             }
 
             public bool IsFallbackInteractable
@@ -5183,18 +5339,21 @@ namespace RatHabitat
                 return rect != null && RectTransformUtility.RectangleContainsScreenPoint(rect, screenPoint, null);
             }
 
-            public void InvokeFallback()
+            public void InvokeFallback(int pointerId)
             {
-                InvokeOnce();
+                pointerSequenceId = pointerId;
+                if (pointerSequenceActionInvoked) return;
+                pointerSequenceActionInvoked = InvokeOnce(pointerId);
             }
 
-            private void InvokeOnce()
+            private bool InvokeOnce(int pointerId)
             {
-                if (!IsFallbackInteractable || lastInvokeFrame == Time.frameCount) return;
-                if (lastUiActionFrame == Time.frameCount) return;
+                if (!IsFallbackInteractable || lastInvokeFrame == Time.frameCount) return false;
+                if (owner != null && !owner.CanInvokeUiAction(pointerId)) return false;
                 lastInvokeFrame = Time.frameCount;
-                lastUiActionFrame = Time.frameCount;
+                if (owner != null) owner.RecordUiAction(pointerId);
                 if (action != null) action.Invoke();
+                return true;
             }
         }
 

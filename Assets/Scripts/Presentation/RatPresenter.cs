@@ -20,6 +20,8 @@ namespace RatHabitat
         private HabitatBuilder habitat;
         private float groundingRefreshTimer;
         private const float GroundingRefreshIntervalSeconds = 0.075f;
+        private float presentationCullingTimer;
+        private const float PresentationCullingIntervalSeconds = 0.20f;
 
         public void ConfigureHabitat(HabitatBuilder builder)
         {
@@ -142,6 +144,14 @@ namespace RatHabitat
             groundingRefreshTimer -= Time.unscaledDeltaTime;
             bool refreshGrounding = groundingRefreshTimer <= 0f;
             if (refreshGrounding) groundingRefreshTimer = GroundingRefreshIntervalSeconds;
+            presentationCullingTimer -= Time.unscaledDeltaTime;
+            bool refreshPresentationCulling = presentationCullingTimer <= 0f;
+            if (refreshPresentationCulling) presentationCullingTimer = PresentationCullingIntervalSeconds;
+
+            Camera presentationCamera = refreshPresentationCulling ? Camera.main : null;
+            Plane[] presentationPlanes = presentationCamera == null
+                ? null
+                : GeometryUtility.CalculateFrustumPlanes(presentationCamera);
 
             foreach (var item in visualControllers)
             {
@@ -171,6 +181,9 @@ namespace RatHabitat
                     // position without moving the stable rat root.
                     visualFactory.KeepPairingVisualGrounded(currentVisual, rat, controller);
                 }
+
+                if (refreshPresentationCulling)
+                    controller.UpdatePresentationCulling(presentationCamera, presentationPlanes);
 
                 int configuredBoundsVersion;
                 bool boundsVersionChanged = !configuredSelectionBoundsVersions.TryGetValue(item.Key, out configuredBoundsVersion) ||
