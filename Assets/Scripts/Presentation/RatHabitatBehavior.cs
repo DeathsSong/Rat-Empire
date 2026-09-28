@@ -100,6 +100,7 @@ namespace RatHabitat
         private Vector3 pairingFacingPoint;
         private bool birthApproachActive;
         private bool birthApproachArrived;
+        private bool birthWalkAnimationActive;
         private Vector3 birthApproachTarget;
         private readonly List<Vector3> pairingRouteWaypoints = new List<Vector3>();
         private int pairingRouteWaypointIndex;
@@ -112,6 +113,10 @@ namespace RatHabitat
         private string nursingInteractionAnimation = "HandPaintedRat_Sniffing";
         private string nursingInteractionAnimationFallback = "Sniffing";
         private bool nursingCareRestActive;
+        private bool nursingCareMovementActive;
+        private Vector3 lastNursingCareTarget;
+        private bool hasLastNursingCareTarget;
+        private int nursingCareTargetSequence;
         private float pairingSpeedMultiplier = 1f;
         private Vector3 diagnosticsPreviousPosition;
         private bool diagnosticsHavePreviousPosition;
@@ -176,7 +181,7 @@ namespace RatHabitat
         {
             get
             {
-                if (nursingInteractionActive || nursingCareRestActive) return "nursing";
+                if (nursingInteractionActive || nursingCareRestActive || nursingCareMovementActive) return "nursing";
                 if (pairingApproachActive) return "breeding";
                 if (birthApproachActive) return "birth-approach";
                 if (state == RatBehaviorState.Dying) return "deceased";
@@ -199,9 +204,9 @@ namespace RatHabitat
         {
             get
             {
-                if (nursingInteractionActive || nursingCareRestActive) return "Caring for pinkies";
+                if (nursingInteractionActive || nursingCareRestActive || nursingCareMovementActive) return "Caring for pinkies";
                 if (pairingApproachActive) return "Breeding";
-                if (birthApproachActive) return "Going to nest";
+                if (birthApproachActive) return "Going to give birth";
                 if (state == RatBehaviorState.Dying) return "Deceased";
                 if (currentTarget != null)
                 {
@@ -296,7 +301,7 @@ namespace RatHabitat
                 if (animator != null) animator.speed = GrowthSystem.RuntimeAnimationPlaybackMultiplier;
                 // Skip the initial stationary hold so new adults begin with
                 // the configured movement behavior.
-                if (rat.nursing && EnclosureSystem.HasNest(rat.enclosure)) BeginCaregivingRest();
+                if (rat.nursing && EnclosureSystem.HasNest(rat.enclosure)) BeginCaregivingCycle();
                 else BeginTravel();
             }
             else if (configuredStage != rat.stage)
@@ -306,9 +311,10 @@ namespace RatHabitat
                 nursingInteractionActive = false;
                 nursingInteractionRemaining = 0f;
                 nursingCareRestActive = false;
+                nursingCareMovementActive = false;
                 deathPoseHeld = false;
                 if (animator != null) animator.speed = GrowthSystem.RuntimeAnimationPlaybackMultiplier;
-                if (rat.nursing && EnclosureSystem.HasNest(rat.enclosure)) BeginCaregivingRest();
+                if (rat.nursing && EnclosureSystem.HasNest(rat.enclosure)) BeginCaregivingCycle();
                 else EnterState(RatBehaviorState.Idle, NextIdleDuration(0.8f, 1.8f));
             }
             else if (configuredEnclosure != rat.enclosure)
@@ -327,15 +333,17 @@ namespace RatHabitat
                 nursingInteractionActive = false;
                 nursingInteractionRemaining = 0f;
                 nursingCareRestActive = false;
+                nursingCareMovementActive = false;
                 transform.position = ClampToAssignedEnclosure(transform.position);
-                if (rat.nursing && EnclosureSystem.HasNest(rat.enclosure)) BeginCaregivingRest();
+                if (rat.nursing && EnclosureSystem.HasNest(rat.enclosure)) BeginCaregivingCycle();
                 else BeginTravel();
             }
-            else if (!rat.nursing && (nursingInteractionActive || nursingCareRestActive))
+            else if (!rat.nursing && (nursingInteractionActive || nursingCareRestActive || nursingCareMovementActive))
             {
                 nursingInteractionActive = false;
                 nursingInteractionRemaining = 0f;
                 nursingCareRestActive = false;
+                nursingCareMovementActive = false;
                 currentTarget = null;
                 BeginTravel();
             }
@@ -412,11 +420,13 @@ namespace RatHabitat
 
             birthApproachActive = true;
             birthApproachArrived = false;
+            birthWalkAnimationActive = false;
             birthApproachTarget = EnclosureSystem.ClampToNestCaregiverZone(
                 rat.enclosure, new Vector3(target.x, transform.position.y, target.z));
             currentTarget = null;
             stateTimer = 60f;
             EnterState(RatBehaviorState.WalkToTarget, stateTimer);
+            EnsureBirthWalkAnimation();
 
             Vector3 horizontal = birthApproachTarget - transform.position;
             horizontal.y = 0f;
@@ -440,7 +450,7 @@ namespace RatHabitat
             birthApproachArrived = false;
             currentTarget = null;
             if (rat != null && rat.nursing && EnclosureSystem.HasNest(rat.enclosure))
-                BeginCaregivingRest();
+                BeginCaregivingCycle();
             else
                 BeginTravel();
         }
@@ -484,6 +494,7 @@ namespace RatHabitat
             nursingInteractionAnimation = NursingSystem.AnimationStateFor(interactionId);
             nursingInteractionAnimationFallback = NursingSystem.AnimationFallbackFor(interactionId);
             nursingCareRestActive = false;
+            nursingCareMovementActive = true;
             pairingInteractionActive = false;
             pairingApproachActive = false;
             Vector3 fromPup = transform.position - pupPosition;
@@ -514,6 +525,7 @@ namespace RatHabitat
                 return;
 
             nursingCareRestActive = true;
+            nursingCareMovementActive = true;
             nursingInteractionActive = false;
             nursingInteractionRemaining = 0f;
             Vector3 nestSide = EnclosureSystem.GetNestCaregiverPosition(rat.enclosure);
@@ -526,6 +538,72 @@ namespace RatHabitat
             };
             targetPosition = currentTarget.position;
             EnterState(RatBehaviorState.WalkToTarget, 60f);
+        }
+
+        /// <summary>
+        /// Chooses the next presentation-only caregiving action. The mother
+        /// stays inside the inner nest zone, but no longer idles forever at a
+        /// single center point between biological nursing opportunities.
+        /// </summary>
+        private void BeginCaregivingCycle()
+        {
+            if (!configured || rat == null || !rat.nursing || !EnclosureSystem.HasNest(rat.enclosure))
+                return;
+
+            // Real nursing interactions remain owned by NursingSystem. This
+            // branch only supplies visible movement and rest between those
+            // persisted interactions.
+            bool shouldRest = random == null || random.NextDouble() < 0.38;
+            if (shouldRest)
+            {
+                BeginCaregivingRest();
+                return;
+            }
+
+            nursingCareRestActive = false;
+            nursingCareMovementActive = true;
+            nursingInteractionActive = false;
+            nursingInteractionRemaining = 0f;
+            Vector3 target = NextCaregivingTarget();
+            nursingCareTargetSequence++;
+            currentTarget = new RatBehaviorTarget
+            {
+                id = "nursing-care-point-" + nursingCareTargetSequence,
+                label = "Caring for pinkies",
+                kind = RatBehaviorTargetKind.Nest,
+                position = target,
+            };
+            targetPosition = target;
+            EnterState(RatBehaviorState.WalkToTarget, NextFloat(8f, 18f));
+        }
+
+        private Vector3 NextCaregivingTarget()
+        {
+            Bounds zone;
+            RatEnclosure enclosure = rat == null ? RatEnclosure.FemaleColony : rat.enclosure;
+            if (!EnclosureSystem.TryGetNestCaregiverBounds(
+                enclosure, NestBodyMarginForMovement(), out zone))
+                return EnclosureSystem.GetNestCaregiverPosition(enclosure);
+
+            Vector3 candidate = zone.center;
+            float minimumDistance = Mathf.Min(0.55f, Mathf.Max(0.18f, zone.extents.x * 0.45f));
+            for (int attempt = 0; attempt < 8; attempt++)
+            {
+                candidate = new Vector3(
+                    NextFloat(zone.min.x, zone.max.x),
+                    transform.position.y,
+                    NextFloat(zone.min.z, zone.max.z));
+                if (!hasLastNursingCareTarget ||
+                    Vector2.Distance(new Vector2(candidate.x, candidate.z),
+                        new Vector2(lastNursingCareTarget.x, lastNursingCareTarget.z)) >= minimumDistance)
+                    break;
+            }
+
+            candidate = EnclosureSystem.ClampToNestCaregiverZone(
+                enclosure, candidate, NestBodyMarginForMovement());
+            lastNursingCareTarget = candidate;
+            hasLastNursingCareTarget = true;
+            return new Vector3(candidate.x, transform.position.y, candidate.z);
         }
 
         public void BeginPairingInteraction(Vector3 facePoint, float durationSeconds)
@@ -600,7 +678,8 @@ namespace RatHabitat
             float deltaTime = GrowthSystem.SimulationBehaviorDeltaSeconds(Time.unscaledDeltaTime);
             int simulationSteps = GrowthSystem.BeginBehaviorUpdate(deltaTime);
             float stepDeltaTime = simulationSteps <= 0 ? 0f : deltaTime / simulationSteps;
-            float visualMovementBudget = pairingApproachActive || birthApproachActive || nursingInteractionActive || nursingCareRestActive
+            float visualMovementBudget = pairingApproachActive || birthApproachActive || nursingInteractionActive ||
+                nursingCareRestActive || nursingCareMovementActive
                 ? GrowthSystem.MaximumFastRouteMovementUnitsPerFrame
                 : GrowthSystem.MaximumVisualMovementUnitsPerFrame;
             ApplySimulationAnimationSpeed();
@@ -631,6 +710,7 @@ namespace RatHabitat
                 nursingInteractionActive = false;
                 nursingInteractionRemaining = 0f;
                 nursingCareRestActive = false;
+                nursingCareMovementActive = false;
                 transform.position = ClampToAssignedEnclosure(transform.position);
                 BeginTravel();
             }
@@ -640,7 +720,7 @@ namespace RatHabitat
             // it can make an adult or young rat walk back into the nest.
             if (currentTarget != null && currentTarget.kind == RatBehaviorTargetKind.Nest)
             {
-                if (!nursingInteractionActive && !nursingCareRestActive)
+                if (!nursingInteractionActive && !nursingCareRestActive && !nursingCareMovementActive)
                 {
                     currentTarget = null;
                     BeginTravel();
@@ -852,7 +932,7 @@ namespace RatHabitat
             nestDetourWaypointIndex = 0;
             if (rat != null && rat.nursing && EnclosureSystem.HasNest(rat.enclosure))
             {
-                BeginCaregivingRest();
+                BeginCaregivingCycle();
                 return;
             }
             currentTarget = ChooseTarget();
@@ -920,7 +1000,7 @@ namespace RatHabitat
 
         private void UpdateTravel(float deltaTime, ref float visualMovementBudget)
         {
-            if (pairingApproachActive || nursingInteractionActive || nursingCareRestActive)
+            if (pairingApproachActive || nursingInteractionActive || nursingCareRestActive || nursingCareMovementActive)
                 visualMovementBudget = Mathf.Max(
                     visualMovementBudget, GrowthSystem.MaximumFastRouteMovementUnitsPerFrame);
             travelTimer += deltaTime;
@@ -936,8 +1016,20 @@ namespace RatHabitat
                 if (nursingCareRestActive)
                 {
                     nursingCareRestActive = false;
+                    nursingCareMovementActive = false;
+                    lastNursingCareTarget = transform.position;
+                    hasLastNursingCareTarget = true;
                     currentTarget = null;
                     EnterState(RatBehaviorState.Idle, NextIdleDuration(2.5f, 5.5f));
+                    return;
+                }
+                if (nursingCareMovementActive)
+                {
+                    nursingCareMovementActive = false;
+                    lastNursingCareTarget = transform.position;
+                    hasLastNursingCareTarget = true;
+                    currentTarget = null;
+                    EnterState(RatBehaviorState.Idle, NextIdleDuration(1.2f, 3.2f));
                     return;
                 }
                 if (currentTarget == null)
@@ -953,6 +1045,8 @@ namespace RatHabitat
             }
             if (stateTimer <= 0f)
             {
+                nursingCareRestActive = false;
+                nursingCareMovementActive = false;
                 currentTarget = null;
                 if (ShouldStartAmbientInvestigation(0.24f)) BeginAmbientInvestigation();
                 else EnterState(RatBehaviorState.Idle, NextIdleDuration(1.1f, 3.8f));
@@ -1034,6 +1128,13 @@ namespace RatHabitat
                 return;
             }
 
+            // Birth approach bypasses the ordinary target switch so the
+            // pregnancy deadline can wait for a valid nest arrival. Reassert
+            // the locomotion clip here as well as in EnterState so a render,
+            // animator rebind, or save/load refresh cannot leave the mother
+            // visibly sliding toward the nest in an idle pose.
+            EnsureBirthWalkAnimation();
+
             Vector3 destination = birthApproachTarget;
             destination.y = transform.position.y;
             Vector3 toTarget = destination - transform.position;
@@ -1071,6 +1172,30 @@ namespace RatHabitat
                 birthApproachArrived = true;
                 FaceBirthNest(deltaTime);
             }
+        }
+
+        private void EnsureBirthWalkAnimation()
+        {
+            if (animator == null || !animator.enabled || animator.runtimeAnimatorController == null) return;
+            if (birthWalkAnimationActive)
+            {
+                ApplySimulationAnimationSpeed();
+                return;
+            }
+
+            int fullWalkHash = Animator.StringToHash("Base Layer.HandPaintedRat_Walk");
+            int shortWalkHash = Animator.StringToHash("HandPaintedRat_Walk");
+            int fallbackWalkHash = Animator.StringToHash("Walk");
+            if (!animator.HasState(0, fullWalkHash) && !animator.HasState(0, shortWalkHash) &&
+                !animator.HasState(0, fallbackWalkHash)) return;
+
+            AnimatorStateInfo stateInfo = animator.GetCurrentAnimatorStateInfo(0);
+            bool walking = stateInfo.IsName("HandPaintedRat_Walk") || stateInfo.IsName("Walk") ||
+                stateInfo.IsName("HandPaintedRat_Run") || stateInfo.IsName("Run");
+            if (!walking)
+                PlayAvailableMotion("HandPaintedRat_Walk", 0.08f, WalkAnimationPlaybackScale, "Walk");
+            birthWalkAnimationActive = true;
+            ApplySimulationAnimationSpeed();
         }
 
         private void FaceBirthNest(float deltaTime)
@@ -1226,7 +1351,7 @@ namespace RatHabitat
                     // Return to the nest-side caregiving loop after every
                     // interaction instead of immediately wandering away.
                     if (rat.nursing && EnclosureSystem.HasNest(rat.enclosure))
-                        BeginCaregivingRest();
+                        BeginCaregivingCycle();
                     else
                         EnterState(RatBehaviorState.Recover, NextFloat(0.8f, 1.8f));
                 }
@@ -1267,7 +1392,8 @@ namespace RatHabitat
         private void ResolveSpacing(float deltaTime)
         {
             if (rat == null || rat.stage == RatStage.Pinkie) return;
-            if (pairingApproachActive || birthApproachActive || nursingInteractionActive || nursingCareRestActive) return;
+            if (pairingApproachActive || birthApproachActive || nursingInteractionActive ||
+                nursingCareRestActive || nursingCareMovementActive) return;
             bool adultSized = rat.stage == RatStage.Adult || rat.stage == RatStage.Mature ||
                 rat.stage == RatStage.Elderly;
             float minimum = adultSized ? MinimumRatSpacing : MinimumRatSpacing * 0.78f;
@@ -1289,6 +1415,7 @@ namespace RatHabitat
         private void EnterState(RatBehaviorState next, float duration)
         {
             state = next;
+            if (!IsWalkingState(next)) birthWalkAnimationActive = false;
             stateTimer = Mathf.Max(0.05f, duration);
             travelTimer = 0f;
             movementSpeed = next == RatBehaviorState.Run
@@ -1565,7 +1692,7 @@ namespace RatHabitat
         private Vector3 MoveTowardAvoidingNest(Vector3 current, Vector3 desired, float movementStep)
         {
             RatEnclosure enclosure = rat == null ? RatEnclosure.FemaleColony : rat.enclosure;
-            if (nursingInteractionActive || nursingCareRestActive)
+            if (nursingInteractionActive || nursingCareRestActive || nursingCareMovementActive)
             {
                 // If a saved position is outside the inner zone, let the
                 // normal movement step approach it first. Only project once

@@ -27,8 +27,8 @@ namespace RatHabitat
         // Caregiving uses a smaller inset than the adult exclusion footprint.
         // The inset leaves room for the mother's body and tail without
         // selecting destinations on the nest's outer wall or front edge.
-        private const float NestCaregiverInset = 0.56f;
-        private const float NestCaregiverBodyMargin = 0.42f;
+        private const float NestCaregiverInset = GameConfig.NestCaregiverInset;
+        private const float NestCaregiverBodyMargin = GameConfig.NestCaregiverBodyMargin;
         private static Bounds pairingNestRendererBounds;
         private static bool pairingNestRendererBoundsRegistered;
 
@@ -664,16 +664,10 @@ namespace RatHabitat
         public static bool IsInsideNestCaregiverZone(RatEnclosure enclosure, Vector3 position,
             float bodyMargin = NestCaregiverBodyMargin)
         {
-            if (!HasNest(enclosure)) return false;
-            Vector3 center;
-            float radiusX;
-            float radiusZ;
-            GetNestExclusionRadii(enclosure, out center, out radiusX, out radiusZ);
-            float inset = Mathf.Max(0.12f, bodyMargin) + NestCaregiverInset;
-            float innerX = Mathf.Max(0.20f, radiusX - inset);
-            float innerZ = Mathf.Max(0.20f, radiusZ - inset);
-            return Mathf.Abs(position.x - center.x) <= innerX &&
-                Mathf.Abs(position.z - center.z) <= innerZ;
+            Bounds zone;
+            if (!TryGetNestCaregiverBounds(enclosure, bodyMargin, out zone)) return false;
+            return Mathf.Abs(position.x - zone.center.x) <= zone.extents.x &&
+                Mathf.Abs(position.z - zone.center.z) <= zone.extents.z;
         }
 
         /// <summary>
@@ -685,16 +679,34 @@ namespace RatHabitat
             float bodyMargin = NestCaregiverBodyMargin)
         {
             if (!HasNest(enclosure)) return ClampToEnclosure(enclosure, position);
+            Bounds zone;
+            if (!TryGetNestCaregiverBounds(enclosure, bodyMargin, out zone))
+                return ClampToEnclosure(enclosure, position);
+            position.x = Mathf.Clamp(position.x, zone.min.x, zone.max.x);
+            position.z = Mathf.Clamp(position.z, zone.min.z, zone.max.z);
+            return ClampToEnclosureAllowNest(enclosure, position, 0.42f);
+        }
+
+        public static bool TryGetNestCaregiverBounds(RatEnclosure enclosure, float bodyMargin,
+            out Bounds bounds)
+        {
+            bounds = new Bounds();
+            if (!HasNest(enclosure)) return false;
+
             Vector3 center;
             float radiusX;
             float radiusZ;
             GetNestExclusionRadii(enclosure, out center, out radiusX, out radiusZ);
             float inset = Mathf.Max(0.12f, bodyMargin) + NestCaregiverInset;
-            float innerX = Mathf.Max(0.20f, radiusX - inset);
-            float innerZ = Mathf.Max(0.20f, radiusZ - inset);
-            position.x = Mathf.Clamp(position.x, center.x - innerX, center.x + innerX);
-            position.z = Mathf.Clamp(position.z, center.z - innerZ, center.z + innerZ);
-            return ClampToEnclosureAllowNest(enclosure, position, 0.42f);
+            float minimum = Mathf.Max(0.20f, GameConfig.NestCaregiverMinimumHalfExtent);
+            float maximumFraction = Mathf.Clamp(
+                GameConfig.NestCaregiverMaximumHalfExtentFraction, 0.35f, 0.90f);
+            float innerX = Mathf.Clamp(radiusX - inset, minimum, Mathf.Max(minimum, radiusX * maximumFraction));
+            float innerZ = Mathf.Clamp(radiusZ - inset, minimum, Mathf.Max(minimum, radiusZ * maximumFraction));
+            // The Y value is only a target-space reference. RatHabitatBehavior
+            // replaces it with the stable gameplay-root height before moving.
+            bounds = new Bounds(center, new Vector3(innerX * 2f, 0.1f, innerZ * 2f));
+            return true;
         }
 
         public static Vector3 GetNestCaregiverPosition(RatEnclosure enclosure)

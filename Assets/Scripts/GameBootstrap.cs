@@ -3079,13 +3079,19 @@ namespace RatHabitat
 
                 if (!pregnancy.birthApproachStarted)
                 {
+                    // Mark the persisted approach only after the live
+                    // behavior accepts the route. This prevents a stale
+                    // "Going to give birth" label when a presentation root
+                    // is temporarily unavailable during a rebuild.
+                    Vector3 caregiverTarget = EnclosureSystem.GetNestCaregiverPosition(mother.enclosure);
+                    if (!behavior.BeginBirthApproach(caregiverTarget)) continue;
                     pregnancy.birthApproachStarted = true;
                     pregnancy.birthApproachStartedAt = GameTime;
-                    RatActivitySystem.SetCurrent(Save, mother, "birth-approach", "Going to nest", GameTime);
+                    RatActivitySystem.SetCurrent(Save, mother, "birth-approach", "Going to give birth", GameTime);
                     sequenceChanged = true;
                 }
 
-                if (!behavior.BirthApproachAtNest)
+                else if (!behavior.BirthApproachAtNest)
                 {
                     Vector3 caregiverTarget = EnclosureSystem.GetNestCaregiverPosition(mother.enclosure);
                     if (!behavior.BeginBirthApproach(caregiverTarget)) continue;

@@ -48,6 +48,13 @@ namespace RatHabitat
         // and the six-week sale restriction. Mothers can resume the normal
         // fertile-window calculation while still caring for their litter.
         public const float RecoveryDays = 7f;
+        // Presentation-only inner nest zone for a mother caring for pinkies.
+        // These values are deliberately configurable and are clamped against
+        // the measured nest footprint by EnclosureSystem.
+        public const float NestCaregiverInset = 0.56f;
+        public const float NestCaregiverBodyMargin = 0.42f;
+        public const float NestCaregiverMinimumHalfExtent = 0.25f;
+        public const float NestCaregiverMaximumHalfExtentFraction = 0.74f;
         public const float HealthDeclineStartDays = 365f;
         // Keep raw fertility decline aligned with the reproductive decline
         // boundary. A naturally low fertility trait is not an age stage.

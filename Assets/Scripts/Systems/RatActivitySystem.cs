@@ -141,7 +141,7 @@ namespace RatHabitat
                 PregnancyData pregnancy = BreedingSystem.FindPendingPregnancyForMother(save, rat.id);
                 if (pregnancy != null)
                     return pregnancy.birthApproachStarted && pregnancy.dueAt <= gameTimeMs
-                        ? "Going to nest" : "Pregnant";
+                        ? "Going to give birth" : "Pregnant";
             }
             if (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing)
             {
@@ -213,7 +213,7 @@ namespace RatHabitat
                     {
                         key = pregnancy.birthApproachStarted && pregnancy.dueAt <= gameTimeMs
                             ? "birth-approach" : "pregnant";
-                        label = key == "birth-approach" ? "Going to nest" : "Pregnant";
+                        label = key == "birth-approach" ? "Going to give birth" : "Pregnant";
                     }
                 }
                 if (key == null && (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing))
