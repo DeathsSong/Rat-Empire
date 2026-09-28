@@ -221,19 +221,6 @@ namespace RatHabitat
                     {
                         ConfigureMatureTailMaterial(material, rat);
                         materials[materialIndex] = material;
-                        if (materialAudit.Length > 0) materialAudit += "; ";
-                        materialAudit += renderer.gameObject.name + " slot=" + materialIndex +
-                            " material=" + material.name +
-                            " shader=" + (material.shader == null ? "none" : material.shader.name) +
-                            " tailTexture=" + TexturePropertySummary(material, "_MainTex") +
-                            " tailTextureLoaded=" + (material.HasProperty("_MainTex") && material.GetTexture("_MainTex") != null) +
-                            " tailTextureIsPinkie=" + IsPinkieTailTexture(material) +
-                            " tailColor=" + ColorPropertySummary(material) +
-                            " tailUvMin=" + cachedTailUvMin +
-                            " tailUvSize=" + cachedTailUvSize +
-                            " tailMaskCoverage=" + cachedFeatureMaskCoverage.z.ToString("0.000") +
-                            " tailRegionCoverage=" + cachedTailRegionCoverage.ToString("0.000") +
-                            " tailSubmesh=1 stage=" + rat.stage;
                         continue;
                     }
                     if (!material.name.Contains(PhenotypeMaterialMarker))
@@ -371,16 +358,6 @@ namespace RatHabitat
                         " eyeColor=" + ColorPropertySummary(material, "_EyeColor") +
                         " eyeMask=" + TexturePropertySummary(material, "_EyeMask") +
                         " eyeMaskCoverage=" + cachedEyeMaskCoverage.ToString("0.000") +
-                        " faceMaskCoverage=" + cachedFeatureMaskCoverage.x.ToString("0.000") +
-                        " tailMaskCoverage=" + cachedFeatureMaskCoverage.z.ToString("0.000") +
-                        " tailRegionCoverage=" + cachedTailRegionCoverage.ToString("0.000") +
-                        " tailUvMin=" + cachedTailUvMin +
-                        " tailUvSize=" + cachedTailUvSize +
-                        " tailTexture=separate-submesh" +
-                        " tailTextureLoaded=separate-submesh" +
-                        " tailTextureIsPinkie=separate-submesh" +
-                        " tailColor=separate-submesh" +
-                        " tailStrength=separate-submesh" +
                         " stage=" + rat.stage +
                         " albinoMode=" + AlbinoModeSummary(material) +
                         " finalAlbedoPath=" + (albino ? "AlbinoNeutralBodyThenEye" : "CoatThenEye");
@@ -678,13 +655,6 @@ namespace RatHabitat
                 splitMesh.RecalculateBounds();
                 splitMesh.hideFlags = HideFlags.HideAndDontSave;
                 matureTailMeshCache[sourceMesh] = splitMesh;
-                Debug.Log("[Rat Habitat] Mature tail mesh audit: source=" + sourceMesh.name +
-                    " vertices=" + sourceMesh.vertexCount +
-                    " sourceSubmeshes=1 splitSubmeshes=2" +
-                    " bodyTriangles=" + (bodyTriangles.Count / 3) +
-                    " tailTriangles=" + (tailTriangles.Count / 3) +
-                    " sourceMaterial=" + (materials == null || materials.Length == 0 || materials[0] == null
-                        ? "<null>" : materials[0].name));
             }
 
             renderer.sharedMesh = splitMesh;
@@ -743,16 +713,6 @@ namespace RatHabitat
             }
             if (material.HasProperty("_MainTex") && material.GetTexture("_MainTex") == null)
                 material.SetTexture("_MainTex", ResolveMatureTailMaterial().GetTexture("_MainTex"));
-        }
-
-        private static bool IsPinkieTailTexture(Material material)
-        {
-            if (material == null) return false;
-            Texture texture = material.HasProperty("_MainTex")
-                ? material.GetTexture("_MainTex")
-                : (material.HasProperty("_MatureTailTex") ? material.GetTexture("_MatureTailTex") : null);
-            return texture != null &&
-                texture.name.IndexOf("Pinkie", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static string TexturePropertySummary(Material material)
