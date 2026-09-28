@@ -301,8 +301,10 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // Albino tails retain the same surface detail but use only the
             // source luminance, preventing the shared non-albino skin tint
             // from reintroducing pink/red into the white phenotype.
+            float matureTailLuminance = dot(matureTailSource.rgb,
+                float3(0.299, 0.587, 0.114));
             fixed3 matureTailSourceColor = _AlbinoMode > 0.5
-                ? fixed3(dot(matureTailSource.rgb, float3(0.299, 0.587, 0.114)))
+                ? fixed3(matureTailLuminance, matureTailLuminance, matureTailLuminance)
                 : matureTailSource.rgb;
             fixed3 matureTail = matureTailSourceColor *
                 _MatureTailColor.rgb * tailSkinValue;
