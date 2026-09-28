@@ -7,6 +7,7 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
         _AccentColor ("Coat Accent", Color) = (1, 1, 1, 1)
         _SpotMask ("Body Spot UV Mask", 2D) = "black" {}
         _SpotPattern ("Organic Spot Pattern", 2D) = "black" {}
+        _FeatureMask ("Stable Skinned Feature Mask", 2D) = "black" {}
         _SpotColor ("Spot Color", Color) = (1, 1, 1, 1)
         _SpotSeed ("Spot Seed", Float) = 0
         _SpotStrength ("Spot Strength", Range(0, 1)) = 0
@@ -36,6 +37,7 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
         sampler2D _MainTex;
         sampler2D _SpotMask;
         sampler2D _SpotPattern;
+        sampler2D _FeatureMask;
         fixed4 _Color;
         fixed4 _AccentColor;
         fixed4 _SpotColor;
@@ -79,7 +81,6 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
         struct Input
         {
             float2 uv_MainTex;
-            float3 worldPos;
         };
 
         void surf(Input input, inout SurfaceOutputStandard output)
@@ -175,64 +176,31 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // shaped white patches on the imported mesh.
             float bodyFalloff = lerp(0.90, 1.0, softenedBodyMask);
             float whiteBlend = saturate(bodyFalloff * softenedSpots * _SpotStrength);
-            // The imported asset's body mask intentionally avoids several
-            // face, leg, and underside UV islands. Add a small object-space
-            // contribution so the recorded marking family is visible on the
-            // actual skinned mesh, not just in profile text. worldPos is
-            // converted through the rat visual's object transform, so these
-            // regions follow bones, rotation, and animation naturally.
-            float3 ratLocal = mul(unity_WorldToObject, float4(input.worldPos, 1.0)).xyz;
-            float3 modelSize = max(_RatModelBoundsSize.xyz, float3(0.0001, 0.0001, 0.0001));
-            float3 ratUv = saturate((ratLocal - _RatModelBoundsMin.xyz) / modelSize);
-            // The imported FBX rig places Head_end at the negative local-X
-            // end and Tail_Start at the positive local-X end. Use that actual
-            // mesh orientation rather than assuming forward is local Z.
-            float headAxis = 1.0 - ratUv.x;
-            float centeredSide = ratUv.z - 0.5;
-            float headEnd = smoothstep(0.52, 0.76, headAxis);
-            float muzzleEnd = smoothstep(0.70, 0.94, headAxis);
-            float faceWidth = 1.0 - smoothstep(0.18, 0.48, abs(centeredSide));
-            float faceHeight = smoothstep(0.18, 0.34, ratUv.y) *
-                (1.0 - smoothstep(0.84, 0.98, ratUv.y));
-            // A low-frequency deterministic offset makes the facial region
-            // slightly asymmetric without changing the stored genetics.
-            float faceOffset = sin(_SpotSeed * 19.37 + headAxis * 11.0) * 0.07;
-            float stripe = 1.0 - smoothstep(0.035, 0.20,
-                abs(centeredSide + faceOffset));
-            float cheek = smoothstep(0.18, 0.34, abs(centeredSide + faceOffset)) *
-                (1.0 - smoothstep(0.38, 0.49, abs(centeredSide + faceOffset)));
-            float facePattern = lerp(cheek, stripe, step(11.5, _MarkingFamily) *
-                step(_MarkingFamily, 14.5));
-            float faceRegion = saturate(headEnd * faceWidth * faceHeight *
-                (0.58 + 0.42 * facePattern) *
-                (0.72 + 0.28 * muzzleEnd));
-
-            float lowerBody = 1.0 - smoothstep(0.22, 0.50, ratUv.y);
-            float legSide = smoothstep(0.18, 0.35, abs(centeredSide));
-            float frontLeg = smoothstep(0.52, 0.78, headAxis);
-            float rearLeg = 1.0 - smoothstep(0.18, 0.42, headAxis);
-            float legEndVariation = 0.78 + 0.22 *
-                (sin(_SpotSeed * 13.1 + headAxis * 17.0 + ratUv.z * 5.0) * 0.5 + 0.5);
-            float legRegion = saturate(lowerBody * legSide *
-                (0.54 + 0.46 * max(frontLeg, rearLeg)) * legEndVariation);
-            float bellyRegion = saturate(lowerBody *
-                (1.0 - smoothstep(0.12, 0.34, abs(centeredSide))) *
-                (0.76 + 0.24 * sin(_SpotSeed * 7.7 + headAxis * 9.0)));
-            // Carry the marking softly over the rump/tail base as well, while
-            // leaving the narrow tail-detail pixels available to the feature
-            // preservation signal above.
-            float rumpRegion = smoothstep(0.70, 0.95, ratUv.x) *
-                smoothstep(0.20, 0.44, ratUv.y) *
-                (1.0 - smoothstep(0.22, 0.46, abs(centeredSide)));
+            // Feature regions are generated once from the imported mesh's
+            // bone weights and rasterized into a shared UV mask. Sampling UVs
+            // here keeps markings attached to the skinned surface while the
+            // head, ears, legs, and tail animate; using current world/object
+            // position would make the white regions slide between bones.
+            float4 featureMask = tex2D(_FeatureMask, input.uv_MainTex);
+            float faceRegion = featureMask.r;
+            float legRegion = featureMask.g;
+            float bellyRegion = featureMask.a;
+            float featureVariation = sin(input.uv_MainTex.x * 23.0 +
+                input.uv_MainTex.y * 9.0 + _SpotSeed * 2.3) * 0.08 +
+                sin(input.uv_MainTex.y * 17.0 - input.uv_MainTex.x * 13.0 +
+                _SpotSeed * 4.1) * 0.05;
+            faceRegion *= 0.90 + 0.10 *
+                (sin(input.uv_MainTex.x * 17.0 + _SpotSeed) * 0.5 + 0.5);
+            legRegion *= 0.86 + 0.14 *
+                (sin(input.uv_MainTex.y * 31.0 + _SpotSeed * 1.7) * 0.5 + 0.5);
+            bellyRegion *= 0.90 + 0.10 *
+                (sin(input.uv_MainTex.x * 11.0 - input.uv_MainTex.y * 7.0 + _SpotSeed) * 0.5 + 0.5);
             float featureBlend = saturate(faceRegion * _FaceMarkingStrength +
-                legRegion * _LegMarkingStrength + bellyRegion * _BellyMarkingStrength +
-                rumpRegion * _BellyMarkingStrength * 0.42);
-            // Break up the object-space feature fields with a stable, very
-            // low-frequency fur variation before feathering them. This keeps
+                legRegion * _LegMarkingStrength + bellyRegion * _BellyMarkingStrength);
+            // Break up the stable UV feature fields with a low-frequency
+            // deterministic variation before feathering them. This keeps
             // face/leg/belly markings organic without animated noise or a
             // separate decal floating over the skinned mesh.
-            float featureVariation = sin(headAxis * 23.0 + ratUv.z * 9.0 + _SpotSeed * 2.3) * 0.08 +
-                sin(ratUv.y * 17.0 - headAxis * 13.0 + _SpotSeed * 4.1) * 0.05;
             featureBlend = smoothstep(0.05, 0.68,
                 saturate(featureBlend + featureVariation * 0.30));
             // Keep dark eye/mouth/tail detail readable when a white facial or
@@ -250,23 +218,13 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // hand-painted/pinkie-like appearance. Gate both the measured
             // object-space tail strip and its UV island so the actual tail is
             // recolored without painting the rump.
-            float tailObjectX = 1.0 - smoothstep(0.16, 0.42, abs(ratUv.x - 0.50));
-            float tailObjectZ = 1.0 - smoothstep(0.16, 0.44, ratUv.z);
-            float tailObjectY = smoothstep(0.58, 0.82, ratUv.y);
-            float tailUvU = smoothstep(0.25, 0.31, input.uv_MainTex.x) *
-                (1.0 - smoothstep(0.82, 0.88, input.uv_MainTex.x));
-            float tailUvV = smoothstep(0.01, 0.08, input.uv_MainTex.y) *
-                (1.0 - smoothstep(0.36, 0.44, input.uv_MainTex.y));
-            float tailUvRegion = saturate(tailUvU * tailUvV);
-            // UVs stay attached to the skinned tail while its bones rotate.
-            // Keep the object-space strip as a gentle confidence multiplier,
-            // not a hard gate, so animated tail poses cannot make the mature
-            // material disappear.
-            float tailObjectConfidence = lerp(0.82, 1.0,
-                saturate(tailObjectX * tailObjectZ * tailObjectY));
-            float tailRegion = saturate(tailUvRegion * tailObjectConfidence);
+            // The blue channel is the tail-bone UV region generated by the
+            // mesh audit. It remains stable through tail animation and does
+            // not recolor nearby body triangles.
+            float tailRegion = tex2D(_FeatureMask, input.uv_MainTex).b;
             tailRegion *= 0.84 + 0.16 *
-                (sin(headAxis * 29.0 + ratUv.y * 11.0 + _SpotSeed * 3.7) * 0.5 + 0.5);
+                (sin(input.uv_MainTex.x * 29.0 + input.uv_MainTex.y * 11.0 +
+                _SpotSeed * 3.7) * 0.5 + 0.5);
             fixed3 coatWithMarkings = lerp(painted.rgb, _SpotColor.rgb, whiteBlend);
             coatWithMarkings = lerp(coatWithMarkings, _MatureTailColor.rgb,
                 tailRegion * _MatureTailStrength);
@@ -275,13 +233,7 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // recolored when the whole imported mesh is tinted. Restore a
             // small, localized eye signal last so ordinary rats always have
             // black eyes and albino/pink-eye phenotypes retain pink/red eyes.
-            float eyeFront = smoothstep(0.62, 0.79, headAxis) *
-                (1.0 - smoothstep(0.86, 0.98, headAxis));
-            float eyeBand = 1.0 - smoothstep(0.30, 0.47, abs(ratUv.y - 0.49));
-            float eyeSide = 1.0 - smoothstep(0.035, 0.13, abs(abs(centeredSide) - 0.18));
-            float eyeRegion = saturate(eyeFront * eyeBand * eyeSide);
-            eyeRegion *= 0.88 + 0.12 *
-                (sin(headAxis * 43.0 + ratUv.z * 17.0 + _SpotSeed) * 0.5 + 0.5);
+            float eyeRegion = saturate(darkFeatureSignal * featureMask.r * 1.35);
             output.Albedo = lerp(coatWithMarkings, _EyeColor.rgb, eyeRegion);
             output.Metallic = 0.0;
             output.Smoothness = 0.08;

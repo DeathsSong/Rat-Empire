@@ -45,6 +45,8 @@ namespace RatHabitat
         private bool pinkieResolutionLogged;
         private static Shader cachedSpotShader;
         private static Texture2D cachedSpotMask;
+        private static Mesh cachedFeatureMaskMesh;
+        private static Texture2D cachedFeatureMask;
         private static bool spotResourcesResolved;
         private static Material cachedPinkieSkin;
         private static bool pinkieSkinLookupResolved;
@@ -147,6 +149,9 @@ namespace RatHabitat
             Texture2D organicSpotPattern = useCoatShader && spotted
                 ? GetOrCreateOrganicSpotPattern(rat)
                 : null;
+            Texture2D featureMask = useCoatShader
+                ? GetOrCreateFeatureRegionMask(visual)
+                : null;
             string materialAudit = string.Empty;
             var renderers = visual.GetComponentsInChildren<Renderer>(true);
             foreach (var renderer in renderers)
@@ -216,6 +221,12 @@ namespace RatHabitat
                         material.SetTexture("_SpotPattern", organicSpotPattern == null
                             ? Texture2D.blackTexture
                             : organicSpotPattern);
+                        if (material.HasProperty("_FeatureMask"))
+                        {
+                            material.SetTexture("_FeatureMask", featureMask == null
+                                ? Texture2D.blackTexture
+                                : featureMask);
+                        }
                         material.SetFloat("_SpotSeed", SpotSeed01(string.IsNullOrEmpty(rat.id) ? rat.name : rat.id));
                         material.SetColor("_SpotColor", ResolveMarkingColor(rat));
                         material.SetFloat("_SpotStrength", spotted ? 1f : 0f);
@@ -569,6 +580,149 @@ namespace RatHabitat
             shader = cachedSpotShader;
             mask = cachedSpotMask;
             return shader != null && mask != null;
+        }
+
+        /// <summary>
+        /// Builds one shared UV-space feature mask from the imported mesh's
+        /// bone weights. The shader samples this texture instead of deriving
+        /// face, leg, belly, or tail regions from the animated vertex
+        /// position. It therefore remains stable while the rat walks, turns,
+        /// grooms, or changes animation state.
+        ///
+        /// Channels: R=head/ears, G=legs/paws, B=tail, A=lower belly.
+        /// This is cached by the shared mesh, not generated per rat.
+        /// </summary>
+        private static Texture2D GetOrCreateFeatureRegionMask(GameObject visual)
+        {
+            if (visual == null) return null;
+            var skinned = visual.GetComponentInChildren<SkinnedMeshRenderer>(true);
+            Mesh mesh = skinned == null ? null : skinned.sharedMesh;
+            if (mesh == null) return null;
+            if (cachedFeatureMask != null && cachedFeatureMaskMesh == mesh)
+                return cachedFeatureMask;
+
+            const int width = 128;
+            const int height = 128;
+            Vector2[] uvs = mesh.uv;
+            BoneWeight[] weights = mesh.boneWeights;
+            Transform[] bones = skinned.bones;
+            Vector3[] vertices = mesh.vertices;
+            if (uvs == null || weights == null || vertices == null ||
+                uvs.Length != vertices.Length || weights.Length != vertices.Length)
+                return null;
+
+            Vector4[] vertexMasks = new Vector4[vertices.Length];
+            Bounds bounds = mesh.bounds;
+            float heightRange = Mathf.Max(0.0001f, bounds.size.y);
+            for (int i = 0; i < vertices.Length; i++)
+            {
+                Vector4 mask = Vector4.zero;
+                BoneWeight weight = weights[i];
+                AddFeatureBone(ref mask, weight.boneIndex0, weight.weight0, bones);
+                AddFeatureBone(ref mask, weight.boneIndex1, weight.weight1, bones);
+                AddFeatureBone(ref mask, weight.boneIndex2, weight.weight2, bones);
+                AddFeatureBone(ref mask, weight.boneIndex3, weight.weight3, bones);
+
+                float normalizedHeight = Mathf.Clamp01(
+                    (vertices[i].y - bounds.min.y) / heightRange);
+                // Use the static mesh height only to identify the lower body;
+                // the marking remains UV-attached after skinning.
+                float belly = 1f - Mathf.SmoothStep(0.27f, 0.62f, normalizedHeight);
+                if (mask.x > 0.5f || mask.y > 0.5f || mask.z > 0.5f)
+                    belly *= 0.35f;
+                mask.w = Mathf.Max(mask.w, belly);
+                vertexMasks[i] = mask;
+            }
+
+            Color[] pixels = new Color[width * height];
+            int[] triangles = mesh.triangles;
+            for (int triangle = 0; triangle + 2 < triangles.Length; triangle += 3)
+            {
+                int i0 = triangles[triangle];
+                int i1 = triangles[triangle + 1];
+                int i2 = triangles[triangle + 2];
+                if (i0 < 0 || i1 < 0 || i2 < 0 ||
+                    i0 >= uvs.Length || i1 >= uvs.Length || i2 >= uvs.Length)
+                    continue;
+
+                Vector2 uv0 = uvs[i0];
+                Vector2 uv1 = uvs[i1];
+                Vector2 uv2 = uvs[i2];
+                int minX = Mathf.Clamp(Mathf.FloorToInt(Mathf.Min(uv0.x, Mathf.Min(uv1.x, uv2.x)) * width), 0, width - 1);
+                int maxX = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(uv0.x, Mathf.Max(uv1.x, uv2.x)) * width), 0, width - 1);
+                int minY = Mathf.Clamp(Mathf.FloorToInt(Mathf.Min(uv0.y, Mathf.Min(uv1.y, uv2.y)) * height), 0, height - 1);
+                int maxY = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(uv0.y, Mathf.Max(uv1.y, uv2.y)) * height), 0, height - 1);
+                if (!TryGetUvTriangleDenominator(uv0, uv1, uv2, out float denominator))
+                    continue;
+
+                for (int y = minY; y <= maxY; y++)
+                {
+                    for (int x = minX; x <= maxX; x++)
+                    {
+                        Vector2 point = new Vector2((x + 0.5f) / width, (y + 0.5f) / height);
+                        if (!TryGetBarycentric(point, uv0, uv1, uv2, denominator,
+                            out float weight0, out float weight1, out float weight2))
+                            continue;
+                        Vector4 mask = vertexMasks[i0] * weight0 +
+                            vertexMasks[i1] * weight1 + vertexMasks[i2] * weight2;
+                        int pixelIndex = y * width + x;
+                        Color existing = pixels[pixelIndex];
+                        pixels[pixelIndex] = new Color(
+                            Mathf.Max(existing.r, mask.x),
+                            Mathf.Max(existing.g, mask.y),
+                            Mathf.Max(existing.b, mask.z),
+                            Mathf.Max(existing.a, mask.w));
+                    }
+                }
+            }
+
+            var texture = new Texture2D(width, height, TextureFormat.RGBA32, false, true)
+            {
+                name = "Hand Painted Rat Stable Feature Mask",
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Bilinear,
+                anisoLevel = 0,
+                hideFlags = HideFlags.HideAndDontSave,
+            };
+            texture.SetPixels(pixels);
+            texture.Apply(false, true);
+            cachedFeatureMaskMesh = mesh;
+            cachedFeatureMask = texture;
+            return texture;
+        }
+
+        private static void AddFeatureBone(ref Vector4 mask, int boneIndex, float weight, Transform[] bones)
+        {
+            if (weight <= 0.10f || bones == null || boneIndex < 0 || boneIndex >= bones.Length)
+                return;
+            string boneName = bones[boneIndex] == null ? string.Empty : bones[boneIndex].name;
+            if (boneName.IndexOf("head", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                boneName.IndexOf("ear", StringComparison.OrdinalIgnoreCase) >= 0)
+                mask.x = Mathf.Max(mask.x, weight);
+            if (boneName.IndexOf("leg", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                boneName.IndexOf("paw", StringComparison.OrdinalIgnoreCase) >= 0)
+                mask.y = Mathf.Max(mask.y, weight);
+            if (boneName.IndexOf("tail", StringComparison.OrdinalIgnoreCase) >= 0)
+                mask.z = Mathf.Max(mask.z, weight);
+        }
+
+        private static bool TryGetUvTriangleDenominator(Vector2 a, Vector2 b, Vector2 c, out float denominator)
+        {
+            denominator = (b.y - c.y) * (a.x - c.x) +
+                (c.x - b.x) * (a.y - c.y);
+            return Mathf.Abs(denominator) > 0.000001f;
+        }
+
+        private static bool TryGetBarycentric(
+            Vector2 point, Vector2 a, Vector2 b, Vector2 c, float denominator,
+            out float weight0, out float weight1, out float weight2)
+        {
+            weight0 = ((b.y - c.y) * (point.x - c.x) +
+                (c.x - b.x) * (point.y - c.y)) / denominator;
+            weight1 = ((c.y - a.y) * (point.x - c.x) +
+                (a.x - c.x) * (point.y - c.y)) / denominator;
+            weight2 = 1f - weight0 - weight1;
+            return weight0 >= -0.001f && weight1 >= -0.001f && weight2 >= -0.001f;
         }
 
         private static float SpotSeed01(string value)
