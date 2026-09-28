@@ -257,8 +257,14 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
                 (1.0 - smoothstep(0.82, 0.88, input.uv_MainTex.x));
             float tailUvV = smoothstep(0.01, 0.08, input.uv_MainTex.y) *
                 (1.0 - smoothstep(0.36, 0.44, input.uv_MainTex.y));
-            float tailRegion = saturate(tailObjectX * tailObjectZ * tailObjectY *
-                tailUvU * tailUvV);
+            float tailUvRegion = saturate(tailUvU * tailUvV);
+            // UVs stay attached to the skinned tail while its bones rotate.
+            // Keep the object-space strip as a gentle confidence multiplier,
+            // not a hard gate, so animated tail poses cannot make the mature
+            // material disappear.
+            float tailObjectConfidence = lerp(0.82, 1.0,
+                saturate(tailObjectX * tailObjectZ * tailObjectY));
+            float tailRegion = saturate(tailUvRegion * tailObjectConfidence);
             tailRegion *= 0.84 + 0.16 *
                 (sin(headAxis * 29.0 + ratUv.y * 11.0 + _SpotSeed * 3.7) * 0.5 + 0.5);
             fixed3 coatWithMarkings = lerp(painted.rgb, _SpotColor.rgb, whiteBlend);
