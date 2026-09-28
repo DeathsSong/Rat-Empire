@@ -4895,8 +4895,6 @@ namespace RatHabitat
             AddButton(developerToolsCard, "4  Material / renderer ID colors", true, () => SetVisualDiagnosticMode(RatVisualDiagnosticMode.MaterialIds));
             AddButton(developerToolsCard, "5  World normal colors", true, () => SetVisualDiagnosticMode(RatVisualDiagnosticMode.Normals));
             AddButton(developerToolsCard, "6  World tangent colors", true, () => SetVisualDiagnosticMode(RatVisualDiagnosticMode.Tangents));
-            AddButton(developerToolsCard, "7  Tail region  •  bright cyan mask", true, () => SetVisualDiagnosticMode(RatVisualDiagnosticMode.TailRegion));
-            AddButton(developerToolsCard, "8  Mature tail material  •  final shader pixels", true, () => SetVisualDiagnosticMode(RatVisualDiagnosticMode.MatureTailMaterial));
             AddText(developerToolsCard, "Spawn adult test rats", 17, Color.white, TextAnchor.UpperLeft);
             AddButton(developerToolsCard, "Solid Black  •  B/B C/C D/D s/s", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.SolidBlack));
             AddButton(developerToolsCard, "Solid Brown  •  b/b C/C D/D s/s", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.SolidBrown));

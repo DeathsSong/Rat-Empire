@@ -22,7 +22,6 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
         _MatureTailStrength ("Mature Tail Strength", Range(0, 1)) = 1
         _TailUvMin ("Mature Tail UV Minimum", Vector) = (0, 0, 0, 0)
         _TailUvSize ("Mature Tail UV Size", Vector) = (1, 1, 0, 0)
-        _TailDiagnosticMode ("Tail Diagnostic Mode", Float) = 0
         _MarkingFamily ("Marking Family", Float) = 0
         _FaceMarkingStrength ("Face Marking Strength", Range(0, 1)) = 0
         _LegMarkingStrength ("Leg Marking Strength", Range(0, 1)) = 0
@@ -60,7 +59,6 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
         float _MatureTailStrength;
         float4 _TailUvMin;
         float4 _TailUvSize;
-        float _TailDiagnosticMode;
         float _MarkingFamily;
         float _FaceMarkingStrength;
         float _LegMarkingStrength;
@@ -333,16 +331,6 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             fixed3 finalAlbedo = _AlbinoMode > 0.5
                 ? lerp(albinoFinal, _EyeColor.rgb, eyeRegion)
                 : lerp(coatWithMarkings, _EyeColor.rgb, eyeRegion);
-            // Developer-only modes are intentionally shader-local so the
-            // real tail mask and remapped mature-tail pixels are tested on
-            // the exact production renderer/material path.
-            if (_TailDiagnosticMode > 0.5 && _TailDiagnosticMode < 1.5)
-            {
-                fixed3 brightTail = fixed3(0.05, 0.95, 1.0);
-                fixed3 bodyWithoutTail = _AlbinoMode > 0.5
-                    ? albinoFur : coatWithoutTail;
-                finalAlbedo = lerp(bodyWithoutTail, brightTail, tailRegion);
-            }
             output.Albedo = finalAlbedo;
             output.Metallic = 0.0;
             output.Smoothness = 0.08;
