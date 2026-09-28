@@ -92,12 +92,15 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // with the same coat family from looking like exact clones.
             float furNoise = sin(dot(input.uv_MainTex, float2(83.17, 47.31)) + _SpotSeed * 6.2831853);
             furNoise = 0.975 + 0.05 * (furNoise * 0.5 + 0.5);
-            // The recorded phenotype is the color authority. Use the
-            // authored map's luminance for fur shading and retain only a
-            // restrained amount of its source hue, so a Russian blue, fawn,
-            // mink, or champagne rat cannot render as the same grey/brown
-            // texture simply because it shares a source UV map.
-            float furValue = (0.82 + sourceLuminance * 0.30) * furNoise;
+            // The recorded phenotype is the color authority. The imported
+            // hand-painted map contains broad light/dark body shapes from
+            // the source asset; using its luminance here makes those shapes
+            // look like hard coat markings and overwhelms the generated
+            // phenotype. Keep only a restrained, centered shading signal so
+            // the coat stays softly fur-like without inheriting those
+            // geometric source regions.
+            float sourceShading = (sourceLuminance - 0.5) * 0.08;
+            float furValue = (0.96 + sourceShading) * furNoise;
             fixed3 fur = _Color.rgb * furValue;
             float accentWave = sin(dot(input.uv_MainTex, float2(17.13, 31.71)) + _SpotSeed * 3.17);
             float accentAmount = saturate(0.08 + (accentWave * 0.5 + 0.5) * 0.16);
