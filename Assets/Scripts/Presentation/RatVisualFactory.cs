@@ -643,13 +643,14 @@ namespace RatHabitat
                     float u = (x + 0.5f) / width;
                     // The audited imported tail island is long in UV-V, so
                     // the visible ring bands run along V rather than across
-                    // the body-map U axis. Higher contrast is intentional:
-                    // the previous nearly-white texture was technically
-                    // valid but read as a flat strip at gameplay distance.
-                    float rings = Mathf.Sin(v * Mathf.PI * 2f * 18f +
-                        Mathf.Sin(u * Mathf.PI * 2f) * 0.65f) * 0.5f + 0.5f;
+                    // the body-map U axis. Keep the contrast strong enough
+                    // to survive the small habitat and Store preview sizes;
+                    // the shader adds a second, tail-local pore layer.
+                    float rings = Mathf.Sin(v * Mathf.PI * 2f * 24f +
+                        Mathf.Sin(u * Mathf.PI * 2f) * 0.85f) * 0.5f + 0.5f;
                     float broad = Mathf.Sin(v * Mathf.PI * 2f * 3f + u * 4.7f) * 0.5f + 0.5f;
-                    float value = 0.70f + rings * 0.24f + broad * 0.06f;
+                    float pores = Mathf.Sin(v * Mathf.PI * 2f * 61f + u * 37f) * 0.5f + 0.5f;
+                    float value = 0.48f + rings * 0.36f + broad * 0.10f + pores * 0.06f;
                     value = Mathf.Clamp01(value);
                     pixels[y * width + x] = new Color(
                         value,

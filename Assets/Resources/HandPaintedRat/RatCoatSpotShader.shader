@@ -280,15 +280,31 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             float2 tailUv = saturate((input.uv_MainTex - _TailUvMin.xy) /
                 max(_TailUvSize.xy, float2(0.001, 0.001)));
             fixed4 matureTailSource = tex2D(_MatureTailTex, tailUv);
-            float tailFine = sin(input.uv_MainTex.x * 211.0 +
-                input.uv_MainTex.y * 97.0 + _SpotSeed * 5.1) * 0.5 + 0.5;
-            float tailBroad = sin(input.uv_MainTex.x * 31.0 -
-                input.uv_MainTex.y * 18.0 + _SpotSeed * 2.7) * 0.5 + 0.5;
-            float tailRings = sin((input.uv_MainTex.x + input.uv_MainTex.y * 0.37) *
-                148.0 + _SpotSeed * 1.9) * 0.5 + 0.5;
-            float tailSkinValue = 0.88 + tailBroad * 0.10 +
-                (tailFine - 0.5) * 0.045 + (tailRings - 0.5) * 0.035;
-            fixed3 matureTail = matureTailSource.rgb *
+            // The imported tail island runs along local UV-V. Keep all
+            // mature-skin detail in that remapped tail-local space so the
+            // bands stay visible on the actual tail instead of inheriting
+            // the body's much larger UV scale. This is deliberately a
+            // restrained procedural layer over the shared texture: it gives
+            // young/adult tails visible rings and pores without allocating a
+            // material or texture per rat.
+            float tailFine = sin(tailUv.x * 2.0 * 3.14159265 * 7.0 +
+                tailUv.y * 2.0 * 3.14159265 * 2.0 + _SpotSeed * 5.1) * 0.5 + 0.5;
+            float tailBroad = sin(tailUv.x * 2.0 * 3.14159265 * 1.7 -
+                tailUv.y * 2.0 * 3.14159265 * 2.6 + _SpotSeed * 2.7) * 0.5 + 0.5;
+            float tailRings = sin(tailUv.y * 2.0 * 3.14159265 * 24.0 +
+                sin(tailUv.x * 2.0 * 3.14159265) * 0.85 + _SpotSeed * 0.35) * 0.5 + 0.5;
+            float tailPores = sin(tailUv.y * 2.0 * 3.14159265 * 61.0 +
+                tailUv.x * 37.0 + _SpotSeed * 1.9) * 0.5 + 0.5;
+            float tailSkinValue = 0.72 + tailRings * 0.22 +
+                tailBroad * 0.07 + (tailFine - 0.5) * 0.045 +
+                (tailPores - 0.5) * 0.025;
+            // Albino tails retain the same surface detail but use only the
+            // source luminance, preventing the shared non-albino skin tint
+            // from reintroducing pink/red into the white phenotype.
+            fixed3 matureTailSourceColor = _AlbinoMode > 0.5
+                ? fixed3(dot(matureTailSource.rgb, float3(0.299, 0.587, 0.114)))
+                : matureTailSource.rgb;
+            fixed3 matureTail = matureTailSourceColor *
                 _MatureTailColor.rgb * tailSkinValue;
             fixed3 coatWithoutTail = lerp(painted.rgb, _SpotColor.rgb, whiteBlend);
             fixed3 coatWithMarkings = lerp(coatWithoutTail, matureTail,
