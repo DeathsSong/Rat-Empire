@@ -5106,10 +5106,11 @@ namespace RatHabitat
             return button;
         }
 
-        private sealed class DirectUiClickRelay : MonoBehaviour, IPointerClickHandler
+        private sealed class DirectUiClickRelay : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, IPointerClickHandler
         {
             private Button button;
             private UnityEngine.Events.UnityAction action;
+            private bool pointerSequenceActive;
 
             public void Configure(Button owner, UnityEngine.Events.UnityAction callback)
             {
@@ -5127,12 +5128,29 @@ namespace RatHabitat
             }
 
             // Button.onClick can be skipped when a parent ScrollRect owns the
-            // pointer sequence. Receive the completed pointer click directly
-            // on the relay as well so one mouse/touch tap still reaches the
-            // intended page control. InvokeOnce keeps this path and the
-            // normal Button path from running the action twice in one frame.
+            // pointer sequence. Handle a completed, non-drag pointer-up on the
+            // relay as well as the normal click callback so mouse and touch
+            // taps reach the intended page control. InvokeOnce keeps these
+            // paths from running the action twice.
+            public void OnPointerDown(PointerEventData eventData)
+            {
+                pointerSequenceActive = eventData != null &&
+                    eventData.button == PointerEventData.InputButton.Left &&
+                    IsFallbackInteractable;
+            }
+
+            public void OnPointerUp(PointerEventData eventData)
+            {
+                bool validTap = pointerSequenceActive && eventData != null &&
+                    eventData.button == PointerEventData.InputButton.Left &&
+                    Vector2.Distance(eventData.pressPosition, eventData.position) <= 8f;
+                pointerSequenceActive = false;
+                if (validTap) InvokeOnce();
+            }
+
             public void OnPointerClick(PointerEventData eventData)
             {
+                pointerSequenceActive = false;
                 if (eventData == null || eventData.button == PointerEventData.InputButton.Left)
                     InvokeOnce();
             }
