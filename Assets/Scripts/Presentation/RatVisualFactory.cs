@@ -68,6 +68,13 @@ namespace RatHabitat
             new Color(0.16f, 0.20f, 0.25f), // cool blue-gray
             new Color(0.08f, 0.07f, 0.07f), // black
         };
+        private static readonly Color[] AlbinoMarkingPalette =
+        {
+            new Color(0.95f, 0.94f, 0.90f), // warm ivory
+            new Color(0.88f, 0.89f, 0.92f), // cool pearl
+            new Color(0.82f, 0.84f, 0.87f), // light gray
+            new Color(0.98f, 0.97f, 0.94f), // cream white
+        };
         private string lastPhenotypeAuditSignature;
 
         public bool UsesImportedHandPaintedRat
@@ -137,8 +144,10 @@ namespace RatHabitat
                 return;
             }
 
-            Color coat = ParseColor(rat.phenotype.coatColorHex, new Color(0.3f, 0.3f, 0.34f));
-            bool albino = rat.phenotype.coatColorId == "albino";
+            bool albino = IsAlbinoLikePhenotype(rat);
+            Color coat = albino
+                ? new Color(0.98f, 0.965f, 0.94f, 1f)
+                : ParseColor(rat.phenotype.coatColorHex, new Color(0.3f, 0.3f, 0.34f));
             bool spotted = rat.phenotype.spotted && !albino;
             bool importedVisual = IsImportedVisual(visual);
             // Keep the authored hand-painted map for albinos. The map contains
@@ -469,6 +478,13 @@ namespace RatHabitat
 
         private static Color ResolveMarkingColor(RatData rat)
         {
+            if (IsAlbinoLikePhenotype(rat))
+            {
+                uint albinoSeed = (uint)StableSpotSeed((rat == null ? string.Empty : rat.id) +
+                    "|albino-marking-color|" + (rat == null ? string.Empty : rat.markingFamily));
+                return AlbinoMarkingPalette[albinoSeed % (uint)AlbinoMarkingPalette.Length];
+            }
+
             Color coat = ParseColor(rat == null || rat.phenotype == null
                 ? string.Empty : rat.phenotype.coatColorHex, Color.gray);
             float luminance = coat.r * 0.299f + coat.g * 0.587f + coat.b * 0.114f;
@@ -493,6 +509,19 @@ namespace RatHabitat
             selected = Color.Lerp(selected, coat, 0.12f);
             selected.a = 1f;
             return selected;
+        }
+
+        private static bool IsAlbinoLikePhenotype(RatData rat)
+        {
+            if (rat == null || rat.phenotype == null) return false;
+            string coatId = rat.phenotype.coatColorId ?? string.Empty;
+            if (string.Equals(coatId, "albino", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(coatId, "pink-eye-white", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            string variant = rat.coatColorVariant ?? string.Empty;
+            return variant.IndexOf("albino", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                variant.IndexOf("pink-eye-white", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static bool IsImportedVisual(GameObject visual)

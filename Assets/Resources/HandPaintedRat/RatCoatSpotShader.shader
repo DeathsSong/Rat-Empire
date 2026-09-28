@@ -122,6 +122,14 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // uses the same signal with a stronger, neutralized treatment.
             float visibleFeatureSignal = 1.0 - smoothstep(0.08, 0.28, sourceLuminance);
             painted.rgb = lerp(painted.rgb, source.rgb, visibleFeatureSignal * 0.34);
+            // Feature masks are generated from the imported mesh bones. Use
+            // them to distinguish genuine skin/detail islands from the broad
+            // beige source-fur map before the albino branch preserves pink
+            // accents.
+            float4 featureMaskForSkin = tex2D(_FeatureMask, input.uv_MainTex);
+            float skinFeatureRegion = saturate(max(featureMaskForSkin.r,
+                max(featureMaskForSkin.g, featureMaskForSkin.b)));
+            float ownedSkinRegion = smoothstep(0.34, 0.92, skinFeatureRegion);
             // Keep the source luminance as the detail signal. Using the
             // phenotype-tinted sample here would make a dark coat turn every
             // dark fur pixel into a false eye/mouth feature on albinos.
@@ -138,7 +146,8 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // leaving ordinary fur shadows white. The wider, soft threshold
             // is important because these details are baked into the same
             // skinned mesh texture on the imported rat.
-            float darkFeatureSignal = 1.0 - smoothstep(0.12, 0.42, paintedLuminance);
+            float darkFeatureSignal = (1.0 - smoothstep(0.12, 0.42, paintedLuminance)) *
+                ownedSkinRegion;
             fixed3 darkFeature = fixed3(0.07, 0.055, 0.06) *
                 (0.82 + saturate(paintedLuminance) * 0.45);
             fixed3 pinkFeature = fixed3(0.66, 0.18, 0.28) *
@@ -150,7 +159,7 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // texture (ears, nose, paws, and eye accents) without allowing
             // the source beige/tan coat to leak back into the albino body.
             float pinkSignal = saturate((source.r - source.g) * 5.0) *
-                saturate(1.0 - abs(source.g - source.b) * 8.0);
+                saturate(1.0 - abs(source.g - source.b) * 8.0) * ownedSkinRegion;
             fixed3 pinkAccent = fixed3(1.0, 0.58, 0.62) * (0.82 + saturate(painted.r) * 0.16);
             albinoPainted = lerp(albinoPainted, pinkAccent, pinkSignal * 0.78);
             painted.rgb = lerp(painted.rgb, albinoPainted, _AlbinoMode);
@@ -183,7 +192,7 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // here keeps markings attached to the skinned surface while the
             // head, ears, legs, and tail animate; using current world/object
             // position would make the white regions slide between bones.
-            float4 featureMask = tex2D(_FeatureMask, input.uv_MainTex);
+            float4 featureMask = featureMaskForSkin;
             // Do not treat weakly weighted transition vertices as markings.
             // Those vertices sit at shoulders, hips, elbows, and knees; using
             // their small blended values creates the thin white joint seams.
