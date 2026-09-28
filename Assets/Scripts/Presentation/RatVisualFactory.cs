@@ -50,6 +50,22 @@ namespace RatHabitat
         private static bool pinkieSkinLookupResolved;
         private static readonly Dictionary<string, Texture2D> organicSpotPatternCache =
             new Dictionary<string, Texture2D>(StringComparer.Ordinal);
+        private static readonly Color[] LightMarkingPalette =
+        {
+            new Color(0.98f, 0.97f, 0.91f), // ivory
+            new Color(0.93f, 0.86f, 0.70f), // cream
+            new Color(0.82f, 0.70f, 0.54f), // beige/tan
+            new Color(0.74f, 0.59f, 0.43f), // warm brown
+            new Color(0.72f, 0.76f, 0.80f), // blue-gray
+        };
+        private static readonly Color[] DarkMarkingPalette =
+        {
+            new Color(0.12f, 0.13f, 0.15f), // charcoal
+            new Color(0.20f, 0.16f, 0.14f), // dark brown
+            new Color(0.28f, 0.29f, 0.32f), // gray
+            new Color(0.16f, 0.20f, 0.25f), // cool blue-gray
+            new Color(0.08f, 0.07f, 0.07f), // black
+        };
         private string lastPhenotypeAuditSignature;
 
         public bool UsesImportedHandPaintedRat
@@ -201,8 +217,17 @@ namespace RatHabitat
                             ? Texture2D.blackTexture
                             : organicSpotPattern);
                         material.SetFloat("_SpotSeed", SpotSeed01(string.IsNullOrEmpty(rat.id) ? rat.name : rat.id));
-                        material.SetColor("_SpotColor", Color.white);
+                        material.SetColor("_SpotColor", ResolveMarkingColor(rat));
                         material.SetFloat("_SpotStrength", spotted ? 1f : 0f);
+                        Vector3 modelBoundsMin;
+                        Vector3 modelBoundsSize;
+                        if (TryGetRendererLocalBounds(renderer, out modelBoundsMin, out modelBoundsSize))
+                        {
+                            material.SetVector("_RatModelBoundsMin",
+                                new Vector4(modelBoundsMin.x, modelBoundsMin.y, modelBoundsMin.z, 0f));
+                            material.SetVector("_RatModelBoundsSize",
+                                new Vector4(modelBoundsSize.x, modelBoundsSize.y, modelBoundsSize.z, 0f));
+                        }
                         if (material.HasProperty("_AccentColor"))
                             material.SetColor("_AccentColor", ParseColor(rat.phenotype.accentHex, coat));
                         if (material.HasProperty("_MarkingFamily"))
@@ -332,7 +357,7 @@ namespace RatHabitat
                 case "Black-eye white":
                     face = 0.52f; legs = 0.76f; belly = 0.86f; break;
                 case "Variegated":
-                    face = 0.58f; legs = 0.64f; belly = 0.54f; break;
+                    face = 0.84f; legs = 0.76f; belly = 0.62f; break;
                 case "Variberk":
                     face = 0.18f; legs = 0.86f; belly = 0.94f; break;
                 case "Irish":
@@ -349,12 +374,65 @@ namespace RatHabitat
                 case "White side":
                     face = 0.18f; legs = 0.62f; belly = 0.84f; break;
                 case "Mismarked hooded":
-                    face = 0.42f; legs = 0.54f; belly = 0.58f; break;
+                    face = 0.68f; legs = 0.62f; belly = 0.64f; break;
                 case "Self":
                 case "Solid":
                 default:
                     break;
             }
+        }
+
+        private static bool TryGetRendererLocalBounds(
+            Renderer renderer, out Vector3 minimum, out Vector3 size)
+        {
+            minimum = Vector3.zero;
+            size = Vector3.one;
+            if (renderer == null) return false;
+
+            Bounds bounds;
+            var skinned = renderer as SkinnedMeshRenderer;
+            if (skinned != null && skinned.sharedMesh != null)
+            {
+                bounds = skinned.sharedMesh.bounds;
+            }
+            else
+            {
+                var filter = renderer.GetComponent<MeshFilter>();
+                if (filter == null || filter.sharedMesh == null) return false;
+                bounds = filter.sharedMesh.bounds;
+            }
+
+            minimum = bounds.min;
+            size = bounds.size;
+            return size.x > 0.0001f && size.y > 0.0001f && size.z > 0.0001f;
+        }
+
+        private static Color ResolveMarkingColor(RatData rat)
+        {
+            Color coat = ParseColor(rat == null || rat.phenotype == null
+                ? string.Empty : rat.phenotype.coatColorHex, Color.gray);
+            float luminance = coat.r * 0.299f + coat.g * 0.587f + coat.b * 0.114f;
+            uint seed = (uint)StableSpotSeed((rat == null ? string.Empty : rat.id) +
+                "|marking-color|" + (rat == null ? string.Empty : rat.markingFamily));
+
+            Color selected;
+            if (luminance < 0.42f)
+                selected = LightMarkingPalette[seed % (uint)LightMarkingPalette.Length];
+            else if (luminance > 0.70f)
+                selected = DarkMarkingPalette[seed % (uint)DarkMarkingPalette.Length];
+            else
+            {
+                bool useLight = (seed & 1u) == 0u;
+                selected = useLight
+                    ? LightMarkingPalette[(seed >> 1) % (uint)LightMarkingPalette.Length]
+                    : DarkMarkingPalette[(seed >> 1) % (uint)DarkMarkingPalette.Length];
+            }
+
+            // Pull the accent slightly toward the rat's base coat so the
+            // marking reads as fur rather than a pasted white decal.
+            selected = Color.Lerp(selected, coat, 0.12f);
+            selected.a = 1f;
+            return selected;
         }
 
         private static bool IsImportedVisual(GameObject visual)

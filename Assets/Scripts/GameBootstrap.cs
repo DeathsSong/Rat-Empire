@@ -17,6 +17,7 @@ namespace RatHabitat
         Albino,
         SpottedBlack,
         SpottedBrown,
+        MarkedTest,
     }
 
     public enum BreedingParentSlot
@@ -3235,6 +3236,9 @@ namespace RatHabitat
                 case DeveloperRatPreset.SpottedBlack:
                     genotype = GeneticsSystem.CreateFounder("B", "B", "C", "C", "D", "D", "S", "S");
                     break;
+                case DeveloperRatPreset.MarkedTest:
+                    genotype = GeneticsSystem.CreateFounder("B", "B", "C", "C", "D", "D", "S", "S");
+                    break;
                 default:
                     genotype = GeneticsSystem.CreateFounder("b", "b", "C", "C", "D", "D", "S", "S");
                     break;
@@ -3264,6 +3268,15 @@ namespace RatHabitat
             // derive once more explicitly here so this developer action cannot
             // accidentally become a visual-only tint path.
             GeneticsSystem.EnsureCoatAppearance(rat);
+            if (preset == DeveloperRatPreset.MarkedTest)
+            {
+                // This is a deterministic presentation fixture only. It uses
+                // the real saved genotype/phenotype pipeline and is never
+                // selected by normal colony or store generation.
+                rat.coatColorVariant = "black";
+                rat.coatTone = 1f;
+                rat.markingFamily = "Variegated";
+            }
             rat.phenotype = GeneticsSystem.DerivePhenotype(RatStage.Adult, rat.genotype,
                 rat.coatColorVariant, rat.coatTone);
             GeneticsSystem.ApplyMarkingFamily(rat.phenotype, rat.markingFamily);
