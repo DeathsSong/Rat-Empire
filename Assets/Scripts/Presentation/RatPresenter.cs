@@ -161,9 +161,28 @@ namespace RatHabitat
                     controller.ApplyAgeScale(rat);
                 }
 
+                if (refreshGrounding && liveRats.TryGetValue(item.Key, out rat) &&
+                    controller.TryGetCurrentVisual(out currentVisual))
+                {
+                    // Keep animation-driven feet/tails from dipping below
+                    // the actual Pairing cage floor after the render pass. This
+                    // must happen before selection bounds are sampled: the
+                    // grounding correction changes the child visual's world
+                    // position without moving the stable rat root.
+                    visualFactory.KeepPairingVisualGrounded(currentVisual, rat, controller);
+                }
+
                 int configuredBoundsVersion;
-                if (!configuredSelectionBoundsVersions.TryGetValue(item.Key, out configuredBoundsVersion) ||
-                    configuredBoundsVersion != controller.SelectionBoundsVersion)
+                bool boundsVersionChanged = !configuredSelectionBoundsVersions.TryGetValue(item.Key, out configuredBoundsVersion) ||
+                    configuredBoundsVersion != controller.SelectionBoundsVersion;
+
+                // Animation can change renderer bounds without changing the
+                // visual/stage version. Refresh at the same bounded cadence as
+                // grounding so the hitbox follows the current visible pose,
+                // while avoiding a GetComponents/Collider rebuild every frame.
+                // The grounding pass above is intentionally first so a visual
+                // lift can never leave its hitbox behind on the floor.
+                if (refreshGrounding || boundsVersionChanged)
                 {
                     Bounds bounds;
                     if (controller.TryGetSelectionBounds(out bounds))
@@ -171,14 +190,6 @@ namespace RatHabitat
                         ConfigureRatCollider(root, controller.CurrentStage, controller);
                         configuredSelectionBoundsVersions[item.Key] = controller.SelectionBoundsVersion;
                     }
-                }
-
-                if (refreshGrounding && liveRats.TryGetValue(item.Key, out rat) &&
-                    controller.TryGetCurrentVisual(out currentVisual))
-                {
-                    // Keep animation-driven feet/tails from dipping below
-                    // the actual Pairing cage floor after the render pass.
-                    visualFactory.KeepPairingVisualGrounded(currentVisual, rat, controller);
                 }
             }
         }
@@ -349,20 +360,34 @@ namespace RatHabitat
             float width = Mathf.Max(0.12f, size.x);
             float height = Mathf.Max(0.12f, size.y);
             float length = Mathf.Max(0.12f, size.z);
-            float floor = bounds.min.y;
 
-            ConfigureSelectionBox(root, "Rat Selection Torso",
-                new Vector3(width * 0.72f, height * 0.58f, length * 0.56f),
-                new Vector3(bounds.center.x, floor + height * 0.54f, bounds.center.z));
-            ConfigureSelectionBox(root, "Rat Selection Head",
-                new Vector3(width * 0.56f, height * 0.54f, length * 0.26f),
-                new Vector3(bounds.center.x, floor + height * 0.66f, bounds.center.z - length * 0.29f));
-            ConfigureSelectionBox(root, "Rat Selection Feet",
-                new Vector3(width * 0.58f, height * 0.24f, length * 0.42f),
-                new Vector3(bounds.center.x, floor + height * 0.16f, bounds.center.z - length * 0.04f));
-            ConfigureSelectionBox(root, "Rat Selection Tail",
-                new Vector3(width * 0.28f, height * 0.22f, length * 0.30f),
-                new Vector3(bounds.center.x, floor + height * 0.29f, bounds.center.z + length * 0.34f));
+            // One collider around the live renderer is more predictable than
+            // several pose-independent fragments. The previous feet and tail
+            // boxes could remain below an animated/grounded visual for a short
+            // time and win a raycast in empty floor space. Keep only a small,
+            // bounded forgiveness margin around the actual visible bounds.
+            float widthPadding = Mathf.Min(0.08f, width * 0.06f);
+            float heightPadding = Mathf.Min(0.05f, height * 0.04f);
+            float lengthPadding = Mathf.Min(0.08f, length * 0.06f);
+            ConfigureSelectionBox(root, "Rat Selection Collider",
+                new Vector3(width + widthPadding * 2f, height + heightPadding * 2f, length + lengthPadding * 2f),
+                bounds.center);
+
+            // Disable older segmented selection surfaces left on a stable root
+            // by an earlier runtime. Do not leave duplicate colliders active.
+            DisableLegacySelectionBox(root, "Rat Selection Torso");
+            DisableLegacySelectionBox(root, "Rat Selection Head");
+            DisableLegacySelectionBox(root, "Rat Selection Feet");
+            DisableLegacySelectionBox(root, "Rat Selection Tail");
+        }
+
+        private static void DisableLegacySelectionBox(GameObject root, string name)
+        {
+            if (root == null) return;
+            Transform legacy = root.transform.Find(name);
+            if (legacy == null) return;
+            var collider = legacy.GetComponent<Collider>();
+            if (collider != null) collider.enabled = false;
         }
 
         private static void ConfigureSelectionBox(GameObject root, string name, Vector3 size, Vector3 center)

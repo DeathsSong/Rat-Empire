@@ -671,6 +671,16 @@ namespace RatHabitat
                 SelectableEntity entity = marker.ResolveSelection();
                 if (entity == null || !entity.isActiveAndEnabled) continue;
 
+                // A rat may only be selected through the small colliders that
+                // RatPresenter derives from the current visible model bounds.
+                // Imported mesh/helper colliders, root/floor colliders, and any
+                // stale collider left by an older visual are never eligible.
+                if (entity.kind == SelectableKind.Rat &&
+                    collider.GetComponent<RatSelectionCollider>() == null)
+                {
+                    continue;
+                }
+
                 if (hit.distance < nearestInteractableDistance)
                 {
                     nearestEntity = entity;
