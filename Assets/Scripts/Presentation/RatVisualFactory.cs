@@ -118,10 +118,15 @@ namespace RatHabitat
                 // creating a second model or changing the stable rat root.
                 ApplyPinkieVisualYaw(visual, rat);
                 ConfigurePinkieAnimation(visual, rat);
+                RatVisualDiagnostics.ApplyToVisual(visual);
                 return;
             }
             ApplyEnclosureVisualPlacement(visual, rat);
-            if (rat.phenotype == null || !rat.phenotype.furRevealed) return;
+            if (rat.phenotype == null || !rat.phenotype.furRevealed)
+            {
+                RatVisualDiagnostics.ApplyToVisual(visual);
+                return;
+            }
 
             Color coat = ParseColor(rat.phenotype.coatColorHex, new Color(0.3f, 0.3f, 0.34f));
             bool albino = rat.phenotype.coatColorId == "albino";
@@ -321,6 +326,7 @@ namespace RatHabitat
                     " selectedTexture=" + (coatTexture == null ? "<null>" : coatTexture.name) +
                     " selectedMaterial=" + materialAudit);
             }
+            RatVisualDiagnostics.ApplyToVisual(visual);
         }
 
         /// <summary>

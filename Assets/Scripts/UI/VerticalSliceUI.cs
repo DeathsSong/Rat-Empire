@@ -1797,6 +1797,7 @@ namespace RatHabitat
 
         private void CloseDeveloperTools()
         {
+            RatVisualDiagnostics.Reset();
             developerToolsOpen = false;
             ratAnimationShowcaseOpen = false;
             settingsOpen = true;
@@ -1808,6 +1809,7 @@ namespace RatHabitat
 
         public void CloseTransientPanels()
         {
+            RatVisualDiagnostics.Reset();
             if (game != null) game.DeactivateMultipleSelection();
             expandedMyRatsId = null;
             familyTreeSubjectId = null;
@@ -1825,6 +1827,7 @@ namespace RatHabitat
 
         private void OpenRatAnimationShowcase()
         {
+            RatVisualDiagnostics.Reset();
             welcomeOpen = false;
             settingsOpen = false;
             developerToolsOpen = false;
@@ -4886,6 +4889,14 @@ namespace RatHabitat
             AddText(developerToolsCard, "Developer-only controls. Test rats use real saved genotype and phenotype data; regular growth and inheritance rules are unchanged.", 13, new Color(0.7f, 0.78f, 0.74f), TextAnchor.UpperLeft);
             AddText(developerToolsCard, "Movement diagnostic: " + game.MovementDiagnostics, 12, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
             AddText(developerToolsCard, "Simulation diagnostic: " + game.SimulationPerformanceDiagnostics, 12, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
+            AddText(developerToolsCard, "Visual seam isolation", 17, Color.white, TextAnchor.UpperLeft);
+            AddText(developerToolsCard, "Current mode: " + RatVisualDiagnostics.ModeLabel + ". These modes affect only live visuals and never change saved phenotype data.", 13, new Color(0.7f, 0.78f, 0.74f), TextAnchor.UpperLeft);
+            AddButton(developerToolsCard, "1  Plain coat  •  markings disabled", true, () => SetVisualDiagnosticMode(RatVisualDiagnosticMode.PlainCoat));
+            AddButton(developerToolsCard, "2  Flat unlit  •  no lighting or shadows", true, () => SetVisualDiagnosticMode(RatVisualDiagnosticMode.FlatUnlit));
+            AddButton(developerToolsCard, "3  Normal coat  •  markings enabled", true, () => SetVisualDiagnosticMode(RatVisualDiagnosticMode.Normal));
+            AddButton(developerToolsCard, "4  Material / renderer ID colors", true, () => SetVisualDiagnosticMode(RatVisualDiagnosticMode.MaterialIds));
+            AddButton(developerToolsCard, "5  World normal colors", true, () => SetVisualDiagnosticMode(RatVisualDiagnosticMode.Normals));
+            AddButton(developerToolsCard, "6  World tangent colors", true, () => SetVisualDiagnosticMode(RatVisualDiagnosticMode.Tangents));
             AddText(developerToolsCard, "Spawn adult test rats", 17, Color.white, TextAnchor.UpperLeft);
             AddButton(developerToolsCard, "Solid Black  •  B/B C/C D/D s/s", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.SolidBlack));
             AddButton(developerToolsCard, "Solid Brown  •  b/b C/C D/D s/s", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.SolidBrown));
@@ -4944,6 +4955,13 @@ namespace RatHabitat
                 AddButtonTo(developerToolsCard, "Fully Reset Game", true, game.RequestFullReset, new Color(0.68f, 0.12f, 0.1f), 50f);
             }
             AddButtonTo(developerToolsCard, "Close Developer Tools", true, CloseDeveloperTools, new Color(0.14f, 0.22f, 0.25f), 46f);
+        }
+
+        private void SetVisualDiagnosticMode(RatVisualDiagnosticMode mode)
+        {
+            RatVisualDiagnostics.SetMode(mode);
+            RebuildDeveloperToolsContent();
+            SetOverlayVisibility();
         }
 
         private RectTransform CreateCard(string title)
