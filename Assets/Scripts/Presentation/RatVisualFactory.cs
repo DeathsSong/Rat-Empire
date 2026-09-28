@@ -251,7 +251,33 @@ namespace RatHabitat
                         if (material.HasProperty("_PinkEyeMode"))
                         {
                             string variant = rat.coatColorVariant ?? string.Empty;
-                            material.SetFloat("_PinkEyeMode", variant.IndexOf("pink-eye", System.StringComparison.OrdinalIgnoreCase) >= 0 ? 1f : 0f);
+                            bool pinkEye = albino ||
+                                variant.IndexOf("pink-eye", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                string.Equals(rat.phenotype.coatColorId, "pink-eye-white", System.StringComparison.OrdinalIgnoreCase);
+                            material.SetFloat("_PinkEyeMode", pinkEye ? 1f : 0f);
+                            if (material.HasProperty("_EyeColor"))
+                            {
+                                // Eye hue is a feature property, never a coat
+                                // or marking property. Ordinary rats stay
+                                // black-eyed even when the body is beige,
+                                // blue, agouti, or heavily marked.
+                                material.SetColor("_EyeColor", pinkEye
+                                    ? new Color(0.72f, 0.15f, 0.22f, 1f)
+                                    : new Color(0.012f, 0.010f, 0.012f, 1f));
+                            }
+                        }
+                        if (material.HasProperty("_MatureTailColor"))
+                        {
+                            material.SetColor("_MatureTailColor",
+                                ResolveMatureTailColor(rat, coat, albino));
+                        }
+                        if (material.HasProperty("_MatureTailStrength"))
+                        {
+                            // This material is only assigned to adult/young
+                            // imported models. Keeping this explicit prevents
+                            // a pinkie skin assignment from being reused by a
+                            // later stage transition.
+                            material.SetFloat("_MatureTailStrength", 1f);
                         }
                         if (material.HasProperty("_AlbinoMode")) material.SetFloat("_AlbinoMode", albino ? 1f : 0f);
                         if (material.HasProperty("_AlbinoBodyColor")) material.SetColor("_AlbinoBodyColor", new Color(0.98f, 0.965f, 0.92f, 1f));
@@ -433,6 +459,23 @@ namespace RatHabitat
             selected = Color.Lerp(selected, coat, 0.12f);
             selected.a = 1f;
             return selected;
+        }
+
+        private static Color ResolveMatureTailColor(RatData rat, Color coat, bool albino)
+        {
+            if (albino)
+                return new Color(0.83f, 0.46f, 0.49f, 1f);
+
+            // Rat tails are skin rather than fur. Keep a muted, translucent
+            // pink/brown base, then pull it slightly toward the recorded coat
+            // so the tail belongs to the same phenotype without becoming a
+            // pinkie-colored duplicate.
+            float luminance = coat.r * 0.299f + coat.g * 0.587f + coat.b * 0.114f;
+            Color skin = Color.Lerp(
+                new Color(0.38f, 0.25f, 0.25f, 1f),
+                new Color(0.72f, 0.48f, 0.47f, 1f),
+                Mathf.Clamp01(0.30f + luminance * 0.75f));
+            return Color.Lerp(skin, coat, 0.12f);
         }
 
         private static bool IsImportedVisual(GameObject visual)
@@ -721,6 +764,11 @@ namespace RatHabitat
                     break;
             }
 
+            // Feather the cached mask once at generation time. This widens
+            // the transition by only a texel or two, keeps the patch readable
+            // at gameplay distance, and avoids per-frame shader noise or a
+            // unique high-resolution texture for every rat.
+            FeatherOrganicPattern(pixels);
             pattern.SetPixels32(pixels);
             pattern.Apply(false, true);
             organicSpotPatternCache[identity] = pattern;
@@ -785,22 +833,58 @@ namespace RatHabitat
             float maxY,
             ref OrganicSpotRandom random)
         {
-            float xMid = Mathf.Lerp(minX, maxX, random.Range(0.40f, 0.60f));
-            float yMid = Mathf.Lerp(minY, maxY, random.Range(0.40f, 0.60f));
-            float xJitter = Mathf.Min(0.025f, (maxX - minX) * 0.12f);
-            float yJitter = Mathf.Min(0.018f, (maxY - minY) * 0.12f);
-            Vector2[] polygon =
+            float xJitter = Mathf.Min(0.030f, (maxX - minX) * 0.16f);
+            float yJitter = Mathf.Min(0.024f, (maxY - minY) * 0.16f);
+            const int edgeSamples = 4;
+            Vector2[] polygon = new Vector2[edgeSamples * 4];
+            for (int sample = 0; sample < edgeSamples; sample++)
             {
-                new Vector2(minX, minY + random.Range(-yJitter, yJitter)),
-                new Vector2(xMid, minY + random.Range(-yJitter, yJitter)),
-                new Vector2(maxX, minY + random.Range(-yJitter, yJitter)),
-                new Vector2(maxX + random.Range(-xJitter, xJitter), yMid),
-                new Vector2(maxX, maxY + random.Range(-yJitter, yJitter)),
-                new Vector2(xMid, maxY + random.Range(-yJitter, yJitter)),
-                new Vector2(minX, maxY + random.Range(-yJitter, yJitter)),
-                new Vector2(minX + random.Range(-xJitter, xJitter), yMid),
-            };
+                float t = Mathf.Clamp01((sample + 0.5f + random.Range(-0.28f, 0.28f)) / edgeSamples);
+                float topX = Mathf.Lerp(minX, maxX, t);
+                float bottomX = Mathf.Lerp(maxX, minX, t);
+                float leftY = Mathf.Lerp(maxY, minY, t);
+                float rightY = Mathf.Lerp(minY, maxY, t);
+                polygon[sample] = new Vector2(topX + random.Range(-xJitter, xJitter),
+                    minY + random.Range(-yJitter, yJitter));
+                polygon[edgeSamples + sample] = new Vector2(
+                    maxX + random.Range(-xJitter, xJitter), rightY + random.Range(-yJitter, yJitter));
+                polygon[edgeSamples * 2 + sample] = new Vector2(
+                    bottomX + random.Range(-xJitter, xJitter), maxY + random.Range(-yJitter, yJitter));
+                polygon[edgeSamples * 3 + sample] = new Vector2(
+                    minX + random.Range(-xJitter, xJitter), leftY + random.Range(-yJitter, yJitter));
+            }
             PaintOrganicPolygon(pixels, polygon);
+        }
+
+        private static void FeatherOrganicPattern(Color32[] pixels)
+        {
+            if (pixels == null || pixels.Length != OrganicSpotMaskWidth * OrganicSpotMaskHeight)
+                return;
+
+            var softened = new Color32[pixels.Length];
+            for (int y = 0; y < OrganicSpotMaskHeight; y++)
+            {
+                for (int x = 0; x < OrganicSpotMaskWidth; x++)
+                {
+                    int weighted = 0;
+                    int weightTotal = 0;
+                    for (int offsetY = -1; offsetY <= 1; offsetY++)
+                    {
+                        int sampleY = Mathf.Clamp(y + offsetY, 0, OrganicSpotMaskHeight - 1);
+                        for (int offsetX = -1; offsetX <= 1; offsetX++)
+                        {
+                            int sampleX = Mathf.Clamp(x + offsetX, 0, OrganicSpotMaskWidth - 1);
+                            int weight = offsetX == 0 && offsetY == 0 ? 4 :
+                                (offsetX == 0 || offsetY == 0 ? 2 : 1);
+                            weighted += pixels[sampleY * OrganicSpotMaskWidth + sampleX].r * weight;
+                            weightTotal += weight;
+                        }
+                    }
+                    byte value = (byte)Mathf.Clamp(Mathf.RoundToInt(weighted / (float)weightTotal), 0, 255);
+                    softened[y * OrganicSpotMaskWidth + x] = new Color32(value, value, value, 255);
+                }
+            }
+            Array.Copy(softened, pixels, pixels.Length);
         }
 
         private static void PaintOrganicPolygon(Color32[] pixels, Vector2[] polygon)

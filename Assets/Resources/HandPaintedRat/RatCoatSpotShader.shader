@@ -13,6 +13,9 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
         _AlbinoMode ("Albino Neutralization", Range(0, 1)) = 0
         _AlbinoBodyColor ("Albino Body Color", Color) = (0.98, 0.965, 0.92, 1)
         _PinkEyeMode ("Pink Eye Phenotype", Range(0, 1)) = 0
+        _EyeColor ("Eye Color", Color) = (0.015, 0.012, 0.012, 1)
+        _MatureTailColor ("Mature Tail Skin", Color) = (0.56, 0.39, 0.38, 1)
+        _MatureTailStrength ("Mature Tail Strength", Range(0, 1)) = 1
         _MarkingFamily ("Marking Family", Float) = 0
         _FaceMarkingStrength ("Face Marking Strength", Range(0, 1)) = 0
         _LegMarkingStrength ("Leg Marking Strength", Range(0, 1)) = 0
@@ -41,6 +44,9 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
         float _AlbinoMode;
         fixed4 _AlbinoBodyColor;
         float _PinkEyeMode;
+        fixed4 _EyeColor;
+        fixed4 _MatureTailColor;
+        float _MatureTailStrength;
         float _MarkingFamily;
         float _FaceMarkingStrength;
         float _LegMarkingStrength;
@@ -133,10 +139,10 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             float edgeVariation = sin(input.uv_MainTex.x * 37.0 +
                 input.uv_MainTex.y * 19.0 + _SpotSeed * 4.7) * 0.035;
             float softenedSpots = smoothstep(
-                familyEdge + edgeVariation,
-                0.72 + edgeVariation,
+                familyEdge * 0.25 + edgeVariation,
+                0.62 + edgeVariation,
                 spots);
-            float softenedBodyMask = smoothstep(0.12, 0.82, bodyMask);
+            float softenedBodyMask = smoothstep(0.02, 0.92, bodyMask);
 
             float whiteBlend = saturate(softenedBodyMask * softenedSpots * _SpotStrength);
             // The imported asset's body mask intentionally avoids several
@@ -191,11 +197,46 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             float featureBlend = saturate(faceRegion * _FaceMarkingStrength +
                 legRegion * _LegMarkingStrength + bellyRegion * _BellyMarkingStrength +
                 rumpRegion * _BellyMarkingStrength * 0.42);
+            // Break up the object-space feature fields with a stable, very
+            // low-frequency fur variation before feathering them. This keeps
+            // face/leg/belly markings organic without animated noise or a
+            // separate decal floating over the skinned mesh.
+            float featureVariation = sin(ratUv.x * 23.0 + ratUv.z * 9.0 + _SpotSeed * 2.3) * 0.08 +
+                sin(ratUv.y * 17.0 - ratUv.z * 13.0 + _SpotSeed * 4.1) * 0.05;
+            featureBlend = smoothstep(0.08, 0.86,
+                saturate(featureBlend + featureVariation * 0.30));
             // Keep dark eye/mouth/tail detail readable when a white facial or
             // belly region crosses the same imported texture island.
             featureBlend *= saturate(1.0 - darkFeatureSignal * 0.72);
             whiteBlend = max(whiteBlend, featureBlend);
-            output.Albedo = lerp(painted.rgb, _SpotColor.rgb, whiteBlend);
+
+            // Adult and young rats use the mature skin treatment below. The
+            // pinkie prefab returns before this shader is assigned, so its
+            // dedicated pinkie material can never leak onto mature stages.
+            // The transition is intentionally broad and feathered around the
+            // rump/tail base so it does not create a hard color seam.
+            float tailAxis = 1.0 - smoothstep(0.015, 0.26, ratUv.z);
+            float tailHeight = 1.0 - smoothstep(0.16, 0.43, abs(ratUv.y - 0.39));
+            float tailWidth = 1.0 - smoothstep(0.10, 0.40, abs(centeredX));
+            float tailRegion = saturate(tailAxis * tailHeight * tailWidth);
+            tailRegion *= 0.76 + 0.24 *
+                (sin(ratUv.x * 29.0 + ratUv.y * 11.0 + _SpotSeed * 3.7) * 0.5 + 0.5);
+            fixed3 coatWithMarkings = lerp(painted.rgb, _SpotColor.rgb, whiteBlend);
+            coatWithMarkings = lerp(coatWithMarkings, _MatureTailColor.rgb,
+                tailRegion * _MatureTailStrength);
+
+            // The source texture contains eye detail, but its hue can be
+            // recolored when the whole imported mesh is tinted. Restore a
+            // small, localized eye signal last so ordinary rats always have
+            // black eyes and albino/pink-eye phenotypes retain pink/red eyes.
+            float eyeFront = smoothstep(0.62, 0.79, ratUv.z) *
+                (1.0 - smoothstep(0.86, 0.98, ratUv.z));
+            float eyeBand = 1.0 - smoothstep(0.30, 0.47, abs(ratUv.y - 0.49));
+            float eyeSide = 1.0 - smoothstep(0.035, 0.13, abs(abs(centeredX) - 0.18));
+            float eyeRegion = saturate(eyeFront * eyeBand * eyeSide);
+            eyeRegion *= 0.88 + 0.12 *
+                (sin(ratUv.x * 43.0 + ratUv.z * 17.0 + _SpotSeed) * 0.5 + 0.5);
+            output.Albedo = lerp(coatWithMarkings, _EyeColor.rgb, eyeRegion);
             output.Metallic = 0.0;
             output.Smoothness = 0.08;
             output.Alpha = painted.a;
