@@ -1522,20 +1522,16 @@ namespace RatHabitat
                 ApplyPinkieSkin(pinkie);
                 NormalizeImportedModel(pinkie);
                 ApplyPinkieVisualYaw(pinkie, rat);
-                // Apply the authored visual-only height correction after
-                // normalization and facing setup. The stable rat root,
-                // Rat Visual Stage, nest, floor, colliders, and camera remain
-                // unchanged; every newly created/reloaded pinkie receives
-                // this same local offset exactly once.
-                Vector3 pinkieLocalPosition = pinkie.transform.localPosition;
-                pinkieLocalPosition.y = GameConfig.PinkieVisualVerticalOffset;
-                pinkie.transform.localPosition = pinkieLocalPosition;
+                // Do not apply a visual-only Y offset here. The imported
+                // pinkie pivot varies between FBX revisions, so the stable
+                // rat root is grounded later from the final Renderer.bounds
+                // against the actual nest bedding surface. Applying a second
+                // authored offset here is what made the visible model drift
+                // onto the mother's body after a reload or animation update.
 
-                // Configure playback after the final imported hierarchy,
-                // normalization, facing, and visual offset are in place. This
-                // guarantees the controller binds to the exact hierarchy that
-                // is rendered in the habitat, while newborn roots remain
-                // nest-bound and root-motion-free.
+                // Configure playback after the final imported hierarchy and
+                // facing setup are in place. RatPresenter performs the final
+                // renderer-bounds placement after animation and age scaling.
                 ConfigurePinkieAnimation(pinkie, rat);
 
                 if (!ValidateImportedPinkieInstance(pinkie, out validationError) || !HasPinkieSkin(pinkie))

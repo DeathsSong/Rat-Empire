@@ -69,21 +69,37 @@ namespace RatHabitat
             if (checkedScene || fallbackBuilt) return;
             checkTimer += Time.unscaledDeltaTime;
             if (checkTimer < 0.25f) return;
-            checkedScene = true;
 
             try
             {
-                int ratCount = CountSceneRats();
-                if (ratCount >= 2 && GameObject.Find("Habitat Presentation") != null)
+                // GameBootstrap owns the authoritative save. Do not decide
+                // that startup failed before it has loaded that save, and do
+                // not require an arbitrary minimum of two rats: a valid save
+                // may contain one live rat or an empty colony after sales,
+                // deaths, or a deliberate developer test.
+                var bootstrap = FindObjectOfType<GameBootstrap>();
+                if (bootstrap == null || bootstrap.Save == null || bootstrap.Save.rats == null)
                 {
-                    diagnostic = "3D scene ready — " + ratCount + " rats loaded.";
-                    Debug.Log("[Rat Habitat] SceneVisibilityGuard confirmed the habitat and " + ratCount + " rats before render.");
+                    return;
+                }
+
+                checkedScene = true;
+                int ratCount = CountSceneRats();
+                int expectedRatCount = CountLiveSavedRats(bootstrap.Save);
+                if (GameObject.Find("Habitat Presentation") != null && ratCount >= expectedRatCount)
+                {
+                    diagnostic = expectedRatCount == 0
+                        ? "3D scene ready — empty colony."
+                        : "3D scene ready — " + ratCount + " rats loaded.";
+                    Debug.Log("[Rat Habitat] SceneVisibilityGuard confirmed the habitat and " + ratCount +
+                        " live rats before render (save expects " + expectedRatCount + ").");
                 }
                 else
                 {
                     BuildFallbackHabitat();
                     diagnostic = "3D diagnostic fallback visible — check Console for the startup error.";
-                    Debug.LogError("[Rat Habitat] Startup did not create the habitat and two rat presenters. The visible fallback was created.");
+                    Debug.LogError("[Rat Habitat] Startup did not create all saved live rat presenters. Expected " +
+                        expectedRatCount + ", found " + ratCount + ". The visible fallback was created.");
                 }
             }
             catch (Exception exception)
@@ -108,6 +124,18 @@ namespace RatHabitat
             foreach (var entity in entities)
             {
                 if (entity != null && entity.kind == SelectableKind.Rat) count++;
+            }
+            return count;
+        }
+
+        private static int CountLiveSavedRats(ColonySaveData save)
+        {
+            if (save == null || save.rats == null) return 0;
+
+            int count = 0;
+            foreach (var rat in save.rats)
+            {
+                if (rat != null && rat.removalDisposition == RatRemovalDisposition.None) count++;
             }
             return count;
         }

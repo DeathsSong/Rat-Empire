@@ -137,11 +137,9 @@ namespace RatHabitat
         // visual and does not move the stable gameplay rat root.
         // The replacement FBX sits correctly on the nest with this visual
         // offset. The stable rat root and nest position remain unchanged.
-        public const float PinkieVisualVerticalOffset = -0.135f;
         // Pairing Habitat's nest surface is visibly higher than the normal
         // nursery surface in the imported scene. Lift the stable pinkie root
         // by the manually matched +0.225 world-unit reference amount.
-        public const float PairingPinkieVerticalLift = 0.225f;
         // The imported young/adult model uses a raised Pairing gameplay root.
         // Keep the visual child's lowest mesh point just above the cage floor;
         // this is visual-only and does not change the stable root, collider,

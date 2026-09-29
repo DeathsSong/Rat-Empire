@@ -22,6 +22,9 @@ namespace RatHabitat
         private const float GroundingRefreshIntervalSeconds = 0.075f;
         private float presentationCullingTimer;
         private const float PresentationCullingIntervalSeconds = 0.20f;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        private readonly HashSet<string> pinkiePlacementDiagnostics = new HashSet<string>();
+#endif
 
         public void ConfigureHabitat(HabitatBuilder builder)
         {
@@ -171,18 +174,19 @@ namespace RatHabitat
                     controller.ApplyAgeScale(rat);
                 }
 
-                if (refreshGrounding && liveRats.TryGetValue(item.Key, out rat) &&
+                if (liveRats.TryGetValue(item.Key, out rat) &&
                     controller.TryGetCurrentVisual(out currentVisual))
                 {
                     if (rat.stage == RatStage.Pinkie)
                     {
                         // Pinkies are rendered as independent nest occupants.
                         // Re-ground the complete rendered bounds after an
-                        // animation/growth update so a visual child offset or
-                        // pose can never lift the pup onto the mother.
+                        // animation/growth update every rendered frame so a
+                        // visual child offset, pose, or root transform write
+                        // can never lift the pup onto the mother.
                         PlacePinkieOnNest(rat, root, controller);
                     }
-                    else
+                    else if (refreshGrounding)
                     {
                         // Keep animation-driven feet/tails from dipping below
                         // the actual Pairing cage floor after the render pass.
@@ -262,7 +266,25 @@ namespace RatHabitat
             Transform pupRoot;
             if (!TryGetRatBehavior(motherId, out behavior) || !TryGetRatRoot(pupId, out pupRoot) ||
                 pupRoot == null) return false;
+            RefreshPinkiePlacementBeforeMotherApproach(pupId);
             return behavior.BeginNursingInteraction(pupRoot.position, interactionId, durationSeconds);
+        }
+
+        private void RefreshPinkiePlacementBeforeMotherApproach(string pupId)
+        {
+            RatData pup;
+            RatVisualController pupController;
+            GameObject pupRoot;
+            if (string.IsNullOrEmpty(pupId) || !liveRats.TryGetValue(pupId, out pup) || pup == null ||
+                pup.stage != RatStage.Pinkie || !ratRoots.TryGetValue(pupId, out pupRoot) ||
+                pupRoot == null || !visualControllers.TryGetValue(pupId, out pupController) ||
+                pupController == null) return;
+
+            // Nursing routes the mother toward this position. Re-evaluate the
+            // pup first so a save restore, a render refresh, or a hierarchy
+            // mutation cannot make the mother approach an obsolete/floating
+            // transform.
+            PlacePinkieOnNest(pup, pupRoot, pupController);
         }
 
         private void RestoreSavedNursingInteractions(ColonySaveData save)
@@ -281,6 +303,8 @@ namespace RatHabitat
                 if (!TryGetRatBehavior(mother.id, out behavior) || behavior == null ||
                     behavior.NursingInteractionActive || !TryGetRatRoot(mother.nursingPupId, out pupRoot) ||
                     pupRoot == null) continue;
+
+                RefreshPinkiePlacementBeforeMotherApproach(mother.nursingPupId);
 
                 string interactionId = NursingSystem.NormalizeInteractionId(mother.nursingInteractionType);
                 float remainingSeconds = NursingSystem.BehaviorSecondsFromGameMilliseconds(
@@ -576,7 +600,15 @@ namespace RatHabitat
             if (rat == null || root == null || controller == null || habitat == null ||
                 !habitat.TryGetNestSurfaceBounds(rat.enclosure, out Bounds surfaceBounds)) return;
 
+            // Pinkie roots are owned by this presenter. Nursing only reads a
+            // pup position to route the mother; it must never parent or move
+            // the pup. Repair an unexpected hierarchy mutation while keeping
+            // the current world position intact.
+            if (root.transform.parent != transform)
+                root.transform.SetParent(transform, true);
+
             Vector3 rootPosition = root.transform.position;
+            Vector3 positionBeforePlacement = rootPosition;
             Bounds renderedBounds;
             if (!controller.TryGetWorldBounds(out renderedBounds) || renderedBounds.size.sqrMagnitude <= 0.000001f)
                 return;
@@ -603,11 +635,54 @@ namespace RatHabitat
                 surfaceBounds.min.z - minZ, surfaceBounds.max.z - maxZ,
                 (surfaceBounds.min.z + surfaceBounds.max.z - minZ - maxZ) * 0.5f);
 
-            // The renderer-derived top is the actual nest surface. The tiny
-            // epsilon prevents z-fighting without making the pinkie float.
-            rootPosition.y = surfaceBounds.max.y - minY + 0.012f;
+            // Place the actual rendered bottom exactly on the bedding surface.
+            // This is deliberately derived from Renderer.bounds after the
+            // current scale/rotation/animation has been evaluated; no mother
+            // height and no guessed Y offset participates in the result.
+            float beddingY = surfaceBounds.max.y;
+            rootPosition.y = beddingY - minY;
             if ((root.transform.position - rootPosition).sqrMagnitude > 0.0000001f)
                 root.transform.position = rootPosition;
+
+            // Re-read the final bounds after the root write. This catches
+            // import pivots and floating-point rounding without relying on a
+            // second arbitrary lift.
+            if (controller.TryGetWorldBounds(out Bounds finalBounds) &&
+                Mathf.Abs(finalBounds.min.y - beddingY) > 0.0001f)
+            {
+                root.transform.position += Vector3.up * (beddingY - finalBounds.min.y);
+                renderedBounds = finalBounds;
+            }
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (Debug.isDebugBuild && !pinkiePlacementDiagnostics.Contains(rat.id))
+            {
+                pinkiePlacementDiagnostics.Add(rat.id);
+                Vector3 motherPosition = Vector3.zero;
+                string motherName = "<none>";
+                GameObject motherRoot;
+                if (!string.IsNullOrEmpty(rat.motherId) &&
+                    ratRoots.TryGetValue(rat.motherId, out motherRoot) && motherRoot != null)
+                {
+                    motherPosition = motherRoot.transform.position;
+                    RatData mother;
+                    if (liveRats.TryGetValue(rat.motherId, out mother) && mother != null)
+                        motherName = mother.name;
+                }
+
+                Bounds diagnosticBounds;
+                if (!controller.TryGetWorldBounds(out diagnosticBounds))
+                    diagnosticBounds = renderedBounds;
+                Debug.Log("[Rat Habitat] Pinkie placement: ratId=" + rat.id +
+                    " world=" + root.transform.position.ToString("F3") +
+                    " rendererY=[" + diagnosticBounds.min.y.ToString("F3") + "," +
+                    diagnosticBounds.max.y.ToString("F3") + "]" +
+                    " beddingY=" + beddingY.ToString("F3") +
+                    " mother=" + motherName + " motherWorld=" + motherPosition.ToString("F3") +
+                    " parent=" + (root.transform.parent == null ? "<none>" : root.transform.parent.name) +
+                    " adjustment=" + (root.transform.position - positionBeforePlacement).ToString("F3"));
+            }
+#endif
         }
 
         private static float ClampBoundedAxis(float value, float minimum, float maximum, float fallback)

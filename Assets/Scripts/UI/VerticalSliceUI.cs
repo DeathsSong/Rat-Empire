@@ -88,6 +88,7 @@ namespace RatHabitat
         private string lastSignature;
         private bool ready;
         private static Font builtInUiFont;
+        private static bool uiFontWarningLogged;
         private const string BundledUiFontResourcePath = "UI/NotoSansJP-Regular";
         private int layoutScreenWidth = -1;
         private int layoutScreenHeight = -1;
@@ -1661,6 +1662,7 @@ namespace RatHabitat
         private void ReturnToHabitatFromNavigation()
         {
             bool collapse = activeMainPanel == MainPanel.Habitat;
+            ResetMyRatsSortState();
             if (game != null)
             {
                 game.DeactivateMultipleSelection();
@@ -1702,6 +1704,8 @@ namespace RatHabitat
 
             if (panel == MainPanel.Settings)
             {
+                if (activeMainPanel == MainPanel.MyRats)
+                    ResetMyRatsSortState();
                 if (settingsOpen)
                 {
                     CloseSettings();
@@ -1715,6 +1719,8 @@ namespace RatHabitat
 
             if (panel == MainPanel.DeveloperTools)
             {
+                if (activeMainPanel == MainPanel.MyRats)
+                    ResetMyRatsSortState();
                 if (developerToolsOpen)
                 {
                     CloseDeveloperTools();
@@ -1728,6 +1734,11 @@ namespace RatHabitat
 
             // A tab switch owns the page area. Close transient overlays and
             // replace any previous page panel in the same refresh.
+            // My Rats is intentionally a fresh roster view each time it is
+            // opened. Keep the player's sex filter, but never carry a stale
+            // zero-result Pregnancy sort into the next session.
+            if (panel == MainPanel.MyRats || activeMainPanel == MainPanel.MyRats)
+                ResetMyRatsSortState();
             if (panel != MainPanel.MyRats) expandedMyRatsId = null;
             if (panel != MainPanel.FamilyTree) familyTreeSubjectId = null;
             ResetProfileInformationExpansion();
@@ -1921,6 +1932,7 @@ namespace RatHabitat
         public void CloseTransientPanels()
         {
             if (game != null) game.DeactivateMultipleSelection();
+            ResetMyRatsSortState();
             expandedMyRatsId = null;
             familyTreeSubjectId = null;
             profileNavigationFromMyRats = false;
@@ -3690,7 +3702,10 @@ namespace RatHabitat
             var listRoot = CreateRect("My Rats List", card);
             var listImage = listRoot.gameObject.AddComponent<Image>();
             UiStyle.ApplyRounded(listImage, new Color(0.04f, 0.10f, 0.13f, 0.82f), false);
-            listImage.raycastTarget = true;
+            // The list background is decorative. The viewport below is the
+            // only scroll hit surface, so an empty-state list can never
+            // become a transparent blocker over the controls above it.
+            listImage.raycastTarget = false;
             var listElement = listRoot.gameObject.AddComponent<LayoutElement>();
             listElement.preferredHeight = 318f;
             listElement.minHeight = 220f;
@@ -3737,9 +3752,12 @@ namespace RatHabitat
             roster.Sort(CompareRosterRats);
             if (roster.Count == 0)
             {
-                AddTextTo(listContent,
+                Text emptyState = AddTextTo(listContent,
                     rosterSortField == RosterSortField.Pregnancy ? "No pregnant rats." : "No rats are currently in the colony.",
                     14, new Color(1f, 0.72f, 0.42f), TextAnchor.UpperLeft);
+                // Empty-state copy is informational only. It must never
+                // participate in EventSystem or manual fallback hit testing.
+                emptyState.raycastTarget = false;
                 lastRosterSortSignature = BuildRosterSortSignature(roster);
                 return;
             }
@@ -3946,7 +3964,25 @@ namespace RatHabitat
                 rosterSortAscending = true;
             }
             PersistRosterPreferences();
+            // Invalidate the previous empty/result signature before the
+            // immediate rebuild. This makes a zero-result Pregnancy view
+            // switch to any ordinary sort in the same UI update.
+            lastRosterSortSignature = null;
+            ClearUiPointerState();
             Refresh(true);
+        }
+
+        private void ResetMyRatsSortState()
+        {
+            rosterSortField = RosterSortField.Name;
+            rosterSortAscending = true;
+            lastRosterSortSignature = null;
+            if (game == null || game.Save == null) return;
+            bool changed = !string.Equals(game.Save.myRatsSortField, "Name", StringComparison.OrdinalIgnoreCase) ||
+                !game.Save.myRatsSortAscending;
+            game.Save.myRatsSortField = "Name";
+            game.Save.myRatsSortAscending = true;
+            if (changed) SaveSystem.Save(game.Save);
         }
 
         private string RosterSortLabel()
@@ -4077,9 +4113,10 @@ namespace RatHabitat
 
             if (roster.Count == 0)
             {
-                AddTextTo(ratRosterContent,
+                Text emptyState = AddTextTo(ratRosterContent,
                     rosterSortField == RosterSortField.Pregnancy ? "No pregnant rats." : "No rats are currently in the colony.",
                     14, new Color(1f, 0.72f, 0.42f), TextAnchor.UpperLeft);
+                emptyState.raycastTarget = false;
             }
             else
             {
@@ -5209,6 +5246,11 @@ namespace RatHabitat
                 builtInUiFont = Resources.Load<Font>(BundledUiFontResourcePath);
                 if (builtInUiFont == null)
                     builtInUiFont = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+                if (builtInUiFont == null && !uiFontWarningLogged)
+                {
+                    uiFontWarningLogged = true;
+                    Debug.LogError("[Rat Habitat] UI font could not be loaded from Resources/UI/NotoSansJP-Regular or LegacyRuntime.ttf. Generated controls will remain active, but text rendering needs an available UI font.");
+                }
             }
             text.font = builtInUiFont;
             text.text = value;

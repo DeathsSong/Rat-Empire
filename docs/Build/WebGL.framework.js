@@ -1993,13 +1993,13 @@ var tempI64;
 // === Body ===
 
 var ASM_CONSTS = {
-  1852144: function() {return Module.webglContextAttributes.premultipliedAlpha;},  
- 1852205: function() {return Module.webglContextAttributes.preserveDrawingBuffer;},  
- 1852269: function() {return Module.webglContextAttributes.powerPreference;},  
- 1852327: function() {Module['emscripten_get_now_backup'] = performance.now;},  
+  1852096: function() {return Module.webglContextAttributes.premultipliedAlpha;},  
+ 1852157: function() {return Module.webglContextAttributes.preserveDrawingBuffer;},  
+ 1852221: function() {return Module.webglContextAttributes.powerPreference;},  
+ 1852279: function() {Module['emscripten_get_now_backup'] = performance.now;},  
+ 1852334: function($0) {performance.now = function() { return $0; };},  
  1852382: function($0) {performance.now = function() { return $0; };},  
- 1852430: function($0) {performance.now = function() { return $0; };},  
- 1852478: function() {performance.now = Module['emscripten_get_now_backup'];}
+ 1852430: function() {performance.now = Module['emscripten_get_now_backup'];}
 };
 
 
@@ -4470,11 +4470,6 @@ var ASM_CONSTS = {
   function _JS_SystemInfo_HasWebGL() 
   	{
   		return Module.SystemInfo.hasWebGL;
-  	}
-
-  function _JS_SystemInfo_IsMobile() 
-  	{
-  		return Module.SystemInfo.mobile;
   	}
 
   function _JS_UnityEngineShouldQuit() {
@@ -15643,7 +15638,6 @@ var asmLibraryArg = {
   "JS_SystemInfo_HasCursorLock": _JS_SystemInfo_HasCursorLock,
   "JS_SystemInfo_HasFullscreen": _JS_SystemInfo_HasFullscreen,
   "JS_SystemInfo_HasWebGL": _JS_SystemInfo_HasWebGL,
-  "JS_SystemInfo_IsMobile": _JS_SystemInfo_IsMobile,
   "JS_UnityEngineShouldQuit": _JS_UnityEngineShouldQuit,
   "RatHabitatBrowserConsumeInactiveElapsedSeconds": _RatHabitatBrowserConsumeInactiveElapsedSeconds,
   "RatHabitatBrowserFlush": _RatHabitatBrowserFlush,

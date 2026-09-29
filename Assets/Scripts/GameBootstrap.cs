@@ -673,7 +673,9 @@ namespace RatHabitat
             Application.targetFrameRate = 60;
             try
             {
+#if !UNITY_WEBGL
                 Screen.orientation = Application.isMobilePlatform ? ScreenOrientation.Portrait : ScreenOrientation.AutoRotation;
+#endif
             }
             catch (Exception exception)
             {
