@@ -1612,6 +1612,8 @@ namespace RatHabitat
             nursingScheduleInitialized = true;
         }
 
+        // Birth-transition fixes keep modal pause and presentation ordering
+        // authoritative across WebGL frames.
         private void Update()
         {
             float frameSampleStartedAt = Time.realtimeSinceStartup;
@@ -1631,14 +1633,21 @@ namespace RatHabitat
             }
             if (Save == null) return;
 
+            // The birth naming queue is part of the same authoritative modal
+            // pause as the welcome dialog. Do not let the next rendered frame
+            // unpause the clock while a newborn naming blocker is still open
+            // (or while the UI is rebuilding the popup).
             bool welcomePaused = ui != null && ui.IsWelcomeOpen;
-            GrowthSystem.SetSimulationPaused(welcomePaused);
+            bool newbornNamingPaused = HasPendingLitterNaming ||
+                (ui != null && ui.IsPendingLitterNamingOpen);
+            bool modalPaused = welcomePaused || newbornNamingPaused;
+            GrowthSystem.SetSimulationPaused(modalPaused);
             // Browser visibility changes can suspend Unity's rendered loop.
             // Consume the guarded lifecycle signal before the normal frame
             // clock update so the same persisted timestamp advances the
             // colony once on resume, without replaying visual frames.
-            SaveSystem.ResumeFromBrowserLifecycle(Save, welcomePaused);
-            if (welcomePaused)
+            SaveSystem.ResumeFromBrowserLifecycle(Save, modalPaused);
+            if (modalPaused)
             {
                 // Keep the clock's real-time anchor at the current instant so
                 // dismissing the modal never causes a catch-up jump.
@@ -1732,6 +1741,7 @@ namespace RatHabitat
                     foreach (LitterData litter in newLitters)
                         AnnounceBirth(litter);
                     PreparePendingLitterNaming(newLitters);
+                    if (ui != null) ui.LogBirthTransitionState("birth-processed");
                     stageChanged = true;
                     nextNursingTickGameTime = GameTime;
                 }
@@ -1830,6 +1840,7 @@ namespace RatHabitat
                         ui.Refresh(true);
                     else
                         ui.RefreshHeader();
+                    if (births > 0) ui.LogBirthTransitionState("birth-ui-refresh-complete");
                     lastUiRefreshDurationMs = (Time.realtimeSinceStartup - uiStartedAt) * 1000f;
                     EndPerformanceSample();
                 }
@@ -1841,6 +1852,13 @@ namespace RatHabitat
                         uiUpdateErrorLogged = true;
                         Debug.LogException(exception);
                     }
+                }
+                finally
+                {
+                    // Even a page-specific exception must not leave the
+                    // birth/naming blocker or the old pointer capture in
+                    // control of the next page interaction.
+                    if (births > 0) ui.RestoreInputStateAfterBirthTransition();
                 }
             }
         }

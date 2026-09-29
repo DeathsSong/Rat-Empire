@@ -9,17 +9,40 @@ namespace RatHabitat
     /// or a per-button material.
     /// </summary>
     [RequireComponent(typeof(RectTransform))]
+    [RequireComponent(typeof(CanvasRenderer))]
     public sealed class DiceIconGraphic : Graphic
     {
         [SerializeField] private float lineThickness = 2.1f;
         [SerializeField] private float pipRadius = 1.8f;
+
+        protected override void OnEnable()
+        {
+            base.OnEnable();
+            // These icons are created after the canvas has already been
+            // enabled. Explicitly dirty the graphic here so Unity does not
+            // retain the empty mesh produced while the runtime RectTransform
+            // still had its default zero-sized rect.
+            SetAllDirty();
+        }
+
+        protected override void OnRectTransformDimensionsChange()
+        {
+            base.OnRectTransformDimensionsChange();
+            SetVerticesDirty();
+        }
 
         protected override void OnPopulateMesh(VertexHelper vertexHelper)
         {
             vertexHelper.Clear();
             Rect rect = rectTransform.rect;
             float side = Mathf.Min(rect.width, rect.height);
-            if (side <= 1f) return;
+            if (side <= 1f)
+            {
+                // Layout can briefly report a zero rect while a naming row is
+                // being rebuilt. The next dimensions callback will rebuild
+                // the visible mesh once the button receives its final size.
+                return;
+            }
 
             float half = side * 0.23f;
             float stroke = Mathf.Max(1.2f, Mathf.Min(lineThickness, side * 0.14f));

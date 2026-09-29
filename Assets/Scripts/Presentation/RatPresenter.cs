@@ -15,6 +15,17 @@ namespace RatHabitat
         private readonly Dictionary<string, RatVisualController> visualControllers = new Dictionary<string, RatVisualController>();
         private readonly Dictionary<string, RatHabitatBehavior> behaviors = new Dictionary<string, RatHabitatBehavior>();
         private readonly Dictionary<string, RatData> liveRats = new Dictionary<string, RatData>();
+        // Pinkies are static nest occupants.  Keep a runtime world-space
+        // anchor per stable rat ID so animation evaluation, nursing checks,
+        // and harmless UI/presentation refreshes cannot re-solve their X/Z
+        // position and make them drift around the bedding.
+        private readonly Dictionary<string, Vector3> pinkieNestAnchors = new Dictionary<string, Vector3>();
+        private readonly Dictionary<string, RatEnclosure> pinkieNestAnchorEnclosures =
+            new Dictionary<string, RatEnclosure>();
+        // The imported pinkie visual has an authored local facing correction.
+        // Keep the deterministic litter pose keyed to the actual visual object
+        // so a render refresh does not multiply the same rotation again.
+        private readonly Dictionary<string, GameObject> pinkiePoseVisuals = new Dictionary<string, GameObject>();
         private readonly Dictionary<string, int> configuredSelectionBoundsVersions = new Dictionary<string, int>();
         private RatVisualFactory visualFactory;
         private HabitatBuilder habitat;
@@ -28,6 +39,9 @@ namespace RatHabitat
         private readonly HashSet<string> presentationFailureWarnings = new HashSet<string>();
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
         private readonly HashSet<string> pinkiePlacementDiagnostics = new HashSet<string>();
+        private readonly HashSet<string> pinkiePlacementWarnings = new HashSet<string>();
+        private readonly Dictionary<string, Vector3> lastPinkieGroundedPositions = new Dictionary<string, Vector3>();
+        private readonly Dictionary<string, int> lastPinkieGroundedFrames = new Dictionary<string, int>();
 #endif
 
         public void ConfigureHabitat(HabitatBuilder builder)
@@ -111,10 +125,15 @@ namespace RatHabitat
                         // move, pregnancy relocation, birth, or growth).
                         if (rat.stage == RatStage.Pinkie)
                         {
-                            // Pinkies are nest-bound. Reapply their deterministic
-                            // litter arrangement on every render so an old saved
-                            // grid position cannot survive a refresh or reload.
-                            root.transform.position = position;
+                            // Pinkies are nest-bound.  Use the deterministic
+                            // slot only until the first renderer-bounds placement
+                            // settles the pup, then preserve that exact world
+                            // anchor across later renders.
+                            Vector3 pinkieAnchor;
+                            if (TryGetPinkieNestAnchor(rat, out pinkieAnchor))
+                                ResetPinkieRootTransform(root, pinkieAnchor, rat);
+                            else
+                                ResetPinkieRootTransform(root, position, rat);
                         }
                         else if (!EnclosureSystem.IsInside(rat.enclosure, root.transform.position, 0f))
                         {
@@ -138,6 +157,16 @@ namespace RatHabitat
                         RemoveLegacySelectionMarker(root);
                     }
 
+                    if (rat.stage != RatStage.Pinkie)
+                    {
+                        // A pinkie anchor is presentation-only and must not
+                        // survive the exact 7-day transition into a moving
+                        // Young Rat, or be reused if an old save migrates a
+                        // rat back into the pinkie stage later.
+                        pinkieNestAnchors.Remove(rat.id);
+                        pinkieNestAnchorEnclosures.Remove(rat.id);
+                    }
+
                     controller.Configure(visualFactory);
                     // A controller keeps the visual child between renders. When a
                     // saved stage changes, it performs the configured smooth
@@ -150,6 +179,10 @@ namespace RatHabitat
                     if (rat.stage == RatStage.Pinkie)
                     {
                         ApplyDeterministicPinkiePose(rat, root, controller);
+                        // Ground the newborn before NursingSystem or any other
+                        // birth-frame consumer can read its transform. The
+                        // late pass repeats this after Animator evaluation.
+                        PlacePinkieOnNest(rat, root, controller);
                     }
                     EnsureBehaviorForStage(root, rat);
                     configuredSelectionBoundsVersions[rat.id] = controller.SelectionBoundsVersion;
@@ -206,6 +239,7 @@ namespace RatHabitat
                 {
                     if (rat.stage == RatStage.Pinkie)
                     {
+                        AuditPinkieRootBeforePlacement(rat, root);
                         // Pinkies are rendered as independent nest occupants.
                         // Re-ground the complete rendered bounds after an
                         // animation/growth update every rendered frame so a
@@ -515,6 +549,9 @@ namespace RatHabitat
                 visualControllers.Remove(id);
                 behaviors.Remove(id);
                 liveRats.Remove(id);
+                pinkiePoseVisuals.Remove(id);
+                pinkieNestAnchors.Remove(id);
+                pinkieNestAnchorEnclosures.Remove(id);
                 configuredSelectionBoundsVersions.Remove(id);
                 presentationFailureWarnings.Remove(id);
             }
@@ -530,6 +567,9 @@ namespace RatHabitat
             visualControllers.Clear();
             behaviors.Clear();
             liveRats.Clear();
+            pinkiePoseVisuals.Clear();
+            pinkieNestAnchors.Clear();
+            pinkieNestAnchorEnclosures.Clear();
             configuredSelectionBoundsVersions.Clear();
             presentationFailureWarnings.Clear();
         }
@@ -617,8 +657,13 @@ namespace RatHabitat
                 // correction first. Add only a deterministic organic pose so
                 // the imported orientation is preserved and sibling pinkies do
                 // not all face the same way.
-                visual.transform.localRotation = visual.transform.localRotation *
-                    Quaternion.Euler(pitch, yaw, roll);
+                GameObject appliedVisual;
+                if (!pinkiePoseVisuals.TryGetValue(rat.id, out appliedVisual) || appliedVisual != visual)
+                {
+                    visual.transform.localRotation = visual.transform.localRotation *
+                        Quaternion.Euler(pitch, yaw, roll);
+                    pinkiePoseVisuals[rat.id] = visual;
+                }
             }
 
             PlacePinkieOnNest(rat, root, controller);
@@ -631,10 +676,21 @@ namespace RatHabitat
 
             // Pinkie roots are owned by this presenter. Nursing only reads a
             // pup position to route the mother; it must never parent or move
-            // the pup. Repair an unexpected hierarchy mutation while keeping
-            // the current world position intact.
-            if (root.transform.parent != transform)
-                root.transform.SetParent(transform, true);
+            // the pup. Repair an unexpected hierarchy mutation without
+            // preserving a mother-relative local transform.
+            Vector3 lockedAnchor;
+            if (TryGetPinkieNestAnchor(rat, out lockedAnchor))
+            {
+                // Once settled, do not call the overlap resolvers again.  A
+                // moving/animating mother must never cause a pup to change
+                // spots.  Keep the root independent and restore the exact
+                // anchored position in case an external presentation pass
+                // attempted to write to it.
+                ResetPinkieRootTransform(root, lockedAnchor, rat);
+                return;
+            }
+
+            ResetPinkieRootTransform(root, root.transform.position, rat);
 
             Vector3 rootPosition = root.transform.position;
             Vector3 positionBeforePlacement = rootPosition;
@@ -680,7 +736,44 @@ namespace RatHabitat
                 Mathf.Abs(finalBounds.min.y - beddingY) > 0.0001f)
             {
                 root.transform.position += Vector3.up * (beddingY - finalBounds.min.y);
-                renderedBounds = finalBounds;
+                controller.TryGetWorldBounds(out finalBounds);
+            }
+
+            // A mother is allowed to care for the litter, but a pinkie must
+            // never be spawned on her rendered body. Resolve an actual X/Z
+            // renderer overlap against deterministic bedding positions. This
+            // is deliberately based on evaluated Renderer.bounds rather than
+            // a guessed Y offset or the mother's transform height.
+            AvoidMotherOverlap(rat, root, controller, surfaceBounds, beddingY);
+            // Resolve sibling overlap from the evaluated bounds as well. A
+            // deterministic source position is not enough when imported
+            // pinkie meshes have different pivots/scales; use the already
+            // grounded sibling roots as the authoritative spacing surfaces.
+            AvoidOtherPinkieOverlap(rat, root, controller, surfaceBounds, beddingY);
+
+            // Spacing can change the root after the first bounds sample. The
+            // imported pinkie is skinned and its evaluated bounds may be
+            // refreshed by that transform write, so finish with one more
+            // authoritative bottom-to-bedding solve. This is still derived
+            // from Renderer.bounds; it is not a fixed visual offset.
+            GroundPinkieRendererBottom(root, controller, beddingY);
+
+            if (controller.TryGetWorldBounds(out finalBounds))
+            {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                if (finalBounds.min.y > beddingY + 0.001f)
+                    WarnPinkiePlacement(rat, "rendered bottom is above bedding after final grounding");
+                GameObject motherRoot;
+                RatVisualController motherController;
+                if (!string.IsNullOrEmpty(rat.motherId) &&
+                    ratRoots.TryGetValue(rat.motherId, out motherRoot) && motherRoot != null &&
+                    visualControllers.TryGetValue(rat.motherId, out motherController) &&
+                    motherController != null && motherController.TryGetSelectionWorldBounds(out Bounds motherBounds) &&
+                    BoundsOverlapXZ(finalBounds, motherBounds, 0.001f))
+                {
+                    WarnPinkiePlacement(rat, "rendered bounds still overlap mother after separation");
+                }
+#endif
             }
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
@@ -711,8 +804,293 @@ namespace RatHabitat
                     " parent=" + (root.transform.parent == null ? "<none>" : root.transform.parent.name) +
                     " adjustment=" + (root.transform.position - positionBeforePlacement).ToString("F3"));
             }
+            lastPinkieGroundedPositions[rat.id] = root.transform.position;
+            lastPinkieGroundedFrames[rat.id] = Time.frameCount;
+#endif
+
+            // The final position is authoritative only after the complete
+            // Renderer.bounds grounding and the one-time initial separation
+            // pass.  Persisting this anchor for the lifetime of the pinkie
+            // prevents nursing, mother movement, animation, or UI refreshes
+            // from relocating the pup on subsequent frames.
+            pinkieNestAnchors[rat.id] = root.transform.position;
+            pinkieNestAnchorEnclosures[rat.id] = rat.enclosure;
+        }
+
+        private bool TryGetPinkieNestAnchor(RatData rat, out Vector3 anchor)
+        {
+            anchor = Vector3.zero;
+            if (rat == null || string.IsNullOrEmpty(rat.id)) return false;
+
+            RatEnclosure anchorEnclosure;
+            if (!pinkieNestAnchors.TryGetValue(rat.id, out anchor) ||
+                !pinkieNestAnchorEnclosures.TryGetValue(rat.id, out anchorEnclosure) ||
+                anchorEnclosure != rat.enclosure)
+            {
+                pinkieNestAnchors.Remove(rat.id);
+                pinkieNestAnchorEnclosures.Remove(rat.id);
+                anchor = Vector3.zero;
+                return false;
+            }
+
+            return true;
+        }
+
+        private void ResetPinkieRootTransform(GameObject root, Vector3 worldPosition, RatData rat)
+        {
+            if (root == null) return;
+            GameObject motherRoot = null;
+            if (rat != null && !string.IsNullOrEmpty(rat.motherId))
+                ratRoots.TryGetValue(rat.motherId, out motherRoot);
+
+            bool parentWasMother = motherRoot != null &&
+                (root.transform == motherRoot.transform || root.transform.IsChildOf(motherRoot.transform));
+            if (root.transform.parent != transform || parentWasMother)
+                root.transform.SetParent(transform, false);
+
+            // The stable root is a world-space placement anchor. Any scale or
+            // rotation inherited from a mistaken parent would also move the
+            // evaluated Renderer.bounds above the nest.
+            root.transform.localScale = Vector3.one;
+            root.transform.localRotation = Quaternion.identity;
+            root.transform.position = worldPosition;
+
+            Animator[] animators = root.GetComponentsInChildren<Animator>(true);
+            for (int index = 0; index < animators.Length; index++)
+            {
+                Animator animator = animators[index];
+                if (animator != null && animator.applyRootMotion)
+                {
+                    animator.applyRootMotion = false;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                    WarnPinkiePlacement(rat, "an Animator had root motion enabled; it was disabled");
+#endif
+                }
+            }
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (parentWasMother)
+                WarnPinkiePlacement(rat, "pinkie root was parented to its mother and was reparented");
 #endif
         }
+
+        private void AvoidMotherOverlap(RatData rat, GameObject root, RatVisualController controller,
+            Bounds surfaceBounds, float beddingY)
+        {
+            if (rat == null || string.IsNullOrEmpty(rat.motherId) || root == null || controller == null) return;
+            GameObject motherRoot;
+            RatVisualController motherController;
+            if (!ratRoots.TryGetValue(rat.motherId, out motherRoot) || motherRoot == null ||
+                !visualControllers.TryGetValue(rat.motherId, out motherController) || motherController == null) return;
+
+            Bounds motherBounds;
+            Bounds pupBounds;
+            if (!motherController.TryGetSelectionWorldBounds(out motherBounds) ||
+                !controller.TryGetWorldBounds(out pupBounds) || !BoundsOverlapXZ(pupBounds, motherBounds, 0.001f)) return;
+
+            float clearance = 0.16f;
+            float requiredX = motherBounds.extents.x + pupBounds.extents.x + clearance;
+            float requiredZ = motherBounds.extents.z + pupBounds.extents.z + clearance;
+            Vector3 original = root.transform.position;
+            Vector3[] candidates =
+            {
+                original + Vector3.right * requiredX,
+                original + Vector3.left * requiredX,
+                original + Vector3.forward * requiredZ,
+                original + Vector3.back * requiredZ,
+                original + new Vector3(requiredX * 0.72f, 0f, requiredZ * 0.72f),
+                original + new Vector3(-requiredX * 0.72f, 0f, requiredZ * 0.72f),
+                original + new Vector3(requiredX * 0.72f, 0f, -requiredZ * 0.72f),
+                original + new Vector3(-requiredX * 0.72f, 0f, -requiredZ * 0.72f),
+            };
+
+            float minX = pupBounds.min.x - original.x;
+            float maxX = pupBounds.max.x - original.x;
+            float minZ = pupBounds.min.z - original.z;
+            float maxZ = pupBounds.max.z - original.z;
+            for (int index = 0; index < candidates.Length; index++)
+            {
+                Vector3 candidate = candidates[index];
+                candidate.x = ClampBoundedAxis(candidate.x,
+                    surfaceBounds.min.x - minX, surfaceBounds.max.x - maxX,
+                    surfaceBounds.center.x - (minX + maxX) * 0.5f);
+                candidate.z = ClampBoundedAxis(candidate.z,
+                    surfaceBounds.min.z - minZ, surfaceBounds.max.z - maxZ,
+                    surfaceBounds.center.z - (minZ + maxZ) * 0.5f);
+                candidate.y = beddingY - minYForRoot(pupBounds, original);
+                root.transform.position = candidate;
+                Bounds candidateBounds;
+                if (controller.TryGetWorldBounds(out candidateBounds) &&
+                    !BoundsOverlapXZ(candidateBounds, motherBounds, 0.001f)) return;
+            }
+
+            // If the nest is too small for a full clearance, restore the
+            // deterministic bedding position and leave a diagnostic rather
+            // than pushing the pup through a nest wall.
+            root.transform.position = original;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            WarnPinkiePlacement(rat, "nest surface is too small to clear the mother without leaving its bounds");
+#endif
+        }
+
+        private void AvoidOtherPinkieOverlap(RatData rat, GameObject root,
+            RatVisualController controller, Bounds surfaceBounds, float beddingY)
+        {
+            if (rat == null || root == null || controller == null) return;
+
+            Bounds pupBounds;
+            if (!controller.TryGetWorldBounds(out pupBounds)) return;
+
+            bool hasSibling = false;
+            foreach (var entry in liveRats)
+            {
+                RatData other = entry.Value;
+                if (other == null || other.id == rat.id || other.stage != RatStage.Pinkie) continue;
+                bool sameLitter = !string.IsNullOrEmpty(rat.litterId) &&
+                    string.Equals(rat.litterId, other.litterId, System.StringComparison.Ordinal);
+                bool sameMother = !string.IsNullOrEmpty(rat.motherId) &&
+                    string.Equals(rat.motherId, other.motherId, System.StringComparison.Ordinal);
+                if (!sameLitter && !sameMother) continue;
+                GameObject siblingRoot;
+                RatVisualController siblingController;
+                if (!ratRoots.TryGetValue(other.id, out siblingRoot) || siblingRoot == null ||
+                    !visualControllers.TryGetValue(other.id, out siblingController) || siblingController == null ||
+                    !siblingController.TryGetWorldBounds(out Bounds siblingBounds)) continue;
+                if (!BoundsOverlapXZ(pupBounds, siblingBounds, 0.045f)) continue;
+
+                hasSibling = true;
+                float requiredX = pupBounds.extents.x + siblingBounds.extents.x + 0.08f;
+                float requiredZ = pupBounds.extents.z + siblingBounds.extents.z + 0.08f;
+                Vector3 original = root.transform.position;
+                Vector3[] candidates =
+                {
+                    original + Vector3.right * requiredX,
+                    original + Vector3.left * requiredX,
+                    original + Vector3.forward * requiredZ,
+                    original + Vector3.back * requiredZ,
+                    original + new Vector3(requiredX * 0.72f, 0f, requiredZ * 0.72f),
+                    original + new Vector3(-requiredX * 0.72f, 0f, requiredZ * 0.72f),
+                    original + new Vector3(requiredX * 0.72f, 0f, -requiredZ * 0.72f),
+                    original + new Vector3(-requiredX * 0.72f, 0f, -requiredZ * 0.72f),
+                };
+
+                float minX = pupBounds.min.x - original.x;
+                float maxX = pupBounds.max.x - original.x;
+                float minZ = pupBounds.min.z - original.z;
+                float maxZ = pupBounds.max.z - original.z;
+                bool placed = false;
+                for (int index = 0; index < candidates.Length; index++)
+                {
+                    Vector3 candidate = candidates[index];
+                    candidate.x = ClampBoundedAxis(candidate.x,
+                        surfaceBounds.min.x - minX, surfaceBounds.max.x - maxX,
+                        surfaceBounds.center.x - (minX + maxX) * 0.5f);
+                    candidate.z = ClampBoundedAxis(candidate.z,
+                        surfaceBounds.min.z - minZ, surfaceBounds.max.z - maxZ,
+                        surfaceBounds.center.z - (minZ + maxZ) * 0.5f);
+                    candidate.y = beddingY - minYForRoot(pupBounds, original);
+                    root.transform.position = candidate;
+
+                    Bounds candidateBounds;
+                    if (!controller.TryGetWorldBounds(out candidateBounds)) continue;
+                    bool clear = true;
+                    foreach (var siblingEntry in liveRats)
+                    {
+                        RatData sibling = siblingEntry.Value;
+                        if (sibling == null || sibling.id == rat.id || sibling.stage != RatStage.Pinkie) continue;
+                        bool siblingSameLitter = !string.IsNullOrEmpty(rat.litterId) &&
+                            string.Equals(rat.litterId, sibling.litterId, System.StringComparison.Ordinal);
+                        bool siblingSameMother = !string.IsNullOrEmpty(rat.motherId) &&
+                            string.Equals(rat.motherId, sibling.motherId, System.StringComparison.Ordinal);
+                        if (!siblingSameLitter && !siblingSameMother) continue;
+                        RatVisualController siblingVisual;
+                        if (visualControllers.TryGetValue(sibling.id, out siblingVisual) && siblingVisual != null &&
+                            siblingVisual.TryGetWorldBounds(out Bounds siblingVisualBounds) &&
+                            BoundsOverlapXZ(candidateBounds, siblingVisualBounds, 0.045f))
+                        {
+                            clear = false;
+                            break;
+                        }
+                    }
+                    if (clear)
+                    {
+                        placed = true;
+                        break;
+                    }
+                }
+
+                if (!placed)
+                {
+                    root.transform.position = original;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                    WarnPinkiePlacement(rat, "pinkie siblings overlap within the available nest bedding");
+#endif
+                }
+            }
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (hasSibling && controller.TryGetWorldBounds(out Bounds finalBounds) &&
+                finalBounds.min.y > beddingY + 0.001f)
+                WarnPinkiePlacement(rat, "sibling separation changed the rendered bottom above bedding");
+#endif
+        }
+
+        private static void GroundPinkieRendererBottom(GameObject root,
+            RatVisualController controller, float beddingY)
+        {
+            if (root == null || controller == null) return;
+            Bounds bounds;
+            if (!controller.TryGetWorldBounds(out bounds)) return;
+
+            float correction = beddingY - bounds.min.y;
+            if (Mathf.Abs(correction) > 0.00001f)
+            {
+                root.transform.position += Vector3.up * correction;
+                if (controller.TryGetWorldBounds(out bounds))
+                {
+                    correction = beddingY - bounds.min.y;
+                    if (Mathf.Abs(correction) > 0.00001f)
+                        root.transform.position += Vector3.up * correction;
+                }
+            }
+        }
+
+        private static float minYForRoot(Bounds bounds, Vector3 rootPosition)
+        {
+            return bounds.min.y - rootPosition.y;
+        }
+
+        private static bool BoundsOverlapXZ(Bounds first, Bounds second, float padding)
+        {
+            return first.max.x > second.min.x - padding && first.min.x < second.max.x + padding &&
+                first.max.z > second.min.z - padding && first.min.z < second.max.z + padding;
+        }
+
+        private void AuditPinkieRootBeforePlacement(RatData rat, GameObject root)
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (!Debug.isDebugBuild || rat == null || root == null) return;
+            Vector3 previous;
+            int previousFrame;
+            if (lastPinkieGroundedPositions.TryGetValue(rat.id, out previous) &&
+                lastPinkieGroundedFrames.TryGetValue(rat.id, out previousFrame) &&
+                previousFrame < Time.frameCount &&
+                (root.transform.position - previous).sqrMagnitude > 0.0025f)
+            {
+                WarnPinkiePlacement(rat, "root position changed after the previous final grounding pass");
+            }
+#endif
+        }
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        private void WarnPinkiePlacement(RatData rat, string reason)
+        {
+            if (rat == null || !Debug.isDebugBuild) return;
+            string key = (rat.id ?? rat.name ?? "pinkie") + "|" + reason;
+            if (pinkiePlacementWarnings.Add(key))
+                Debug.LogWarning("[Rat Habitat] Pinkie placement assertion: " + reason +
+                    " ratId=" + rat.id + " name=" + rat.name + ".");
+        }
+#endif
 
         private static float ClampBoundedAxis(float value, float minimum, float maximum, float fallback)
         {

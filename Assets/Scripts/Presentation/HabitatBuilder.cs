@@ -1,12 +1,25 @@
+using System;
 using System.Collections.Generic;
 using UnityEngine;
+using Object = UnityEngine.Object;
 
 namespace RatHabitat
 {
     public class HabitatBuilder : MonoBehaviour
     {
+        // Temporary presentation mode for habitat props. The saved object
+        // records and their gameplay roots remain intact; only the visual
+        // representation is reduced to a small, floor-grounded marker.
+        private const float ObjectMarkerDiameter = 0.78f;
+        private const float ObjectMarkerSpacing = 0.14f;
+        private const float ObjectMarkerFloorClearance = 0.008f;
+        private const int ObjectMarkerSegments = 24;
+
         private readonly Dictionary<string, GameObject> objectRoots = new Dictionary<string, GameObject>();
         private readonly Dictionary<string, HabitatObjectType> objectTypes = new Dictionary<string, HabitatObjectType>();
+        private readonly Dictionary<string, Vector3> markerPositionCache = new Dictionary<string, Vector3>();
+        private readonly List<PlacedMarker> placedMarkers = new List<PlacedMarker>();
+        private readonly Dictionary<HabitatObjectType, Material> markerMaterials = new Dictionary<HabitatObjectType, Material>();
         private Transform geometryRoot;
         private Transform maleCageRoot;
         private Transform femaleCageRoot;
@@ -15,6 +28,14 @@ namespace RatHabitat
         private Bounds pairingNestSurfaceBounds;
         private bool pairingNestSurfaceBoundsValid;
         private bool built;
+        private Mesh flatMarkerMesh;
+
+        private sealed class PlacedMarker
+        {
+            public RatEnclosure enclosure;
+            public Vector3 position;
+            public string key;
+        }
 
         public Vector3 NestPosition { get; private set; }
 
@@ -97,28 +118,46 @@ namespace RatHabitat
         {
             if (built) return;
             built = true;
+            placedMarkers.Clear();
             geometryRoot = new GameObject("Habitat Geometry").transform;
             geometryRoot.SetParent(transform, false);
 
             CreateEnclosureLayout();
             NestPosition = EnclosureSystem.PairingNestPosition;
-            CreateDecorativeTunnel(femaleCageRoot, "Mint Tunnel",
+            CreateDecorativeTunnel(femaleCageRoot, RatEnclosure.FemaleColony, "Mint Tunnel",
                 EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, -1.45f, 4.05f, 0.78f),
                 3.2f, 0.58f, new Color(0.23f, 0.68f, 0.64f));
-            CreateDecorativeTunnel(femaleCageRoot, "Peach Tunnel",
+            CreateDecorativeTunnel(femaleCageRoot, RatEnclosure.FemaleColony, "Peach Tunnel",
                 EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, -1.10f, 1.00f, 0.62f),
                 2.45f, 0.46f, new Color(0.97f, 0.60f, 0.42f));
-            CreateDecorativeTunnel(breedingCageRoot, "Breeding Tunnel",
+            CreateDecorativeTunnel(breedingCageRoot, RatEnclosure.Breeding, "Breeding Tunnel",
                 EnclosureSystem.PointInEnclosure(RatEnclosure.Breeding, 1.05f, -1.50f, 0.56f),
                 2.0f, 0.40f, new Color(0.86f, 0.45f, 0.62f));
             CreatePairingNest();
 
             if (save == null || save.habitatObjects == null) return;
-            foreach (var item in save.habitatObjects)
+
+            // A stable ID order means the deterministic spacing pass produces
+            // the same layout after save/load and does not depend on the order
+            // in which a JSON array happened to be serialized.
+            var objects = new List<HabitatObjectData>(save.habitatObjects);
+            objects.Sort(delegate (HabitatObjectData left, HabitatObjectData right)
+            {
+                string leftId = left == null ? string.Empty : left.id ?? string.Empty;
+                string rightId = right == null ? string.Empty : right.id ?? string.Empty;
+                return string.CompareOrdinal(leftId, rightId);
+            });
+
+            foreach (var item in objects)
             {
                 if (item == null) continue;
                 CreateObject(item);
             }
+
+            // Make the newly created trigger markers available to the manual
+            // world raycast immediately, including on the first frame after a
+            // save/load rebuild.
+            Physics.SyncTransforms();
         }
 
         public void Rebuild(ColonySaveData save)
@@ -296,14 +335,27 @@ namespace RatHabitat
                 Mathf.Max(0.1f, placedBounds.size.x),
                 Mathf.Max(0.1f, placedBounds.size.y),
                 Mathf.Max(0.1f, placedBounds.size.z));
-            // The imported Pairing nest has one gameplay footprint above and
-            // one stable selectable marker on that footprint. The marker lets
-            // a tap focus the camera without selecting a rat or adding a
-            // persistent visual highlight.
-            var nestSelectable = collisionRoot.AddComponent<SelectableEntity>();
-            nestSelectable.Configure(SelectableKind.HabitatObject, "pairing_nest", "Pairing Nest");
-            int ignoreRaycastLayer = LayerMask.NameToLayer("Ignore Raycast");
-            if (ignoreRaycastLayer >= 0) collisionRoot.layer = ignoreRaycastLayer;
+            // Keep the imported hierarchy as the logical nest surface and
+            // collision source, but temporarily remove its presentation.
+            // Pinkie placement still uses the cached bedding renderer bounds;
+            // players see and select only the small floor marker below.
+            for (int index = 0; index < renderers.Length; index++)
+            {
+                if (renderers[index] != null) renderers[index].enabled = false;
+            }
+
+            GameObject nestMarker = CreateFlatObjectMarker(
+                pairingCageRoot,
+                "Pairing Nest Marker",
+                EnclosureSystem.PairingNestPosition,
+                RatEnclosure.Pairing,
+                HabitatObjectType.Nest,
+                "pairing_nest",
+                "Pairing Nest");
+            if (nestMarker == null)
+            {
+                Debug.LogWarning("[Rat Habitat] Pairing nest marker could not be created; the logical nest remains active.");
+            }
         }
 
         private static bool TryGetRendererBounds(Renderer[] renderers, out Bounds bounds)
@@ -450,24 +502,33 @@ namespace RatHabitat
                 : camera.transform.rotation;
         }
 
-        private void CreateDecorativeTunnel(Transform parent, string name, Vector3 position, float length, float radius, Color color)
+        private void CreateDecorativeTunnel(Transform parent, RatEnclosure enclosure, string name, Vector3 position, float length, float radius, Color color)
         {
-            var tunnel = CreateVisualPrimitive(parent == null ? geometryRoot : parent, PrimitiveType.Cylinder, name, position, new Vector3(radius, length * 0.5f, radius), new Vector3(90f, 0f, 0f), color, false);
-            Color rimColor = Color.Lerp(color, Color.white, 0.25f);
-            CreateVisualPrimitive(tunnel.transform, PrimitiveType.Cylinder, name + " Front Rim", new Vector3(0f, -length * 0.46f, 0f), new Vector3(radius * 1.08f, 0.08f, radius * 1.08f), Vector3.zero, rimColor, false);
-            CreateVisualPrimitive(tunnel.transform, PrimitiveType.Cylinder, name + " Back Rim", new Vector3(0f, length * 0.46f, 0f), new Vector3(radius * 1.08f, 0.08f, radius * 1.08f), Vector3.zero, rimColor, false);
+            // Decorative tunnels are behavior targets, not saved gameplay
+            // objects. Preserve their named transform and target position,
+            // but use the same flat marker presentation so no large prop
+            // obscures the habitat while inspecting rat behavior.
+            CreateFlatMarker(
+                parent == null ? geometryRoot : parent,
+                name,
+                position,
+                enclosure,
+                HabitatObjectType.Hide,
+                null,
+                name,
+                Color.Lerp(color, Color.white, 0.08f));
         }
 
         private GameObject CreateExerciseWheel()
         {
-            var wheel = CreateVisualPrimitive(femaleCageRoot == null ? geometryRoot : femaleCageRoot,
-                PrimitiveType.Cylinder, "Exercise Wheel",
-                EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, 0.95f, 0.05f, 1.45f),
-                new Vector3(1.35f, 0.12f, 1.35f), new Vector3(90f, 0f, 0f),
-                new Color(0.98f, 0.53f, 0.36f), true);
-            CreateVisualPrimitive(wheel.transform, PrimitiveType.Cylinder, "Exercise Wheel Hub", new Vector3(0f, 0f, -0.18f), new Vector3(0.25f, 0.16f, 0.25f), Vector3.zero, new Color(0.99f, 0.84f, 0.48f), false);
-            CreateVisualPrimitive(wheel.transform, PrimitiveType.Cylinder, "Exercise Wheel Inner", new Vector3(0f, 0f, -0.05f), new Vector3(0.92f, 0.14f, 0.92f), Vector3.zero, new Color(0.99f, 0.78f, 0.48f), false);
-            return wheel;
+            return CreateFlatObjectMarker(
+                femaleCageRoot == null ? geometryRoot : femaleCageRoot,
+                "Exercise Wheel",
+                EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, 0.95f, 0.05f, 0.45f),
+                RatEnclosure.FemaleColony,
+                HabitatObjectType.ExerciseWheel,
+                null,
+                "Exercise Wheel");
         }
 
         private void CreateObject(HabitatObjectData data)
@@ -476,75 +537,317 @@ namespace RatHabitat
             objectTypes[data.id] = data.type;
             if (data.type == HabitatObjectType.ExerciseWheel)
             {
-                var wheel = CreateExerciseWheel();
-                var wheelSelectable = wheel.AddComponent<SelectableEntity>();
-                wheelSelectable.Configure(SelectableKind.HabitatObject, data.id, data.label);
-                wheelSelectable.EnsureCollider(Vector3.zero, new Vector3(2.8f, 2.8f, 0.9f));
+                var wheel = CreateFlatObjectMarker(
+                    femaleCageRoot == null ? geometryRoot : femaleCageRoot,
+                    data.label,
+                    EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, 0.95f, 0.05f, 0.45f),
+                    RatEnclosure.FemaleColony,
+                    data.type,
+                    data.id,
+                    data.label);
                 objectRoots[data.id] = wheel;
                 return;
             }
 
             Transform objectParent = ParentForObject(data.type);
             Vector3 position;
-            Vector3 scale;
-            PrimitiveType primitive;
-            Color color;
+            RatEnclosure enclosure;
             switch (data.type)
             {
                 case HabitatObjectType.Food:
-                    position = EnclosureSystem.PointInEnclosure(RatEnclosure.MaleColony, -1.40f, -4.30f, 0.38f);
-                    scale = new Vector3(1.3f, 0.28f, 1.3f);
-                    primitive = PrimitiveType.Cylinder;
-                    color = new Color(0.94f, 0.43f, 0.38f);
+                    position = EnclosureSystem.PointInEnclosure(RatEnclosure.MaleColony, -1.40f, -4.30f, 0.45f);
+                    enclosure = RatEnclosure.MaleColony;
                     break;
                 case HabitatObjectType.Water:
-                    position = EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, 0.70f, 1.45f, 1.15f);
-                    scale = new Vector3(0.72f, 0.9f, 0.72f);
-                    primitive = PrimitiveType.Cylinder;
-                    color = new Color(0.22f, 0.62f, 0.94f);
+                    position = EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, 0.70f, 1.45f, 0.45f);
+                    enclosure = RatEnclosure.FemaleColony;
                     break;
                 case HabitatObjectType.Nest:
                     position = EnclosureSystem.GetNestPosition(RatEnclosure.FemaleColony);
-                    scale = new Vector3(2.3f, 0.25f, 1.65f);
-                    primitive = PrimitiveType.Cylinder;
-                    color = new Color(0.78f, 0.52f, 0.25f);
+                    position.y = 0.45f;
+                    enclosure = RatEnclosure.FemaleColony;
                     break;
                 default:
-                    position = EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, 1.35f, 2.30f, 0.67f);
-                    scale = new Vector3(2.4f, 1.2f, 2.0f);
-                    primitive = PrimitiveType.Cube;
-                    color = new Color(0.64f, 0.39f, 0.24f);
+                    position = EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, 1.35f, 2.30f, 0.45f);
+                    enclosure = RatEnclosure.FemaleColony;
                     break;
             }
 
-            var root = CreateVisualPrimitive(objectParent == null ? geometryRoot : objectParent, primitive, data.label, position, scale, Vector3.zero, color, true);
-            var selectable = root.AddComponent<SelectableEntity>();
-            selectable.Configure(SelectableKind.HabitatObject, data.id, data.label);
-            selectable.EnsureCollider(Vector3.zero, scale);
+            var root = CreateFlatObjectMarker(
+                objectParent == null ? geometryRoot : objectParent,
+                data.label,
+                position,
+                enclosure,
+                data.type,
+                data.id,
+                data.label);
             objectRoots[data.id] = root;
+        }
 
-            if (data.type == HabitatObjectType.Food)
+        private GameObject CreateFlatObjectMarker(Transform parent, string objectName,
+            Vector3 preferredPosition, RatEnclosure enclosure, HabitatObjectType type,
+            string entityId, string displayName)
+        {
+            return CreateFlatMarker(parent, objectName, preferredPosition, enclosure,
+                type, entityId, displayName, null);
+        }
+
+        /// <summary>
+        /// Creates the temporary presentation marker without changing the
+        /// underlying HabitatObjectData. The trigger collider is deliberately
+        /// thin and non-solid; it exists only for world selection.
+        /// </summary>
+        private GameObject CreateFlatMarker(Transform parent, string objectName,
+            Vector3 preferredPosition, RatEnclosure enclosure, HabitatObjectType type,
+            string entityId, string displayName, Color? overrideColor)
+        {
+            if (parent == null) parent = geometryRoot;
+            if (parent == null) return null;
+
+            string key = string.IsNullOrEmpty(entityId)
+                ? "decorative:" + (objectName ?? string.Empty)
+                : entityId;
+            Vector3 markerPosition = FindMarkerPosition(key, preferredPosition, enclosure);
+
+            var root = new GameObject(string.IsNullOrEmpty(objectName) ? "Habitat Object Marker" : objectName);
+            root.transform.SetParent(parent, false);
+            root.transform.position = markerPosition;
+            root.transform.rotation = Quaternion.identity;
+            root.transform.localScale = Vector3.one * ObjectMarkerDiameter;
+
+            var filter = root.AddComponent<MeshFilter>();
+            filter.sharedMesh = GetFlatMarkerMesh();
+            var renderer = root.AddComponent<MeshRenderer>();
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            renderer.receiveShadows = false;
+            renderer.sharedMaterial = GetMarkerMaterial(type, overrideColor);
+
+            if (!string.IsNullOrEmpty(entityId))
             {
-                CreateVisualPrimitive(root.transform, PrimitiveType.Cylinder, "Food Surface", new Vector3(0f, 0.28f, 0f), new Vector3(1.02f, 0.08f, 1.02f), Vector3.zero, new Color(0.98f, 0.78f, 0.39f), false);
-                CreateVisualPrimitive(root.transform, PrimitiveType.Sphere, "Food Piece A", new Vector3(-0.28f, 0.4f, -0.08f), new Vector3(0.18f, 0.12f, 0.18f), Vector3.zero, new Color(0.98f, 0.88f, 0.47f), false);
-                CreateVisualPrimitive(root.transform, PrimitiveType.Sphere, "Food Piece B", new Vector3(0.15f, 0.4f, 0.18f), new Vector3(0.16f, 0.11f, 0.16f), Vector3.zero, new Color(0.98f, 0.88f, 0.47f), false);
+                var selectable = root.AddComponent<SelectableEntity>();
+                selectable.Configure(SelectableKind.HabitatObject, entityId,
+                    string.IsNullOrEmpty(displayName) ? objectName : displayName);
+
+                var selectionCollider = root.AddComponent<BoxCollider>();
+                selectionCollider.center = new Vector3(0f, 0.018f, 0f);
+                selectionCollider.size = new Vector3(1.02f, 0.08f, 1.02f);
+                selectionCollider.isTrigger = true;
             }
-            else if (data.type == HabitatObjectType.Water)
+            return root;
+        }
+
+        private Vector3 FindMarkerPosition(string key, Vector3 preferredPosition, RatEnclosure enclosure)
+        {
+            float floorY = GetHabitatFloorY(enclosure);
+            Vector3 cached;
+            if (markerPositionCache.TryGetValue(key, out cached))
             {
-                CreateVisualPrimitive(root.transform, PrimitiveType.Cylinder, "Water Cap", new Vector3(0f, 1.0f, 0f), new Vector3(0.82f, 0.1f, 0.82f), Vector3.zero, new Color(0.97f, 0.88f, 0.61f), false);
-                CreateVisualPrimitive(root.transform, PrimitiveType.Sphere, "Water Highlight", new Vector3(-0.18f, 0.42f, -0.54f), new Vector3(0.12f, 0.12f, 0.04f), Vector3.zero, Color.white, false);
+                cached.y = floorY + ObjectMarkerFloorClearance;
+                if (IsMarkerCandidateAvailable(cached, enclosure))
+                {
+                    RememberMarker(key, cached, enclosure);
+                    return cached;
+                }
             }
-            else if (data.type == HabitatObjectType.Hide)
+
+            Vector3 preferred = preferredPosition;
+            preferred.y = floorY + ObjectMarkerFloorClearance;
+            preferred = ClampMarkerPosition(preferred, enclosure);
+            Vector3 candidate = preferred;
+            uint seed = StableMarkerHash(key);
+
+            // First try the requested point, then deterministic expanding
+            // rings. This handles duplicate legacy positions without moving
+            // objects between frames or depending on Unity's random state.
+            for (int attempt = 0; attempt < 320; attempt++)
             {
-                CreateVisualPrimitive(root.transform, PrimitiveType.Cylinder, "Hide Entrance", new Vector3(0f, 0.02f, -1.02f), new Vector3(0.55f, 0.08f, 0.18f), new Vector3(90f, 0f, 0f), new Color(0.25f, 0.16f, 0.14f), false);
-                CreateVisualPrimitive(root.transform, PrimitiveType.Sphere, "Hide Roof Highlight", new Vector3(0f, 0.72f, 0.08f), new Vector3(1.25f, 0.12f, 0.95f), Vector3.zero, new Color(0.8f, 0.54f, 0.32f), false);
+                if (attempt > 0)
+                {
+                    int ring = 1 + (attempt - 1) / 16;
+                    int slot = (attempt - 1) % 16;
+                    float angle = (seed % 360u) * Mathf.Deg2Rad + slot * (Mathf.PI * 2f / 16f);
+                    float radius = (ObjectMarkerDiameter + ObjectMarkerSpacing) *
+                        (0.72f + ring * 0.72f);
+                    candidate = preferred + new Vector3(Mathf.Cos(angle) * radius, 0f,
+                        Mathf.Sin(angle) * radius);
+                    candidate.y = floorY + ObjectMarkerFloorClearance;
+                    candidate = ClampMarkerPosition(candidate, enclosure);
+                }
+
+                if (IsMarkerCandidateAvailable(candidate, enclosure))
+                {
+                    RememberMarker(key, candidate, enclosure);
+                    return candidate;
+                }
             }
-            else if (data.type == HabitatObjectType.Nest)
+
+            // Habitats are large enough for normal layouts, but retain a
+            // bounded deterministic fallback rather than stacking markers if
+            // a malformed save contains hundreds of identical objects.
+            candidate = ClampMarkerPosition(preferred, enclosure);
+            RememberMarker(key, candidate, enclosure);
+            return candidate;
+        }
+
+        private void RememberMarker(string key, Vector3 position, RatEnclosure enclosure)
+        {
+            markerPositionCache[key] = position;
+            for (int index = placedMarkers.Count - 1; index >= 0; index--)
             {
-                CreateVisualPrimitive(root.transform, PrimitiveType.Cylinder, "Nest Inner", new Vector3(0f, 0.28f, 0f), new Vector3(1.85f, 0.08f, 1.18f), Vector3.zero, new Color(0.48f, 0.29f, 0.16f), false);
-                CreateVisualPrimitive(root.transform, PrimitiveType.Sphere, "Nest Straw A", new Vector3(-0.75f, 0.37f, 0.12f), new Vector3(0.6f, 0.08f, 0.12f), new Vector3(0f, 0f, 20f), new Color(0.96f, 0.72f, 0.34f), false);
-                CreateVisualPrimitive(root.transform, PrimitiveType.Sphere, "Nest Straw B", new Vector3(0.58f, 0.39f, -0.15f), new Vector3(0.62f, 0.08f, 0.12f), new Vector3(0f, 0f, -18f), new Color(0.96f, 0.72f, 0.34f), false);
-                CreateVisualPrimitive(root.transform, PrimitiveType.Sphere, "Nest Straw C", new Vector3(0.05f, 0.41f, 0.28f), new Vector3(0.55f, 0.08f, 0.11f), new Vector3(0f, 35f, 0f), new Color(0.89f, 0.62f, 0.27f), false);
+                if (placedMarkers[index].key == key) placedMarkers.RemoveAt(index);
+            }
+            placedMarkers.Add(new PlacedMarker
+            {
+                key = key,
+                enclosure = enclosure,
+                position = position,
+            });
+        }
+
+        private bool IsMarkerCandidateAvailable(Vector3 candidate, RatEnclosure enclosure)
+        {
+            EnclosureSystem.Definition definition = EnclosureSystem.GetDefinition(enclosure);
+            float inset = ObjectMarkerDiameter * 0.5f + ObjectMarkerSpacing * 0.5f;
+            if (candidate.x < definition.minX + inset || candidate.x > definition.maxX - inset ||
+                candidate.z < definition.minZ + inset || candidate.z > definition.maxZ - inset)
+                return false;
+
+            float minimumDistance = ObjectMarkerDiameter + ObjectMarkerSpacing;
+            float minimumDistanceSquared = minimumDistance * minimumDistance;
+            for (int index = 0; index < placedMarkers.Count; index++)
+            {
+                PlacedMarker placed = placedMarkers[index];
+                if (placed == null || placed.enclosure != enclosure) continue;
+                Vector2 delta = new Vector2(candidate.x - placed.position.x,
+                    candidate.z - placed.position.z);
+                if (delta.sqrMagnitude < minimumDistanceSquared) return false;
+            }
+            return true;
+        }
+
+        private Vector3 ClampMarkerPosition(Vector3 position, RatEnclosure enclosure)
+        {
+            EnclosureSystem.Definition definition = EnclosureSystem.GetDefinition(enclosure);
+            float inset = ObjectMarkerDiameter * 0.5f + ObjectMarkerSpacing * 0.5f;
+            position.x = Mathf.Clamp(position.x, definition.minX + inset, definition.maxX - inset);
+            position.z = Mathf.Clamp(position.z, definition.minZ + inset, definition.maxZ - inset);
+            position.y = GetHabitatFloorY(enclosure) + ObjectMarkerFloorClearance;
+            return position;
+        }
+
+        private float GetHabitatFloorY(RatEnclosure enclosure)
+        {
+            Transform cage = enclosure == RatEnclosure.MaleColony ? maleCageRoot :
+                enclosure == RatEnclosure.Breeding ? breedingCageRoot :
+                enclosure == RatEnclosure.Pairing ? pairingCageRoot : femaleCageRoot;
+            if (cage != null)
+            {
+                Transform floor = FindGeneratedChild(cage,
+                    EnclosureSystem.Label(enclosure) + " Floor");
+                if (floor != null)
+                {
+                    Renderer floorRenderer = floor.GetComponent<Renderer>();
+                    if (floorRenderer != null && floorRenderer.enabled)
+                        return floorRenderer.bounds.max.y;
+                }
+            }
+
+            // CreateIndependentCage's floor is centered at 0.115 with a
+            // 0.24-unit height. Keep this only as a pre-render fallback.
+            return 0.235f;
+        }
+
+        private Material GetMarkerMaterial(HabitatObjectType type, Color? overrideColor)
+        {
+            if (overrideColor.HasValue)
+            {
+                Material custom = MaterialFactory.CreateUnlit(overrideColor.Value);
+                if (custom != null) custom.name = "Habitat Object Marker (decorative)";
+                return custom;
+            }
+
+            Material material;
+            if (markerMaterials.TryGetValue(type, out material) && material != null)
+                return material;
+
+            Color color;
+            switch (type)
+            {
+                case HabitatObjectType.Food:
+                    color = new Color(0.78f, 0.31f, 0.28f);
+                    break;
+                case HabitatObjectType.Water:
+                    color = new Color(0.20f, 0.49f, 0.76f);
+                    break;
+                case HabitatObjectType.Nest:
+                    color = new Color(0.69f, 0.48f, 0.22f);
+                    break;
+                case HabitatObjectType.ExerciseWheel:
+                    color = new Color(0.82f, 0.39f, 0.27f);
+                    break;
+                default:
+                    color = new Color(0.39f, 0.27f, 0.34f);
+                    break;
+            }
+
+            material = MaterialFactory.CreateUnlit(color);
+            if (material != null)
+            {
+                material.name = "Habitat Object Marker - " + type;
+                markerMaterials[type] = material;
+            }
+            return material;
+        }
+
+        private Mesh GetFlatMarkerMesh()
+        {
+            if (flatMarkerMesh != null) return flatMarkerMesh;
+            var vertices = new Vector3[ObjectMarkerSegments + 1];
+            var uv = new Vector2[vertices.Length];
+            vertices[0] = new Vector3(0f, 0.012f, 0f);
+            uv[0] = new Vector2(0.5f, 0.5f);
+            for (int index = 0; index < ObjectMarkerSegments; index++)
+            {
+                float angle = index * Mathf.PI * 2f / ObjectMarkerSegments;
+                vertices[index + 1] = new Vector3(Mathf.Cos(angle) * 0.5f,
+                    0.004f, Mathf.Sin(angle) * 0.5f);
+                uv[index + 1] = new Vector2(Mathf.Cos(angle) * 0.5f + 0.5f,
+                    Mathf.Sin(angle) * 0.5f + 0.5f);
+            }
+
+            var triangles = new int[ObjectMarkerSegments * 3];
+            for (int index = 0; index < ObjectMarkerSegments; index++)
+            {
+                int next = (index + 1) % ObjectMarkerSegments;
+                int triangle = index * 3;
+                triangles[triangle] = 0;
+                triangles[triangle + 1] = next + 1;
+                triangles[triangle + 2] = index + 1;
+            }
+
+            flatMarkerMesh = new Mesh { name = "Habitat Object Flat Circle" };
+            flatMarkerMesh.vertices = vertices;
+            flatMarkerMesh.uv = uv;
+            flatMarkerMesh.triangles = triangles;
+            flatMarkerMesh.RecalculateNormals();
+            flatMarkerMesh.RecalculateBounds();
+            return flatMarkerMesh;
+        }
+
+        private static uint StableMarkerHash(string value)
+        {
+            unchecked
+            {
+                uint hash = 2166136261u;
+                if (value != null)
+                {
+                    for (int index = 0; index < value.Length; index++)
+                    {
+                        hash ^= value[index];
+                        hash *= 16777619u;
+                    }
+                }
+                return hash;
             }
         }
 

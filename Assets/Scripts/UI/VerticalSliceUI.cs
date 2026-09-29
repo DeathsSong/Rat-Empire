@@ -259,6 +259,13 @@ namespace RatHabitat
         public bool IsWelcomeOpen { get { return welcomeOpen; } }
 
         /// <summary>
+        /// Newborn naming is a real modal state, not just a visual panel. The
+        /// bootstrap uses this value to keep the authoritative simulation
+        /// paused until the naming transaction has been approved.
+        /// </summary>
+        public bool IsPendingLitterNamingOpen { get { return namingOpen; } }
+
+        /// <summary>
         /// Page controls live inside a nested ScrollRect and are generated at
         /// runtime. On some Unity 2022 Android/editor input paths the
         /// ScrollRect receives the pointer but does not complete the child's
@@ -466,6 +473,7 @@ namespace RatHabitat
             if (canvas == null) return;
 
             string eventSystemHit = "none";
+            string raycastHits = "none";
             EventSystem eventSystem = EventSystem.current;
             if (eventSystem != null)
             {
@@ -478,6 +486,30 @@ namespace RatHabitat
                 eventSystem.RaycastAll(eventData, results);
                 if (results.Count > 0 && results[0].gameObject != null)
                     eventSystemHit = results[0].gameObject.name;
+                if (results.Count > 0)
+                {
+                    var hitNames = new System.Text.StringBuilder();
+                    int hitCount = Mathf.Min(8, results.Count);
+                    for (int index = 0; index < hitCount; index++)
+                    {
+                        RaycastResult result = results[index];
+                        if (index > 0) hitNames.Append(" > ");
+                        if (result.gameObject == null)
+                        {
+                            hitNames.Append("null");
+                            continue;
+                        }
+                        Graphic graphic = result.gameObject.GetComponent<Graphic>();
+                        CanvasGroup group = result.gameObject.GetComponentInParent<CanvasGroup>();
+                        hitNames.Append(result.gameObject.name)
+                            .Append("[").Append(result.module == null ? "no-module" : result.module.name).Append("]")
+                            .Append(graphic != null && graphic.raycastTarget ? ":ray" : ":no-ray");
+                        if (group != null)
+                            hitNames.Append("{cg blocks=").Append(group.blocksRaycasts)
+                                .Append(" interactable=").Append(group.interactable).Append('}');
+                    }
+                    raycastHits = hitNames.ToString();
+                }
             }
 
             var activeOverlays = new List<string>();
@@ -494,12 +526,44 @@ namespace RatHabitat
             Debug.Log("[Rat UI Navigation] " + context +
                 " pointer=" + screenPoint +
                 " eventSystemHit=" + eventSystemHit +
+                " raycastHits=" + raycastHits +
                 " fallbackHit=" + relayName +
                 " panel=" + activeMainPanel +
                 " overlays=" + overlayState +
                 " myRatsBlocker=" + IsBlockerActive(myRatsInputBlocker) +
                 " familyTreeBlocker=" + IsBlockerActive(familyTreeInputBlocker) +
+                " inputLayer=" + BuildInputLayerDiagnostic() +
                 " header=" + headerState);
+#endif
+        }
+
+        private string BuildInputLayerDiagnostic()
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            var state = new System.Text.StringBuilder();
+            AppendInputObjectDiagnostic(state, myRatsInputBlocker, "myRats");
+            AppendInputObjectDiagnostic(state, familyTreeInputBlocker, "familyTree");
+            AppendInputObjectDiagnostic(state, pageScroll == null ? null : pageScroll.transform as RectTransform, "page");
+            AppendInputObjectDiagnostic(state, namingOverlay, "naming");
+            AppendInputObjectDiagnostic(state, settingsOverlay, "settings");
+            return state.Length == 0 ? "none" : state.ToString();
+#else
+            return string.Empty;
+#endif
+        }
+
+        private static void AppendInputObjectDiagnostic(System.Text.StringBuilder state, RectTransform rect, string label)
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (rect == null) return;
+            if (state.Length > 0) state.Append('|');
+            CanvasGroup group = rect.GetComponent<CanvasGroup>();
+            state.Append(label).Append("=")
+                .Append(rect.gameObject.activeInHierarchy ? 'A' : 'I')
+                .Append("#").Append(rect.GetSiblingIndex())
+                .Append("@ray=").Append(rect.GetComponent<Graphic>() != null && rect.GetComponent<Graphic>().raycastTarget);
+            if (group != null)
+                state.Append("/cg=").Append(group.blocksRaycasts).Append(',').Append(group.interactable);
 #endif
         }
 
@@ -552,9 +616,8 @@ namespace RatHabitat
             get
             {
                 return welcomeOpen || settingsOpen || developerToolsOpen || ratAnimationShowcaseOpen || eventLogOpen || namingOpen || renameOpen ||
-                    (activeMainPanel == MainPanel.MyRats && !welcomeOpen && !settingsOpen && !developerToolsOpen &&
-                     !ratAnimationShowcaseOpen && !eventLogOpen && !namingOpen && !renameOpen) ||
-                    (activeMainPanel == MainPanel.FamilyTree && !welcomeOpen && !settingsOpen && !developerToolsOpen &&
+                    (activeMainPanel != MainPanel.None && activeMainPanel != MainPanel.Habitat &&
+                     !welcomeOpen && !settingsOpen && !developerToolsOpen &&
                      !ratAnimationShowcaseOpen && !eventLogOpen && !namingOpen && !renameOpen);
             }
         }
@@ -764,12 +827,40 @@ namespace RatHabitat
                 return (pageScroll != null && relay.transform.IsChildOf(pageScroll.transform)) ||
                     (headerContent != null && relay.transform.IsChildOf(headerContent));
             }
+            if (activeOverlay == null && activeMainPanel != MainPanel.None &&
+                activeMainPanel != MainPanel.Habitat &&
+                !welcomeOpen && !settingsOpen && !developerToolsOpen &&
+                !ratAnimationShowcaseOpen && !eventLogOpen && !namingOpen && !renameOpen)
+            {
+                // Store, Upgrades, and the breeding page are page-owned
+                // interaction surfaces too. A missed/generated relay must
+                // not turn a page-button tap into a habitat tap that closes
+                // the page underneath it.
+                return (pageScroll != null && relay.transform.IsChildOf(pageScroll.transform)) ||
+                    (headerContent != null && relay.transform.IsChildOf(headerContent));
+            }
             return activeOverlay != null && relay.transform.IsChildOf(activeOverlay);
         }
 
         public void Refresh(bool force)
         {
             if (!ready || game == null) return;
+            // A birth can finish between two normal UI refreshes. Reconcile
+            // the persisted naming queue before rebuilding page content so a
+            // stale or hidden modal can never keep a full-screen blocker alive
+            // without its controls, and a pending litter can never be shown
+            // without its naming surface.
+            if (namingOpen && !game.HasPendingLitterNaming)
+            {
+                namingOpen = false;
+                ClearUiPointerState();
+                if (EventSystem.current != null) EventSystem.current.SetSelectedGameObject(null);
+                SetOverlayVisibility();
+            }
+            else if (!welcomeOpen && game.HasPendingLitterNaming && !namingOpen)
+            {
+                OpenPendingLitterNaming();
+            }
             bool immediateRefresh = immediateRefreshRequested;
             immediateRefreshRequested = false;
             RefreshHeader();
@@ -872,6 +963,7 @@ namespace RatHabitat
             // independent of that hierarchy and must remain a usable escape
             // hatch to every top-level tab.
             EnsureHeaderNavigationReady();
+            ReassertPageInputLayerOrder();
             RefreshTopNavigationState();
         }
 
@@ -906,6 +998,7 @@ namespace RatHabitat
             finally
             {
                 EnsureHeaderNavigationReady();
+                ReassertPageInputLayerOrder();
                 RefreshTopNavigationState();
             }
         }
@@ -1589,8 +1682,23 @@ namespace RatHabitat
             ratAnimationShowcaseOpen = false;
             eventLogOpen = false;
             GrowthSystem.SetSimulationPaused(true);
-            RefreshPendingNamingPopup();
+            try
+            {
+                RefreshPendingNamingPopup();
+            }
+            catch (Exception exception)
+            {
+                // Keep the first exception visible in the Unity/WebGL log and
+                // keep the durable naming modal usable even if one optional
+                // newborn row failed to rebuild. The generated names remain
+                // in the save, so Continue can still approve the litter and
+                // release the authoritative simulation pause.
+                Debug.LogException(exception);
+                if (namingStatusText != null)
+                    namingStatusText.text = "Some names could not be displayed. The generated names are still saved.";
+            }
             SetOverlayVisibility();
+            LogBirthTransitionState("naming-open");
         }
 
         public void RefreshPendingNamingPopup()
@@ -1646,8 +1754,41 @@ namespace RatHabitat
         public void ClosePendingLitterNaming()
         {
             namingOpen = false;
+            ClearUiPointerState();
+            if (EventSystem.current != null) EventSystem.current.SetSelectedGameObject(null);
+            GrowthSystem.SetSimulationPaused(game != null &&
+                (game.WelcomePopupPending || game.HasPendingLitterNaming));
             SetOverlayVisibility();
             Refresh(true);
+            RestoreInputStateAfterBirthTransition();
+            LogBirthTransitionState("naming-closed");
+        }
+
+        /// <summary>
+        /// Development-only snapshot used at the birth boundary. This is
+        /// intentionally generated from the live hierarchy rather than from
+        /// cached UI state, so a first exception or stale blocker is visible.
+        /// </summary>
+        public void LogBirthTransitionState(string phase)
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (!Debug.isDebugBuild) return;
+            EnsureHeaderNavigationReady();
+            int activeRaycasters = 0;
+            GraphicRaycaster[] raycasters = GetComponentsInChildren<GraphicRaycaster>(true);
+            for (int index = 0; index < raycasters.Length; index++)
+                if (raycasters[index] != null && raycasters[index].isActiveAndEnabled) activeRaycasters++;
+            Debug.Log("[Rat UI BirthTransition] phase=" + phase +
+                " namingOpen=" + namingOpen +
+                " namingOverlayActive=" + (namingOverlay != null && namingOverlay.gameObject.activeInHierarchy) +
+                " namingCardActive=" + (namingCard != null && namingCard.gameObject.activeInHierarchy) +
+                " pending=" + (game != null && game.HasPendingLitterNaming) +
+                " overlayModal=" + IsModalOverlayOpen +
+                " activePanel=" + activeMainPanel +
+                " headerCanvas=" + (headerCanvas == null ? -1 : headerCanvas.sortingOrder) +
+                " raycasters=" + activeRaycasters +
+                " header=" + BuildHeaderDiagnosticState());
+#endif
         }
 
         public void RefreshAlertPreferenceControls()
@@ -2294,6 +2435,9 @@ namespace RatHabitat
         private void SetOverlayVisibility()
         {
             ClearUiPointerState();
+            InteractionManager.ResetPointerStateAfterUiTransition();
+            if (game != null && namingOpen && !game.HasPendingLitterNaming)
+                namingOpen = false;
             // The welcome dialog is the one modal that must be acknowledged
             // before any navigation or speed control is usable. Normally the
             // header deliberately renders above panels, but temporarily place
@@ -2309,10 +2453,14 @@ namespace RatHabitat
             if (namingOverlay != null) namingOverlay.gameObject.SetActive(namingOpen && !welcomeOpen);
             if (myRatsInputBlocker != null)
             {
-                bool blockWorldForMyRats = activeMainPanel == MainPanel.MyRats &&
+                bool blockWorldForPage = activeMainPanel != MainPanel.None &&
+                    activeMainPanel != MainPanel.Habitat &&
                     !welcomeOpen && !settingsOpen && !developerToolsOpen &&
                     !ratAnimationShowcaseOpen && !eventLogOpen && !namingOpen && !renameOpen;
-                myRatsInputBlocker.gameObject.SetActive(blockWorldForMyRats);
+                // This legacy-named shield is the page/world boundary for all
+                // generated pages, not just the roster. It remains below the
+                // page ScrollRect, so it cannot intercept page controls.
+                myRatsInputBlocker.gameObject.SetActive(blockWorldForPage);
             }
             if (familyTreeInputBlocker != null)
             {
@@ -2321,11 +2469,73 @@ namespace RatHabitat
                     !ratAnimationShowcaseOpen && !eventLogOpen && !namingOpen && !renameOpen;
                 familyTreeInputBlocker.gameObject.SetActive(blockWorldForFamilyTree);
             }
-            // Overlay activation can change sibling order. Reassert the
-            // header contract after all blockers have been toggled so the
-            // navigation canvas remains the final pointer layer for every
-            // ordinary page and optional modal.
+            // Overlay activation can change sibling order. Reassert both the
+            // page/blocker contract and the header contract after all
+            // blockers have been toggled so a modal transition cannot leave
+            // a full-page shield above the generated controls.
+            ReassertPageInputLayerOrder();
             EnsureHeaderNavigationReady();
+        }
+
+        /// <summary>
+        /// Reasserts the input ownership contract after a page/modal rebuild.
+        /// The two transparent world shields must stay below the page
+        /// ScrollRect, while a genuinely active modal must be above it. This
+        /// is deliberately separate from visual refresh so an exception or a
+        /// birth transition cannot leave a page-sized blocker on top of the
+        /// generated controls.
+        /// </summary>
+        private void ReassertPageInputLayerOrder()
+        {
+            if (safeRoot == null) return;
+
+            if (myRatsInputBlocker != null)
+            {
+                Image image = myRatsInputBlocker.GetComponent<Image>();
+                if (image != null) image.raycastTarget = true;
+                myRatsInputBlocker.SetSiblingIndex(0);
+            }
+            if (familyTreeInputBlocker != null)
+            {
+                Image image = familyTreeInputBlocker.GetComponent<Image>();
+                if (image != null) image.raycastTarget = true;
+                familyTreeInputBlocker.SetSiblingIndex(0);
+            }
+
+            // Put the normal page surface above both world shields. An active
+            // modal is restored above the page immediately afterward.
+            if (pageScroll != null && pageScroll.transform.parent == safeRoot)
+                pageScroll.transform.SetAsLastSibling();
+
+            RectTransform activeModal = null;
+            if (welcomeOpen) activeModal = welcomeOverlay;
+            else if (namingOpen) activeModal = namingOverlay;
+            else if (renameOpen) activeModal = renameOverlay;
+            else if (settingsOpen) activeModal = settingsOverlay;
+            else if (developerToolsOpen) activeModal = developerToolsOverlay;
+            else if (ratAnimationShowcaseOpen) activeModal = ratAnimationShowcaseOverlay;
+            else if (eventLogOpen) activeModal = eventLogOverlay;
+            if (activeModal != null && activeModal.gameObject.activeInHierarchy)
+                activeModal.SetAsLastSibling();
+        }
+
+        /// <summary>
+        /// Birth is a structural boundary: the page may have been rebuilt,
+        /// the naming modal may have been opened, and the old pointer may
+        /// still belong to a destroyed control. Restore all input ownership
+        /// in one place without changing the authoritative modal state.
+        /// </summary>
+        public void RestoreInputStateAfterBirthTransition()
+        {
+            ClearUiPointerState();
+            if (EventSystem.current != null)
+                EventSystem.current.SetSelectedGameObject(null);
+            InteractionManager.ResetPointerStateAfterUiTransition();
+            SetOverlayVisibility();
+            ReassertPageInputLayerOrder();
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            LogBirthTransitionState("input-state-restored");
+#endif
         }
 
         private void CloseWelcome()
@@ -5815,11 +6025,16 @@ namespace RatHabitat
             iconRoot.anchoredPosition = Vector2.zero;
             float iconSize = Mathf.Clamp(height * 0.66f, 28f, 34f);
             iconRoot.sizeDelta = new Vector2(iconSize, iconSize);
+            iconRoot.SetAsLastSibling();
             DiceIconGraphic icon = iconRoot.gameObject.AddComponent<DiceIconGraphic>();
             icon.color = enabled
                 ? new Color(0.96f, 0.92f, 0.78f, 1f)
                 : new Color(0.55f, 0.58f, 0.56f, 1f);
             icon.raycastTarget = false;
+            // The icon is added to a live, layout-driven row. Rebuild once
+            // after the final size and sibling order are assigned so the
+            // first frame cannot retain an empty custom-Graphic mesh.
+            icon.SetAllDirty();
 
             RatUiTooltip tooltip = button.gameObject.AddComponent<RatUiTooltip>();
             tooltip.Label = "Randomize name.";

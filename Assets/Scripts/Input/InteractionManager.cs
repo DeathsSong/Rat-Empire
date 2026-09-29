@@ -134,6 +134,33 @@ namespace RatHabitat
             ReportDiagnosticMessage(BuildDiagnosticMessage());
         }
 
+        /// <summary>
+        /// A modal/page transition can destroy the UI object that started a
+        /// pointer sequence. Clear the manual world-input state at that
+        /// boundary so its eventual pointer-up cannot be interpreted as a
+        /// world tap or carried into the newly generated page controls.
+        /// </summary>
+        public static void ResetPointerStateAfterUiTransition()
+        {
+            if (activeManager != null)
+                activeManager.ResetPointerStateAfterUiTransitionInternal();
+        }
+
+        private void ResetPointerStateAfterUiTransitionInternal()
+        {
+            touchFingerId = -1;
+            touchStartedOnUi = false;
+            touchStartedOnRatProfile = false;
+            pinchStartedOnUi = false;
+            pinchZooming = false;
+            lastPinchDistance = 0f;
+            mousePressStartedOnUi = true;
+            mousePressStartedOnRatProfile = false;
+            mouseDragDetected = false;
+            lastPointerFrame = -1;
+            pointerReceived = false;
+        }
+
         private void Update()
         {
             if (!configured || !managerReady || !isActiveAndEnabled) return;
@@ -490,7 +517,11 @@ namespace RatHabitat
                 // This is the only world physics query in the project. The
                 // Ray overload is used only after TryCreatePointerRay has
                 // validated and normalized the direction.
-                hits = Physics.RaycastAll(ray, MaxSelectionDistance, clickableLayerMask, QueryTriggerInteraction.Ignore);
+                // Habitat-object presentation markers use thin trigger
+                // colliders so they remain selectable without becoming solid
+                // obstacles for rats. Keep the query explicit so only this
+                // world-selection path opts into those non-blocking markers.
+                hits = Physics.RaycastAll(ray, MaxSelectionDistance, clickableLayerMask, QueryTriggerInteraction.Collide);
             }
             catch (Exception exception)
             {

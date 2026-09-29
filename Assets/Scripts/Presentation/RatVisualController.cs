@@ -128,6 +128,33 @@ namespace RatHabitat
         }
 
         /// <summary>
+        /// Returns the cached primary body renderer bounds. This is the body
+        /// surface used for selection and is intentionally narrower than the
+        /// aggregate bounds that also include tail, paws, and other appendages.
+        /// Caregiving placement uses it to detect a pup on the mother's body
+        /// without treating a harmless tail/limb overlap as a stack.
+        /// </summary>
+        public bool TryGetSelectionWorldBounds(out Bounds bounds)
+        {
+            bounds = new Bounds(transform.position, Vector3.zero);
+            Renderer selectedRenderer = selectionBoundsRenderer;
+            if (selectedRenderer == null || !selectedRenderer.enabled ||
+                !selectedRenderer.gameObject.activeInHierarchy)
+            {
+                CacheBoundsRenderer();
+                selectedRenderer = selectionBoundsRenderer;
+            }
+
+            if (selectedRenderer == null || !selectedRenderer.enabled ||
+                !selectedRenderer.gameObject.activeInHierarchy ||
+                selectedRenderer.bounds.size.sqrMagnitude <= 0.0001f)
+                return false;
+
+            bounds = selectedRenderer.bounds;
+            return true;
+        }
+
+        /// <summary>
         /// Keeps simulation and selection active for every rat, but stops the
         /// imported Animator and expensive shadow casters for rats that are
         /// outside the live camera. The presenter calls this on a bounded
