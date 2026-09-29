@@ -12,6 +12,8 @@ namespace RatHabitat
         private Transform femaleCageRoot;
         private Transform breedingCageRoot;
         private Transform pairingCageRoot;
+        private Bounds pairingNestSurfaceBounds;
+        private bool pairingNestSurfaceBoundsValid;
         private bool built;
 
         public Vector3 NestPosition { get; private set; }
@@ -24,6 +26,12 @@ namespace RatHabitat
         public bool TryGetNestSurfaceBounds(RatEnclosure enclosure, out Bounds surfaceBounds)
         {
             surfaceBounds = new Bounds();
+            if (enclosure == RatEnclosure.Pairing && pairingNestSurfaceBoundsValid)
+            {
+                surfaceBounds = pairingNestSurfaceBounds;
+                return surfaceBounds.size.sqrMagnitude > 0.0001f;
+            }
+
             // The removed Nursery has no runtime surface. Mothers and pups
             // use the legacy saved nest in Female Cage, while Pairing uses
             // the imported nest model.
@@ -36,9 +44,17 @@ namespace RatHabitat
                 ? "Nest_Bedding_Layer"
                 : "Nest Inner";
             Transform surface = FindGeneratedChild(enclosureRoot, innerName);
+            if (surface == null) surface = FindGeneratedChildIgnoreCase(enclosureRoot, innerName);
+            if (surface == null && enclosure == RatEnclosure.Pairing)
+                surface = FindGeneratedChildContainingIgnoreCase(enclosureRoot, "bedding");
             if (surface == null)
             {
                 surface = FindGeneratedChild(enclosureRoot,
+                    enclosure == RatEnclosure.Pairing ? "Pairing Nest Imported" : "Nest");
+            }
+            if (surface == null)
+            {
+                surface = FindGeneratedChildIgnoreCase(enclosureRoot,
                     enclosure == RatEnclosure.Pairing ? "Pairing Nest Imported" : "Nest");
             }
             if (surface == null) return false;
@@ -50,7 +66,13 @@ namespace RatHabitat
             if (directRenderer != null && directRenderer.enabled)
             {
                 surfaceBounds = directRenderer.bounds;
-                return surfaceBounds.size.sqrMagnitude > 0.0001f;
+                bool valid = surfaceBounds.size.sqrMagnitude > 0.0001f;
+                if (valid && enclosure == RatEnclosure.Pairing)
+                {
+                    pairingNestSurfaceBounds = surfaceBounds;
+                    pairingNestSurfaceBoundsValid = true;
+                }
+                return valid;
             }
 
             // Keep the fallback for older imported nest hierarchies.
@@ -60,7 +82,13 @@ namespace RatHabitat
                 Renderer renderer = renderers[index];
                 if (renderer == null || !renderer.enabled) continue;
                 surfaceBounds = renderer.bounds;
-                return surfaceBounds.size.sqrMagnitude > 0.0001f;
+                bool valid = surfaceBounds.size.sqrMagnitude > 0.0001f;
+                if (valid && enclosure == RatEnclosure.Pairing)
+                {
+                    pairingNestSurfaceBounds = surfaceBounds;
+                    pairingNestSurfaceBoundsValid = true;
+                }
+                return valid;
             }
             return false;
         }
@@ -99,6 +127,8 @@ namespace RatHabitat
             objectRoots.Clear();
             objectTypes.Clear();
             geometryRoot = null;
+            pairingNestSurfaceBounds = new Bounds();
+            pairingNestSurfaceBoundsValid = false;
             built = false;
             Build(save);
         }
@@ -173,6 +203,8 @@ namespace RatHabitat
         {
             if (pairingCageRoot == null) return;
             EnclosureSystem.ClearPairingNestBounds();
+            pairingNestSurfaceBounds = new Bounds();
+            pairingNestSurfaceBoundsValid = false;
             const string resourcePath = "PairingNest/rat_nest_box";
             GameObject nestAsset = Resources.Load<GameObject>(resourcePath);
             if (nestAsset == null)
@@ -223,6 +255,33 @@ namespace RatHabitat
 
             Bounds placedBounds = new Bounds();
             if (!TryGetRendererBounds(renderers, out placedBounds)) return;
+
+            // Cache the evaluated bedding renderer once, after the imported
+            // hierarchy has been positioned. The pinkie surface must never be
+            // inferred from the mother's height or from the outer wooden nest
+            // bounds. Older FBX imports occasionally vary capitalization, so
+            // resolve the authored bedding child case-insensitively as well.
+            Transform bedding = FindGeneratedChild(nest.transform, "Nest_Bedding_Layer");
+            if (bedding == null) bedding = FindGeneratedChildIgnoreCase(nest.transform, "Nest_Bedding_Layer");
+            if (bedding == null) bedding = FindGeneratedChildContainingIgnoreCase(nest.transform, "bedding");
+            if (bedding != null)
+            {
+                Renderer beddingRenderer = bedding.GetComponent<Renderer>();
+                if (beddingRenderer != null && beddingRenderer.enabled)
+                {
+                    pairingNestSurfaceBounds = beddingRenderer.bounds;
+                    pairingNestSurfaceBoundsValid = pairingNestSurfaceBounds.size.sqrMagnitude > 0.0001f;
+                }
+                if (!pairingNestSurfaceBoundsValid)
+                {
+                    Renderer[] beddingRenderers = bedding.GetComponentsInChildren<Renderer>(true);
+                    if (TryGetRendererBounds(beddingRenderers, out pairingNestSurfaceBounds))
+                        pairingNestSurfaceBoundsValid = true;
+                }
+            }
+            if (!pairingNestSurfaceBoundsValid)
+                Debug.LogWarning("[Rat Habitat] Pairing nest bedding renderer was not found; pinkie placement will use the explicit surface lookup fallback.");
+
             EnclosureSystem.RegisterPairingNestBounds(placedBounds);
             var collisionRoot = new GameObject("Pairing Nest Collision");
             collisionRoot.transform.SetParent(nest.transform, false);
@@ -528,6 +587,31 @@ namespace RatHabitat
             for (int i = 0; i < root.childCount; i++)
             {
                 Transform found = FindGeneratedChild(root.GetChild(i), objectName);
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        private static Transform FindGeneratedChildIgnoreCase(Transform root, string objectName)
+        {
+            if (root == null || string.IsNullOrEmpty(objectName)) return null;
+            if (string.Equals(root.name, objectName, System.StringComparison.OrdinalIgnoreCase)) return root;
+            for (int i = 0; i < root.childCount; i++)
+            {
+                Transform found = FindGeneratedChildIgnoreCase(root.GetChild(i), objectName);
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        private static Transform FindGeneratedChildContainingIgnoreCase(Transform root, string fragment)
+        {
+            if (root == null || string.IsNullOrEmpty(fragment)) return null;
+            if (root.name != null && root.name.IndexOf(fragment, System.StringComparison.OrdinalIgnoreCase) >= 0)
+                return root;
+            for (int i = 0; i < root.childCount; i++)
+            {
+                Transform found = FindGeneratedChildContainingIgnoreCase(root.GetChild(i), fragment);
                 if (found != null) return found;
             }
             return null;

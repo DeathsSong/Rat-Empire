@@ -174,12 +174,22 @@ namespace RatHabitat
                 if (refreshGrounding && liveRats.TryGetValue(item.Key, out rat) &&
                     controller.TryGetCurrentVisual(out currentVisual))
                 {
-                    // Keep animation-driven feet/tails from dipping below
-                    // the actual Pairing cage floor after the render pass. This
-                    // must happen before selection bounds are sampled: the
-                    // grounding correction changes the child visual's world
-                    // position without moving the stable rat root.
-                    visualFactory.KeepPairingVisualGrounded(currentVisual, rat, controller);
+                    if (rat.stage == RatStage.Pinkie)
+                    {
+                        // Pinkies are rendered as independent nest occupants.
+                        // Re-ground the complete rendered bounds after an
+                        // animation/growth update so a visual child offset or
+                        // pose can never lift the pup onto the mother.
+                        PlacePinkieOnNest(rat, root, controller);
+                    }
+                    else
+                    {
+                        // Keep animation-driven feet/tails from dipping below
+                        // the actual Pairing cage floor after the render pass.
+                        // This changes only the visual child and never the
+                        // stable gameplay root.
+                        visualFactory.KeepPairingVisualGrounded(currentVisual, rat, controller);
+                    }
                 }
 
                 if (refreshPresentationCulling)
@@ -566,34 +576,23 @@ namespace RatHabitat
             if (rat == null || root == null || controller == null || habitat == null ||
                 !habitat.TryGetNestSurfaceBounds(rat.enclosure, out Bounds surfaceBounds)) return;
 
-            Bounds localBounds;
-            if (!controller.TryGetSelectionBounds(out localBounds)) return;
-
             Vector3 rootPosition = root.transform.position;
-            float minX = float.PositiveInfinity;
-            float maxX = float.NegativeInfinity;
-            float minY = float.PositiveInfinity;
-            float minZ = float.PositiveInfinity;
-            float maxZ = float.NegativeInfinity;
-            for (int x = 0; x <= 1; x++)
-            {
-                for (int y = 0; y <= 1; y++)
-                {
-                    for (int z = 0; z <= 1; z++)
-                    {
-                        Vector3 localCorner = new Vector3(
-                            x == 0 ? localBounds.min.x : localBounds.max.x,
-                            y == 0 ? localBounds.min.y : localBounds.max.y,
-                            z == 0 ? localBounds.min.z : localBounds.max.z);
-                        Vector3 worldOffset = root.transform.TransformPoint(localCorner) - rootPosition;
-                        minX = Mathf.Min(minX, worldOffset.x);
-                        maxX = Mathf.Max(maxX, worldOffset.x);
-                        minY = Mathf.Min(minY, worldOffset.y);
-                        minZ = Mathf.Min(minZ, worldOffset.z);
-                        maxZ = Mathf.Max(maxZ, worldOffset.z);
-                    }
-                }
-            }
+            Bounds renderedBounds;
+            if (!controller.TryGetWorldBounds(out renderedBounds) || renderedBounds.size.sqrMagnitude <= 0.000001f)
+                return;
+
+            // Use the complete world-space bounds of every visible pinkie
+            // renderer. Selection bounds intentionally use one representative
+            // renderer and are therefore not safe for grounding: the imported
+            // pinkie has a separately offset body/skin hierarchy. Computing
+            // offsets from the evaluated render bounds accounts for the model
+            // pivot, local offset, scale, rotation, animation, feet, and tail
+            // without ever consulting the mother's transform.
+            float minX = renderedBounds.min.x - rootPosition.x;
+            float maxX = renderedBounds.max.x - rootPosition.x;
+            float minY = renderedBounds.min.y - rootPosition.y;
+            float minZ = renderedBounds.min.z - rootPosition.z;
+            float maxZ = renderedBounds.max.z - rootPosition.z;
 
             // Clamp the complete rotated pinkie bounds, rather than just the
             // root point, so no limb or tail can leave the nest surface.
@@ -607,7 +606,8 @@ namespace RatHabitat
             // The renderer-derived top is the actual nest surface. The tiny
             // epsilon prevents z-fighting without making the pinkie float.
             rootPosition.y = surfaceBounds.max.y - minY + 0.012f;
-            root.transform.position = rootPosition;
+            if ((root.transform.position - rootPosition).sqrMagnitude > 0.0000001f)
+                root.transform.position = rootPosition;
         }
 
         private static float ClampBoundedAxis(float value, float minimum, float maximum, float fallback)

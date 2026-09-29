@@ -3436,6 +3436,114 @@ namespace RatHabitat
             RefreshWorldAndUi(true);
         }
 
+        /// <summary>
+        /// Creates a deterministic, already-born litter for validating the
+        /// pinkie placement path. This is intentionally a developer action:
+        /// it adds real RatData/LitterData records so save/load, rendering,
+        /// nursing, and the normal relationship-based assignment code are
+        /// exercised without introducing a second test-only visual path.
+        /// </summary>
+        public void SpawnDeveloperPinkieLitter()
+        {
+            if (Save == null)
+            {
+                StatusMessage = "Colony data is not ready.";
+                if (ui != null) ui.Refresh(false);
+                return;
+            }
+
+            Save.EnsureLists();
+            long now = GameTime;
+            string motherId = ColonyFactory.NewId("dev_pinkie_mother");
+            string litterId = ColonyFactory.NewId("dev_pinkie_litter");
+            GenotypeData founder = GeneticsSystem.CreateFounder(
+                "B", "B", "C", "C", "D", "D", "s", "s");
+            float motherAgeDays = GameConfig.FemaleSexualMaturityDays + 30f;
+            RatData mother = ColonyFactory.CreateRat(
+                motherId,
+                ColonyFactory.GeneratedName(motherId, RatSex.Female),
+                RatSex.Female,
+                now - (long)(motherAgeDays * GameConfig.GameDayMs),
+                0,
+                founder.Clone(),
+                new TraitData(55f, 80f, 80f),
+                RatStage.Adult);
+            mother.enclosure = RatEnclosure.Pairing;
+            mother.pairingHabitatAssigned = true;
+            mother.nursing = true;
+            mother.nursingUntil = now + (long)(GameConfig.WeaningDays * GameConfig.GameDayMs);
+            mother.recoveryUntil = now + (long)(GameConfig.RecoveryDays * GameConfig.GameDayMs);
+            mother.reproductiveState = ReproductiveState.Recovery;
+            mother.nursingPupId = null;
+            mother.nursingInteractionUntil = 0L;
+            mother.nursingRetryAt = now;
+            RatActivitySystem.SetCurrent(Save, mother, "nursing", "Nursing", now);
+            Save.rats.Add(mother);
+            Save.ratIds.Add(mother.id);
+            RatNameSystem.EnsureUniqueName(Save, mother, now);
+
+            var litter = new LitterData
+            {
+                id = litterId,
+                motherId = mother.id,
+                fatherId = null,
+                litterName = "Developer Pinkie Placement Test",
+                size = 5,
+                generation = mother.generation + 1,
+                birthTimestamp = now,
+                weaningTimestamp = now + (long)(GameConfig.WeaningDays * GameConfig.GameDayMs),
+            };
+
+            for (int index = 0; index < litter.size; index++)
+            {
+                RatSex sex = index % 2 == 0 ? RatSex.Female : RatSex.Male;
+                string pupId = ColonyFactory.NewId("dev_pinkie");
+                RatData pup = ColonyFactory.CreateRat(
+                    pupId,
+                    ColonyFactory.GeneratedName(pupId, sex),
+                    sex,
+                    now,
+                    litter.generation,
+                    // Use a cloned genotype rather than UnityEngine.Random so
+                    // repeated test litters keep the same phenotype pipeline.
+                    founder.Clone(),
+                    new TraitData(55f, 80f, 80f),
+                    RatStage.Pinkie);
+                pup.motherId = mother.id;
+                pup.fatherId = null;
+                pup.litterId = litter.id;
+                pup.birthTimestamp = now;
+                pup.growthTimestamp = now;
+                pup.ageDays = 0f;
+                pup.enclosure = RatEnclosure.Pairing;
+                pup.pairingHabitatAssigned = true;
+                pup.nursing = false;
+                pup.lastNursedAt = now - (long)index * GameConfig.GameDayMs / 24L;
+                RatActivitySystem.SetCurrent(Save, pup, "growing", "Growing", now);
+                Save.rats.Add(pup);
+                Save.ratIds.Add(pup.id);
+                RatNameSystem.EnsureUniqueName(Save, pup, now);
+                litter.pupIds.Add(pup.id);
+            }
+
+            Save.litters.Add(litter);
+            GrowthSystem.RefreshRatAges(Save, now);
+            EnclosureSystem.RecalculateAssignments(Save);
+            selectedRatId = mother.id;
+            selectedObjectId = null;
+            breedingOpen = false;
+            parentAId = null;
+            parentBId = null;
+            breedingSelectionSlot = BreedingParentSlot.None;
+            EnclosureSystem.ClearBreedingPair();
+            deleteConfirmationRatId = null;
+            sellConfirmationRatId = null;
+            euthanizeConfirmationRatId = null;
+            StatusMessage = "Spawned a five-pinkie nest placement test litter.";
+            SaveSystem.Save(Save);
+            RefreshWorldAndUi(true);
+        }
+
         public void SetSimulationSpeed(float speed)
         {
             if (Save == null || Save.clock == null) return;

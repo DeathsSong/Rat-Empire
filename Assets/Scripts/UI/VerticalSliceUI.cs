@@ -2450,7 +2450,11 @@ namespace RatHabitat
         {
             if (parent == null || rat == null) return;
 
-            float cardHeight = inlineSaleConfirmation ? 188f : 136f;
+            // Sell cards can contain a wrapped coat/markings line plus the
+            // pregnancy status and, when needed, a sale restriction/warning.
+            // Leave enough vertical room for those rows instead of forcing
+            // them to draw into each other on narrow screens.
+            float cardHeight = inlineSaleConfirmation ? 218f : 158f;
             const float portraitSize = 88f;
             const float actionWidth = 94f;
             var card = CreateRect("Store Management Card " + rat.id, parent);
@@ -2501,6 +2505,9 @@ namespace RatHabitat
             AddText(info, "Coat: " + coat + "  •  " + markings, 12, new Color(1f, 0.84f, 0.52f), TextAnchor.UpperLeft);
             AddText(info, "Size " + traits.size.ToString("0") + "  •  Health " + traits.health.ToString("0") + "  •  Fertility " + traits.fertility.ToString("0"),
                 12, Color.white, TextAnchor.UpperLeft);
+            Text pregnancyStatus = AddText(info, string.Empty, 12,
+                new Color(0.95f, 0.73f, 0.34f), TextAnchor.UpperLeft);
+            BindLiveText(pregnancyStatus, () => SellPregnancyStatus(rat));
             if (!actionInteractable)
             {
                 AddText(info, game.SaleRestrictionReason(rat), 11,
@@ -3206,6 +3213,20 @@ namespace RatHabitat
             if (string.IsNullOrEmpty(warnings) || warnings == "None") return;
             AddTextTo(parent, "Warnings: " + warnings + ".", fontSize,
                 new Color(1f, 0.72f, 0.38f), TextAnchor.UpperLeft);
+        }
+
+        private string SellPregnancyStatus(RatData rat)
+        {
+            if (rat == null) return "Pregnancy: Unknown";
+            if (rat.sex != RatSex.Female) return "Pregnancy: Not applicable";
+
+            PregnancyData pregnancy = FindPregnancyForFemale(rat);
+            if (pregnancy == null) return "Pregnancy: Not pregnant";
+
+            int percentage = Mathf.Clamp(Mathf.RoundToInt(
+                BreedingSystem.PregnancyProgress01(pregnancy, game.GameTime) * 100f), 0, 100);
+            long remainingMs = Math.Max(0L, pregnancy.dueAt - game.GameTime);
+            return "Pregnancy: " + percentage + "%  •  " + FormatRemainingTime(remainingMs);
         }
 
         private void AddObjectProfile(HabitatObjectData selected)
@@ -5049,6 +5070,7 @@ namespace RatHabitat
             AddButton(developerToolsCard, "Spotted Black  •  B/B C/C D/D S/S", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.SpottedBlack));
             AddButton(developerToolsCard, "Spotted Brown  •  b/b C/C D/D S/S", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.SpottedBrown));
             AddButton(developerToolsCard, "Spawn Marked Test Rat  •  blended face, body, and legs", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.MarkedTest));
+            AddButton(developerToolsCard, "Spawn Pinkie Placement Test Litter  •  5 grounded pups", true, game.SpawnDeveloperPinkieLitter);
             AddButtonTo(developerToolsCard, "Rat Animation Showcase", true, OpenRatAnimationShowcase, new Color(0.18f, 0.34f, 0.42f), 48f);
 
             AddText(developerToolsCard, "Store testing", 17, Color.white, TextAnchor.UpperLeft);
@@ -5202,6 +5224,12 @@ namespace RatHabitat
             text.raycastTarget = false;
             var layout = objectRoot.AddComponent<LayoutElement>();
             layout.minHeight = text.fontSize + 7f;
+            // A wrapped label must report its full preferred height to the
+            // parent layout. Without this, long coat/marking names draw over
+            // the stats and pregnancy rows beneath them in narrow sell cards.
+            var fitter = objectRoot.AddComponent<ContentSizeFitter>();
+            fitter.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
+            fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
             return text;
         }
 
