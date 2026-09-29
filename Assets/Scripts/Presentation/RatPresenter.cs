@@ -40,6 +40,7 @@ namespace RatHabitat
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
         private readonly HashSet<string> pinkiePlacementDiagnostics = new HashSet<string>();
         private readonly HashSet<string> pinkiePlacementWarnings = new HashSet<string>();
+        private readonly HashSet<string> pinkieInputIsolationAudits = new HashSet<string>();
         private readonly Dictionary<string, Vector3> lastPinkieGroundedPositions = new Dictionary<string, Vector3>();
         private readonly Dictionary<string, int> lastPinkieGroundedFrames = new Dictionary<string, int>();
 #endif
@@ -172,6 +173,8 @@ namespace RatHabitat
                     // saved stage changes, it performs the configured smooth
                     // pinkie->young or young->adult transition.
                     controller.Apply(rat, true);
+                    if (rat.stage == RatStage.Pinkie)
+                        EnsurePinkieInputIsolation(root, rat);
                     ConfigureRatCollider(root, rat.stage, controller);
                     // Pinkies are nest-bound and never receive a behavior
                     // component. Attach/configure movement only after the visual
@@ -298,6 +301,138 @@ namespace RatHabitat
         public RatVisualFactory GetVisualFactory()
         {
             return EnsureVisualFactory();
+        }
+
+        /// <summary>
+        /// Pinkies are world-only presentation objects. Imported FBX variants
+        /// can carry stale authoring components or helper colliders even when
+        /// the source prefab does not show them in the Inspector. Quarantine
+        /// those components at the stable rat root so they can never become a
+        /// second UI/event-input path while a newborn is alive.
+        /// </summary>
+        private void EnsurePinkieInputIsolation(GameObject root, RatData rat)
+        {
+            if (root == null || rat == null || rat.stage != RatStage.Pinkie) return;
+
+            int disabledUiComponents = 0;
+            int disabledColliders = 0;
+            int uiLayer = LayerMask.NameToLayer("UI");
+            foreach (UnityEngine.UI.Graphic graphic in root.GetComponentsInChildren<UnityEngine.UI.Graphic>(true))
+            {
+                if (graphic == null) continue;
+                if (graphic.raycastTarget)
+                {
+                    graphic.raycastTarget = false;
+                    disabledUiComponents++;
+                }
+            }
+            foreach (UnityEngine.UI.GraphicRaycaster raycaster in root.GetComponentsInChildren<UnityEngine.UI.GraphicRaycaster>(true))
+            {
+                if (raycaster == null) continue;
+                if (raycaster.enabled)
+                {
+                    raycaster.enabled = false;
+                    disabledUiComponents++;
+                }
+            }
+            foreach (UnityEngine.EventSystems.EventTrigger trigger in root.GetComponentsInChildren<UnityEngine.EventSystems.EventTrigger>(true))
+            {
+                if (trigger == null) continue;
+                if (trigger.enabled)
+                {
+                    trigger.enabled = false;
+                    disabledUiComponents++;
+                }
+            }
+            foreach (UnityEngine.Canvas canvas in root.GetComponentsInChildren<UnityEngine.Canvas>(true))
+            {
+                if (canvas == null) continue;
+                if (canvas.enabled)
+                {
+                    canvas.enabled = false;
+                    disabledUiComponents++;
+                }
+            }
+            foreach (UnityEngine.CanvasGroup group in root.GetComponentsInChildren<UnityEngine.CanvasGroup>(true))
+            {
+                if (group == null) continue;
+                if (group.blocksRaycasts || group.interactable)
+                {
+                    group.blocksRaycasts = false;
+                    group.interactable = false;
+                    disabledUiComponents++;
+                }
+            }
+            foreach (Collider collider in root.GetComponentsInChildren<Collider>(true))
+            {
+                if (collider == null || collider.GetComponent<RatSelectionCollider>() != null) continue;
+                if (collider.enabled)
+                {
+                    collider.enabled = false;
+                    disabledColliders++;
+                }
+            }
+
+            // A stale imported child on the UI layer is not a valid gameplay
+            // input surface. Keep the existing world layer for normal meshes,
+            // but repair only the accidental UI-layer case.
+            if (uiLayer >= 0)
+            {
+                foreach (Transform child in root.GetComponentsInChildren<Transform>(true))
+                {
+                    if (child != null && child.gameObject.layer == uiLayer)
+                        child.gameObject.layer = root.layer;
+                }
+            }
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (Debug.isDebugBuild && pinkieInputIsolationAudits.Add(rat.id ?? string.Empty))
+            {
+                Debug.Log("[Rat Habitat] Pinkie input isolation: ratId=" + rat.id +
+                    " name=" + rat.name +
+                    " uiDisabled=" + disabledUiComponents +
+                    " helperCollidersDisabled=" + disabledColliders +
+                    " selectionColliders=" + root.GetComponentsInChildren<RatSelectionCollider>(true).Length +
+                    " parent=" + (root.transform.parent == null ? "<none>" : root.transform.parent.name));
+            }
+#endif
+        }
+
+        /// <summary>
+        /// Development-only snapshot used by UI pointer diagnostics. It is
+        /// intentionally read-only and reports the live pinkie hierarchy,
+        /// collider surface, and any accidental UI components.
+        /// </summary>
+        public string PinkieInputDiagnostic()
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            int activePinkies = 0;
+            int graphics = 0;
+            int raycastTargets = 0;
+            int canvases = 0;
+            int eventTriggers = 0;
+            int enabledColliders = 0;
+            foreach (RatData rat in liveRats.Values)
+            {
+                if (rat == null || rat.stage != RatStage.Pinkie) continue;
+                activePinkies++;
+                GameObject root;
+                if (!ratRoots.TryGetValue(rat.id, out root) || root == null) continue;
+                UnityEngine.UI.Graphic[] pinkieGraphics = root.GetComponentsInChildren<UnityEngine.UI.Graphic>(true);
+                graphics += pinkieGraphics.Length;
+                foreach (UnityEngine.UI.Graphic graphic in pinkieGraphics)
+                    if (graphic != null && graphic.raycastTarget) raycastTargets++;
+                canvases += root.GetComponentsInChildren<UnityEngine.Canvas>(true).Length;
+                eventTriggers += root.GetComponentsInChildren<UnityEngine.EventSystems.EventTrigger>(true).Length;
+                foreach (Collider collider in root.GetComponentsInChildren<Collider>(true))
+                    if (collider != null && collider.enabled) enabledColliders++;
+            }
+            return "count=" + activePinkies + " graphics=" + graphics +
+                " raycastTargets=" + raycastTargets + " canvases=" + canvases +
+                " eventTriggers=" + eventTriggers + " enabledColliders=" + enabledColliders;
+#else
+            return string.Empty;
+#endif
         }
 
         public bool TryGetRatRoot(string ratId, out Transform root)

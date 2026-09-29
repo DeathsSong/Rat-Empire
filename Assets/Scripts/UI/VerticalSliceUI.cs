@@ -54,8 +54,14 @@ namespace RatHabitat
         private ScrollRect settingsScroll;
         private Button keepScreenAwakeButton;
         private Text keepScreenAwakeStatusText;
-        private InputField customMaleNamesInput;
-        private InputField customFemaleNamesInput;
+        private RectTransform customMaleNamesList;
+        private RectTransform customFemaleNamesList;
+        private RectTransform customMaleNameInputRow;
+        private RectTransform customFemaleNameInputRow;
+        private InputField customMaleNameEntryInput;
+        private InputField customFemaleNameEntryInput;
+        private bool customMaleNameInputOpen;
+        private bool customFemaleNameInputOpen;
         private Text customNamesStatusText;
         private Button clearCustomNamesButton;
         private Button confirmClearCustomNamesButton;
@@ -296,8 +302,17 @@ namespace RatHabitat
                         fallbackTouchRelay = null;
                         fallbackTouchFingerId = -1;
                         RegisterUiPointerUp(touch.fingerId);
-                        if (!moved && relay != null && relay.ContainsScreenPoint(touch.position))
-                            relay.InvokeFallback(touch.fingerId);
+                        if (!moved)
+                        {
+                            // Birth/pinkie presentation can trigger a page
+                            // rebuild between pointer-down and pointer-up.
+                            // Never keep using the destroyed relay captured on
+                            // pointer-down; resolve the current control first.
+                            DirectUiClickRelay currentRelay = FindFallbackRelay(touch.position);
+                            if (currentRelay != null) relay = currentRelay;
+                            if (relay != null && relay.IsFallbackInteractable && relay.ContainsScreenPoint(touch.position))
+                                relay.InvokeFallback(touch.fingerId);
+                        }
                     }
                     else if (touch.phase == TouchPhase.Canceled && touch.fingerId == fallbackTouchFingerId)
                     {
@@ -322,8 +337,17 @@ namespace RatHabitat
                 bool moved = Vector2.Distance(fallbackMouseDownPosition, Input.mousePosition) > 8f;
                 fallbackMouseRelay = null;
                 RegisterUiPointerUp(-1);
-                if (!moved && relay != null && relay.ContainsScreenPoint(Input.mousePosition))
-                    relay.InvokeFallback(-1);
+                if (!moved)
+                {
+                    // Re-resolve after any birth/pinkie-driven rebuild. This
+                    // keeps a valid page button clickable even if its old
+                    // DirectUiClickRelay was destroyed while the pointer was
+                    // held down.
+                    DirectUiClickRelay currentRelay = FindFallbackRelay(Input.mousePosition);
+                    if (currentRelay != null) relay = currentRelay;
+                    if (relay != null && relay.IsFallbackInteractable && relay.ContainsScreenPoint(Input.mousePosition))
+                        relay.InvokeFallback(-1);
+                }
             }
         }
 
@@ -455,10 +479,59 @@ namespace RatHabitat
         {
             if (!ready) return false;
             DirectUiClickRelay relay = FindFallbackRelay(screenPoint);
+            if (relay == null)
+                relay = FindPageControlFromEventSystem(screenPoint);
             LogNavigationDiagnostics("page-release", screenPoint, relay);
             if (relay == null) return IsModalOverlayOpen;
             relay.InvokeFallback(int.MinValue);
             return true;
+        }
+
+        /// <summary>
+        /// Finds a current page Button through GraphicRaycaster results when a
+        /// generated relay was replaced during the same touch sequence. The
+        /// method deliberately ignores the two world-input shields and never
+        /// invokes a button that is not active/interactable.
+        /// </summary>
+        private DirectUiClickRelay FindPageControlFromEventSystem(Vector2 screenPoint)
+        {
+            EventSystem eventSystem = EventSystem.current;
+            if (eventSystem == null) return null;
+
+            var eventData = new PointerEventData(eventSystem)
+            {
+                position = screenPoint,
+                pointerId = -1,
+            };
+            var results = new List<RaycastResult>();
+            eventSystem.RaycastAll(eventData, results);
+            for (int index = 0; index < results.Count; index++)
+            {
+                GameObject hit = results[index].gameObject;
+                if (hit == null || !hit.activeInHierarchy ||
+                    (myRatsInputBlocker != null && hit.transform.IsChildOf(myRatsInputBlocker)) ||
+                    (familyTreeInputBlocker != null && hit.transform.IsChildOf(familyTreeInputBlocker))) continue;
+
+                Button button = hit.GetComponentInParent<Button>();
+                if (button == null || !button.isActiveAndEnabled || !button.IsInteractable()) continue;
+                DirectUiClickRelay relay = button.GetComponent<DirectUiClickRelay>();
+                if (relay != null && relay.IsFallbackInteractable) return relay;
+
+                // Every generated button normally has a relay. If a legacy
+                // or optional control does not, keep it in the UI path rather
+                // than letting the same tap fall through to a pinkie/world
+                // physics raycast. AddButtonTo supplies the relay on all
+                // current controls; this branch is a guarded compatibility
+                // fallback for older saved/runtime hierarchies.
+                if (CanInvokeUiAction(int.MinValue))
+                {
+                    lastUiActionFrame = Time.frameCount;
+                    lastUiActionPointerId = int.MinValue;
+                    button.onClick.Invoke();
+                }
+                return null;
+            }
+            return null;
         }
 
         /// <summary>
@@ -474,9 +547,11 @@ namespace RatHabitat
 
             string eventSystemHit = "none";
             string raycastHits = "none";
+            bool pointerOverEventSystemUi = false;
             EventSystem eventSystem = EventSystem.current;
             if (eventSystem != null)
             {
+                pointerOverEventSystemUi = eventSystem.IsPointerOverGameObject();
                 var eventData = new PointerEventData(eventSystem)
                 {
                     position = screenPoint,
@@ -523,8 +598,10 @@ namespace RatHabitat
             string overlayState = activeOverlays.Count == 0 ? "none" : string.Join(",", activeOverlays.ToArray());
             string relayName = fallbackRelay == null ? "none" : fallbackRelay.gameObject.name;
             string headerState = BuildHeaderDiagnosticState();
+            RatPresenter presenter = FindObjectOfType<RatPresenter>();
             Debug.Log("[Rat UI Navigation] " + context +
                 " pointer=" + screenPoint +
+                " pointerOverUi=" + pointerOverEventSystemUi +
                 " eventSystemHit=" + eventSystemHit +
                 " raycastHits=" + raycastHits +
                 " fallbackHit=" + relayName +
@@ -533,6 +610,7 @@ namespace RatHabitat
                 " myRatsBlocker=" + IsBlockerActive(myRatsInputBlocker) +
                 " familyTreeBlocker=" + IsBlockerActive(familyTreeInputBlocker) +
                 " inputLayer=" + BuildInputLayerDiagnostic() +
+                " pinkies=" + (presenter == null ? "none" : presenter.PinkieInputDiagnostic()) +
                 " header=" + headerState);
 #endif
         }
@@ -1430,14 +1508,10 @@ namespace RatHabitat
             AddButtonTo(settingsCard, "Reset Alert Preferences", true,
                 game.ResetAlertPreferences, new Color(0.12f, 0.27f, 0.29f), 40f);
             AddText(settingsCard, "Custom Rat Names", 17, Color.white, TextAnchor.UpperLeft);
-            AddText(settingsCard, "Add one name per line. These names join the built-in pools for future rats and Randomize buttons.",
+            AddText(settingsCard, "Add names one at a time. Custom names join the built-in pools for future rats and Randomize buttons.",
                 13, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
-            AddText(settingsCard, "Male names", 13, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft);
-            customMaleNamesInput = AddMultilineInputTo(settingsCard, game.CustomNamesText(RatSex.Male), 94f);
-            AddText(settingsCard, "Female names", 13, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft);
-            customFemaleNamesInput = AddMultilineInputTo(settingsCard, game.CustomNamesText(RatSex.Female), 94f);
-            AddButtonTo(settingsCard, "Apply Custom Names", true,
-                ApplyCustomNames, new Color(0.16f, 0.38f, 0.33f), 42f);
+            BuildCustomNameList(settingsCard, RatSex.Male);
+            BuildCustomNameList(settingsCard, RatSex.Female);
             customNamesStatusText = AddText(settingsCard, string.Empty, 12,
                 new Color(0.72f, 0.84f, 0.78f), TextAnchor.UpperLeft);
             clearCustomNamesButton = AddButtonTo(settingsCard, "Clear Custom Names", true,
@@ -1609,28 +1683,213 @@ namespace RatHabitat
             return input;
         }
 
-        private InputField AddMultilineInputTo(Transform parent, string value, float height)
+        private void BuildCustomNameList(Transform parent, RatSex sex)
         {
-            return AddInputFieldTo(parent, value, height, true);
+            string sexLabel = sex == RatSex.Female ? "Female names" : "Male names";
+            RectTransform section = CreateRect(sexLabel + " Custom Name Section", parent);
+            var sectionLayout = section.gameObject.AddComponent<VerticalLayoutGroup>();
+            sectionLayout.childControlWidth = true;
+            sectionLayout.childControlHeight = true;
+            sectionLayout.childForceExpandWidth = true;
+            sectionLayout.childForceExpandHeight = false;
+            sectionLayout.spacing = 5f;
+            sectionLayout.padding = new RectOffset(0, 0, 2, 2);
+            var sectionFitter = section.gameObject.AddComponent<ContentSizeFitter>();
+            sectionFitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+            RectTransform heading = CreateRect(sexLabel + " Heading", section);
+            var headingLayout = heading.gameObject.AddComponent<HorizontalLayoutGroup>();
+            headingLayout.childControlWidth = true;
+            headingLayout.childControlHeight = true;
+            headingLayout.childForceExpandWidth = false;
+            headingLayout.childForceExpandHeight = true;
+            headingLayout.spacing = 8f;
+            Text headingText = AddTextTo(heading, sexLabel, 13,
+                new Color(0.98f, 0.78f, 0.32f), TextAnchor.MiddleLeft);
+            LayoutElement headingTextLayout = headingText.gameObject.GetComponent<LayoutElement>();
+            if (headingTextLayout != null) headingTextLayout.flexibleWidth = 1f;
+            Button addButton = AddButtonTo(heading, "+", true,
+                () => ToggleCustomNameEntry(sex), new Color(0.14f, 0.29f, 0.29f), 42f);
+            ConfigureCompactNameButton(addButton, 42f, "Add custom " + sexLabel.ToLowerInvariant().Replace(" names", " name"));
+
+            RectTransform list = CreateRect(sexLabel + " Custom Name List", section);
+            var listLayout = list.gameObject.AddComponent<VerticalLayoutGroup>();
+            listLayout.childControlWidth = true;
+            listLayout.childControlHeight = true;
+            listLayout.childForceExpandWidth = true;
+            listLayout.childForceExpandHeight = false;
+            listLayout.spacing = 4f;
+            var listFitter = list.gameObject.AddComponent<ContentSizeFitter>();
+            listFitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+            RectTransform inputRow = CreateRect(sexLabel + " Custom Name Input", section);
+            var inputLayout = inputRow.gameObject.AddComponent<HorizontalLayoutGroup>();
+            inputLayout.childControlWidth = true;
+            inputLayout.childControlHeight = true;
+            inputLayout.childForceExpandWidth = false;
+            inputLayout.childForceExpandHeight = true;
+            inputLayout.spacing = 6f;
+            InputField input = AddInputFieldTo(inputRow, string.Empty, 42f, false);
+            LayoutElement inputLayoutElement = input.GetComponent<LayoutElement>();
+            if (inputLayoutElement != null)
+            {
+                inputLayoutElement.flexibleWidth = 1f;
+                inputLayoutElement.minWidth = 80f;
+            }
+            Button confirm = AddButtonTo(inputRow, "✓", true,
+                () => CommitCustomName(sex), new Color(0.16f, 0.38f, 0.33f), 42f);
+            ConfigureCompactNameButton(confirm, 42f, "Add custom " + sexLabel.ToLowerInvariant().Replace(" names", " name"));
+
+            if (sex == RatSex.Female)
+            {
+                customFemaleNamesList = list;
+                customFemaleNameInputRow = inputRow;
+                customFemaleNameEntryInput = input;
+            }
+            else
+            {
+                customMaleNamesList = list;
+                customMaleNameInputRow = inputRow;
+                customMaleNameEntryInput = input;
+            }
+            inputRow.gameObject.SetActive(sex == RatSex.Female ? customFemaleNameInputOpen : customMaleNameInputOpen);
+            RebuildCustomNameList(sex);
         }
 
-        private void ApplyCustomNames()
+        private static void ConfigureCompactNameButton(Button button, float size, string tooltip)
+        {
+            if (button == null) return;
+            LayoutElement layout = button.GetComponent<LayoutElement>();
+            if (layout != null)
+            {
+                layout.preferredWidth = size;
+                layout.minWidth = size;
+                layout.flexibleWidth = 0f;
+            }
+            button.gameObject.name = tooltip;
+            RatUiTooltip label = button.gameObject.GetComponent<RatUiTooltip>();
+            if (label == null) label = button.gameObject.AddComponent<RatUiTooltip>();
+            label.Label = tooltip;
+        }
+
+        private void ToggleCustomNameEntry(RatSex sex)
+        {
+            if (sex == RatSex.Female)
+            {
+                customFemaleNameInputOpen = !customFemaleNameInputOpen;
+                if (customFemaleNameInputRow != null) customFemaleNameInputRow.gameObject.SetActive(customFemaleNameInputOpen);
+                if (customFemaleNameInputOpen && customFemaleNameEntryInput != null)
+                {
+                    customFemaleNameEntryInput.text = string.Empty;
+                    customFemaleNameEntryInput.ActivateInputField();
+                }
+            }
+            else
+            {
+                customMaleNameInputOpen = !customMaleNameInputOpen;
+                if (customMaleNameInputRow != null) customMaleNameInputRow.gameObject.SetActive(customMaleNameInputOpen);
+                if (customMaleNameInputOpen && customMaleNameEntryInput != null)
+                {
+                    customMaleNameEntryInput.text = string.Empty;
+                    customMaleNameEntryInput.ActivateInputField();
+                }
+            }
+        }
+
+        private void CommitCustomName(RatSex sex)
         {
             if (game == null) return;
-            game.ApplyCustomNameLists(customMaleNamesInput == null ? string.Empty : customMaleNamesInput.text,
-                customFemaleNamesInput == null ? string.Empty : customFemaleNamesInput.text);
-            if (customNamesStatusText != null) customNamesStatusText.text = "Custom names applied.";
+            InputField input = sex == RatSex.Female ? customFemaleNameEntryInput : customMaleNameEntryInput;
+            string error;
+            if (!game.TryAddCustomName(sex, input == null ? string.Empty : input.text, out error))
+            {
+                if (customNamesStatusText != null) customNamesStatusText.text = error;
+                return;
+            }
+            if (sex == RatSex.Female)
+            {
+                customFemaleNameInputOpen = false;
+                if (customFemaleNameInputRow != null) customFemaleNameInputRow.gameObject.SetActive(false);
+                if (customFemaleNameEntryInput != null) customFemaleNameEntryInput.text = string.Empty;
+            }
+            else
+            {
+                customMaleNameInputOpen = false;
+                if (customMaleNameInputRow != null) customMaleNameInputRow.gameObject.SetActive(false);
+                if (customMaleNameEntryInput != null) customMaleNameEntryInput.text = string.Empty;
+            }
+            if (customNamesStatusText != null) customNamesStatusText.text = "Custom name added.";
+            RefreshCustomNameControls();
+        }
+
+        private void RemoveCustomName(RatSex sex, string name)
+        {
+            if (game == null) return;
+            if (game.RemoveCustomName(sex, name))
+            {
+                if (customNamesStatusText != null) customNamesStatusText.text = "Custom name removed.";
+                RefreshCustomNameControls();
+            }
+        }
+
+        private void RebuildCustomNameList(RatSex sex)
+        {
+            RectTransform list = sex == RatSex.Female ? customFemaleNamesList : customMaleNamesList;
+            if (list == null || game == null) return;
+            for (int index = list.childCount - 1; index >= 0; index--)
+                Destroy(list.GetChild(index).gameObject);
+
+            List<string> names = game.CustomNames(sex);
+            if (names == null || names.Count == 0)
+            {
+                AddTextTo(list, "No custom names yet.", 12,
+                    new Color(0.60f, 0.70f, 0.68f), TextAnchor.MiddleLeft);
+                return;
+            }
+            for (int index = 0; index < names.Count; index++)
+            {
+                string name = names[index];
+                RectTransform row = CreateRect("Custom Name " + name, list);
+                var rowLayout = row.gameObject.AddComponent<HorizontalLayoutGroup>();
+                rowLayout.childControlWidth = true;
+                rowLayout.childControlHeight = true;
+                rowLayout.childForceExpandWidth = false;
+                rowLayout.childForceExpandHeight = true;
+                rowLayout.spacing = 6f;
+                Text nameText = AddTextTo(row, name, 14, Color.white, TextAnchor.MiddleLeft);
+                LayoutElement nameLayout = nameText.gameObject.GetComponent<LayoutElement>();
+                if (nameLayout != null) nameLayout.flexibleWidth = 1f;
+                Button remove = AddButtonTo(row, "×", true,
+                    () => RemoveCustomName(sex, name), new Color(0.20f, 0.27f, 0.28f), 36f);
+                ConfigureCompactNameButton(remove, 36f, "Remove custom name " + name);
+            }
         }
 
         public void RefreshCustomNameControls()
         {
             if (game == null) return;
-            if (customMaleNamesInput != null && !customMaleNamesInput.isFocused) customMaleNamesInput.text = game.CustomNamesText(RatSex.Male);
-            if (customFemaleNamesInput != null && !customFemaleNamesInput.isFocused) customFemaleNamesInput.text = game.CustomNamesText(RatSex.Female);
+            RebuildCustomNameList(RatSex.Male);
+            RebuildCustomNameList(RatSex.Female);
+            if (customMaleNameInputRow != null) customMaleNameInputRow.gameObject.SetActive(customMaleNameInputOpen);
+            if (customFemaleNameInputRow != null) customFemaleNameInputRow.gameObject.SetActive(customFemaleNameInputOpen);
             bool confirm = game.CustomNamesClearConfirmationPending;
             if (clearCustomNamesButton != null) clearCustomNamesButton.gameObject.SetActive(!confirm);
             if (confirmClearCustomNamesButton != null) confirmClearCustomNamesButton.gameObject.SetActive(confirm);
             if (cancelClearCustomNamesButton != null) cancelClearCustomNamesButton.gameObject.SetActive(confirm);
+            ForceSettingsLayoutRefresh();
+        }
+
+        private void ForceSettingsLayoutRefresh()
+        {
+            if (settingsCard == null) return;
+            // Name-list rows and the confirmation controls change the card's
+            // height at runtime. Rebuild before returning from the click so
+            // the visible button rectangles and their raycasts stay aligned.
+            Canvas.ForceUpdateCanvases();
+            LayoutRebuilder.ForceRebuildLayoutImmediate(settingsCard);
+            if (settingsViewport != null)
+                LayoutRebuilder.ForceRebuildLayoutImmediate(settingsViewport);
+            Canvas.ForceUpdateCanvases();
         }
 
         private void OpenRenameModal(string ratId)

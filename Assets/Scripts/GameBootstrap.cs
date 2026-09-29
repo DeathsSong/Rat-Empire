@@ -4064,6 +4064,62 @@ namespace RatHabitat
             return RatNameSystem.CustomNamesText(Save, sex);
         }
 
+        public List<string> CustomNames(RatSex sex)
+        {
+            if (Save == null) return new List<string>();
+            Save.EnsureLists();
+            List<string> source = sex == RatSex.Female ? Save.customFemaleRatNames : Save.customMaleRatNames;
+            return source == null ? new List<string>() : new List<string>(source);
+        }
+
+        public bool TryAddCustomName(RatSex sex, string rawName, out string error)
+        {
+            error = string.Empty;
+            if (Save == null)
+            {
+                error = "The colony save is not ready.";
+                return false;
+            }
+            string name;
+            if (!RatNameSystem.TrySanitizePlayerName(rawName, out name, out error)) return false;
+            Save.EnsureLists();
+            List<string> target = sex == RatSex.Female ? Save.customFemaleRatNames : Save.customMaleRatNames;
+            string normalized = RatNameSystem.NormalizeForComparison(name);
+            for (int index = 0; index < target.Count; index++)
+            {
+                if (RatNameSystem.NormalizeForComparison(target[index]) == normalized)
+                {
+                    error = "That custom name is already in the list.";
+                    return false;
+                }
+            }
+            target.Add(name);
+            CustomNamesClearConfirmationPending = false;
+            StatusMessage = "Custom rat names saved.";
+            SaveSystem.Save(Save);
+            if (ui != null) ui.RefreshCustomNameControls();
+            return true;
+        }
+
+        public bool RemoveCustomName(RatSex sex, string name)
+        {
+            if (Save == null || string.IsNullOrEmpty(name)) return false;
+            Save.EnsureLists();
+            List<string> target = sex == RatSex.Female ? Save.customFemaleRatNames : Save.customMaleRatNames;
+            string normalized = RatNameSystem.NormalizeForComparison(name);
+            for (int index = 0; index < target.Count; index++)
+            {
+                if (RatNameSystem.NormalizeForComparison(target[index]) != normalized) continue;
+                target.RemoveAt(index);
+                CustomNamesClearConfirmationPending = false;
+                StatusMessage = "Custom rat names saved.";
+                SaveSystem.Save(Save);
+                if (ui != null) ui.RefreshCustomNameControls();
+                return true;
+            }
+            return false;
+        }
+
         public void ApplyCustomNameLists(string maleText, string femaleText)
         {
             if (Save == null) return;

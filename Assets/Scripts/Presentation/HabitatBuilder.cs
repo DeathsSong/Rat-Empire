@@ -335,27 +335,13 @@ namespace RatHabitat
                 Mathf.Max(0.1f, placedBounds.size.x),
                 Mathf.Max(0.1f, placedBounds.size.y),
                 Mathf.Max(0.1f, placedBounds.size.z));
-            // Keep the imported hierarchy as the logical nest surface and
-            // collision source, but temporarily remove its presentation.
-            // Pinkie placement still uses the cached bedding renderer bounds;
-            // players see and select only the small floor marker below.
-            for (int index = 0; index < renderers.Length; index++)
-            {
-                if (renderers[index] != null) renderers[index].enabled = false;
-            }
-
-            GameObject nestMarker = CreateFlatObjectMarker(
-                pairingCageRoot,
-                "Pairing Nest Marker",
-                EnclosureSystem.PairingNestPosition,
-                RatEnclosure.Pairing,
-                HabitatObjectType.Nest,
-                "pairing_nest",
-                "Pairing Nest");
-            if (nestMarker == null)
-            {
-                Debug.LogWarning("[Rat Habitat] Pairing nest marker could not be created; the logical nest remains active.");
-            }
+            // The authored Pairing nest is intentionally excluded from the
+            // temporary flat-circle object presentation. It remains visible
+            // and selectable through the original footprint, while the
+            // imported bedding renderer remains the placement source for
+            // pinkies and the mother-care zone.
+            var nestSelectable = collisionRoot.AddComponent<SelectableEntity>();
+            nestSelectable.Configure(SelectableKind.HabitatObject, "pairing_nest", "Pairing Nest");
         }
 
         private static bool TryGetRendererBounds(Renderer[] renderers, out Bounds bounds)
@@ -549,6 +535,15 @@ namespace RatHabitat
                 return;
             }
 
+            // Nest presentation is deliberately restored to the authored
+            // nest model used before the temporary flat-marker pass. Other
+            // saved habitat objects continue to use the lightweight circles.
+            if (data.type == HabitatObjectType.Nest)
+            {
+                objectRoots[data.id] = CreateLegacyNestObject(data);
+                return;
+            }
+
             Transform objectParent = ParentForObject(data.type);
             Vector3 position;
             RatEnclosure enclosure;
@@ -582,6 +577,37 @@ namespace RatHabitat
                 data.id,
                 data.label);
             objectRoots[data.id] = root;
+        }
+
+        private GameObject CreateLegacyNestObject(HabitatObjectData data)
+        {
+            Transform parent = femaleCageRoot == null ? geometryRoot : femaleCageRoot;
+            Vector3 position = EnclosureSystem.GetNestPosition(RatEnclosure.FemaleColony);
+            var root = CreateVisualPrimitive(parent, PrimitiveType.Cylinder, data.label,
+                position, new Vector3(2.3f, 0.25f, 1.65f), Vector3.zero,
+                new Color(0.78f, 0.52f, 0.25f), true);
+            if (root == null) return null;
+
+            var selectable = root.AddComponent<SelectableEntity>();
+            selectable.Configure(SelectableKind.HabitatObject, data.id, data.label);
+            selectable.EnsureCollider(Vector3.zero, new Vector3(2.3f, 0.5f, 1.65f));
+
+            // Preserve the old bedding and straw layers. The parent is named
+            // by the saved display label, but the inner child remains named
+            // "Nest Inner" so the nest-floor lookup stays authoritative.
+            CreateVisualPrimitive(root.transform, PrimitiveType.Cylinder, "Nest Inner",
+                new Vector3(0f, 0.28f, 0f), new Vector3(1.85f, 0.08f, 1.18f),
+                Vector3.zero, new Color(0.48f, 0.29f, 0.16f), false);
+            CreateVisualPrimitive(root.transform, PrimitiveType.Sphere, "Nest Straw A",
+                new Vector3(-0.75f, 0.37f, 0.12f), new Vector3(0.6f, 0.08f, 0.12f),
+                new Vector3(0f, 0f, 20f), new Color(0.96f, 0.72f, 0.34f), false);
+            CreateVisualPrimitive(root.transform, PrimitiveType.Sphere, "Nest Straw B",
+                new Vector3(0.58f, 0.39f, -0.15f), new Vector3(0.62f, 0.08f, 0.12f),
+                new Vector3(0f, 0f, -18f), new Color(0.96f, 0.72f, 0.34f), false);
+            CreateVisualPrimitive(root.transform, PrimitiveType.Sphere, "Nest Straw C",
+                new Vector3(0.05f, 0.41f, 0.28f), new Vector3(0.55f, 0.08f, 0.11f),
+                new Vector3(0f, 35f, 0f), new Color(0.89f, 0.62f, 0.27f), false);
+            return root;
         }
 
         private GameObject CreateFlatObjectMarker(Transform parent, string objectName,

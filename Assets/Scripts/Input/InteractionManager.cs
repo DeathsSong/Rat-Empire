@@ -483,6 +483,17 @@ namespace RatHabitat
                 RecordNoWorldRay("modal overlay blocked");
                 return;
             }
+            // UI owns a pointer before the world does. This final guard is
+            // intentionally repeated immediately before Physics.RaycastAll:
+            // a pinkie presentation refresh can replace a page relay after
+            // the initial pointer test, and a stale relay must never turn a
+            // page-button tap into a rat/world interaction.
+            if (pageUi == null) pageUi = FindObjectOfType<VerticalSliceUI>();
+            if (pageUi != null && pageUi.TryInvokePageControlAt(screenPosition))
+            {
+                RecordNoWorldRay("page UI control handled before world raycast");
+                return;
+            }
             // Do not process the same mouse/touch event twice when a desktop
             // platform also reports a touch-like event for it.
             if (lastPointerFrame == Time.frameCount && Vector2.Distance(lastPointerPosition, screenPosition) < 1f) return;
