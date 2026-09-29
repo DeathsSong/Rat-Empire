@@ -346,6 +346,41 @@ namespace RatHabitat
         }
         public bool ResetConfirmationPending { get { return resetConfirmationPending; } }
         public bool WelcomePopupPending { get { return Save != null && Save.welcomePopupPending; } }
+        public bool HasPendingLitterNaming
+        {
+            get { return PendingNamingLitter != null; }
+        }
+        public LitterData PendingNamingLitter
+        {
+            get
+            {
+                if (Save == null || Save.pendingNamingLitterIds == null) return null;
+                for (int i = 0; i < Save.pendingNamingLitterIds.Count; i++)
+                {
+                    string litterId = Save.pendingNamingLitterIds[i];
+                    if (string.IsNullOrEmpty(litterId)) continue;
+                    foreach (LitterData litter in Save.litters)
+                        if (litter != null && litter.id == litterId) return litter;
+                }
+                return null;
+            }
+        }
+        public List<RatData> PendingNamingPups
+        {
+            get
+            {
+                var pups = new List<RatData>();
+                LitterData litter = PendingNamingLitter;
+                if (litter == null || litter.pupIds == null) return pups;
+                foreach (string pupId in litter.pupIds)
+                {
+                    RatData pup = BreedingSystem.FindRat(Save, pupId);
+                    if (pup != null) pups.Add(pup);
+                }
+                return pups;
+            }
+        }
+        public bool CustomNamesClearConfirmationPending { get; private set; }
         public bool KeepScreenAwakeEnabled
         {
             get { return BrowserWakeLockSystem.IsEnabled(Save); }
@@ -1696,6 +1731,7 @@ namespace RatHabitat
                 {
                     foreach (LitterData litter in newLitters)
                         AnnounceBirth(litter);
+                    PreparePendingLitterNaming(newLitters);
                     stageChanged = true;
                     nextNursingTickGameTime = GameTime;
                 }
@@ -3042,6 +3078,7 @@ namespace RatHabitat
                 return;
             }
             foreach (LitterData litter in litters) AnnounceBirth(litter);
+            PreparePendingLitterNaming(litters);
             EnclosureSystem.RecalculateAssignments(Save);
             SaveSystem.Save(Save);
             rats.Render(Save, habitat.NestPosition);
@@ -3371,7 +3408,7 @@ namespace RatHabitat
             // Developer presets deliberately reuse the normal sex-specific
             // friendly-name pools. IDs remain unique, so duplicate display
             // names never compromise selection or save data.
-            string name = ColonyFactory.GeneratedName(developerId, sex);
+            string name = RatNameSystem.GenerateAvailableName(Save, developerId, sex, GameTime);
             var rat = ColonyFactory.CreateRat(
                 developerId,
                 name,
@@ -3909,9 +3946,154 @@ namespace RatHabitat
             if (Save == null) return;
             Save.welcomePopupPending = false;
             if (Save.clock != null) Save.clock.lastRealTimestamp = GameConfig.NowMs();
-            GrowthSystem.SetSimulationPaused(false);
+            GrowthSystem.SetSimulationPaused(HasPendingLitterNaming);
             BrowserWakeLockSystem.RequestFromUserGesture(Save);
             SaveSystem.Save(Save);
+        }
+
+        public bool TryRenameRat(string ratId, string rawName, out string error)
+        {
+            error = string.Empty;
+            RatData rat = BreedingSystem.FindHistoricalRat(Save, ratId);
+            string name;
+            if (rat == null) { error = "That rat is no longer available."; return false; }
+            if (!RatNameSystem.TrySanitizePlayerName(rawName, out name, out error)) return false;
+            if (!RatNameSystem.IsNameAvailable(Save, name, rat.id))
+            {
+                error = "That name is already in use by another rat or store listing.";
+                return false;
+            }
+            rat.name = name;
+            rat.nameWasPlayerAssigned = true;
+            RatNameSystem.RecordUsage(Save, rat.name, rat.sex, rat.id, GameTime);
+            SaveSystem.Save(Save);
+            RefreshWorldAndUi(true);
+            return true;
+        }
+
+        public string RandomizeRatName(string ratId)
+        {
+            RatData rat = BreedingSystem.FindHistoricalRat(Save, ratId);
+            if (rat == null) return string.Empty;
+            return RatNameSystem.GenerateAvailableName(Save, rat.id + "|rename|" + Time.frameCount, rat.sex, GameTime);
+        }
+
+        public bool TryRenamePendingPup(string pupId, string rawName, out string error)
+        {
+            error = string.Empty;
+            RatData pup = BreedingSystem.FindRat(Save, pupId);
+            string name;
+            if (pup == null) { error = "That newborn is no longer available."; return false; }
+            if (!RatNameSystem.TrySanitizePlayerName(rawName, out name, out error)) return false;
+            if (!RatNameSystem.IsNameAvailable(Save, name, pup.id))
+            {
+                error = "That name is already in use.";
+                return false;
+            }
+            foreach (RatData other in PendingNamingPups)
+                if (other != null && other.id != pup.id && RatNameSystem.NormalizeForComparison(other.name) == RatNameSystem.NormalizeForComparison(name))
+                {
+                    error = "Each pup in the litter needs a different name.";
+                    return false;
+                }
+            pup.name = name;
+            pup.nameWasPlayerAssigned = true;
+            RatNameSystem.RecordUsage(Save, name, pup.sex, pup.id, GameTime);
+            return true;
+        }
+
+        public string RandomizePendingPupName(string pupId)
+        {
+            RatData pup = BreedingSystem.FindRat(Save, pupId);
+            if (pup == null) return string.Empty;
+            var occupied = new HashSet<string>(StringComparer.Ordinal);
+            foreach (RatData other in PendingNamingPups)
+                if (other != null && other.id != pup.id) occupied.Add(RatNameSystem.NormalizeForComparison(other.name));
+            string name = RatNameSystem.GenerateAvailableName(Save, pup.id, pup.sex, GameTime);
+            int suffix = 2;
+            string baseName = name;
+            while (occupied.Contains(RatNameSystem.NormalizeForComparison(name))) name = baseName + " " + suffix++;
+            pup.name = name;
+            pup.nameWasPlayerAssigned = true;
+            RatNameSystem.RecordUsage(Save, name, pup.sex, pup.id, GameTime);
+            return name;
+        }
+
+        public void RandomizeAllPendingPupNames()
+        {
+            foreach (RatData pup in PendingNamingPups) if (pup != null) RandomizePendingPupName(pup.id);
+            SaveSystem.Save(Save);
+            if (ui != null) ui.RefreshPendingNamingPopup();
+        }
+
+        public bool ApprovePendingLitterNames()
+        {
+            if (Save == null || PendingNamingLitter == null) return false;
+            Save.pendingNamingLitterIds.Remove(PendingNamingLitter.id);
+            Save.clock.lastRealTimestamp = GameConfig.NowMs();
+            GrowthSystem.SetSimulationPaused(HasPendingLitterNaming || WelcomePopupPending);
+            SaveSystem.Save(Save);
+            if (ui != null)
+            {
+                if (HasPendingLitterNaming) ui.OpenPendingLitterNaming();
+                else ui.ClosePendingLitterNaming();
+            }
+            return true;
+        }
+
+        public string CustomNamesText(RatSex sex)
+        {
+            return RatNameSystem.CustomNamesText(Save, sex);
+        }
+
+        public void ApplyCustomNameLists(string maleText, string femaleText)
+        {
+            if (Save == null) return;
+            RatNameSystem.SetCustomNames(Save, RatSex.Male, maleText);
+            RatNameSystem.SetCustomNames(Save, RatSex.Female, femaleText);
+            StatusMessage = "Custom rat names saved.";
+            SaveSystem.Save(Save);
+            if (ui != null) ui.RefreshCustomNameControls();
+        }
+
+        public void RequestClearCustomNameLists()
+        {
+            CustomNamesClearConfirmationPending = true;
+            if (ui != null) ui.RefreshCustomNameControls();
+        }
+
+        public void ConfirmClearCustomNameLists()
+        {
+            if (Save == null) return;
+            Save.customMaleRatNames.Clear();
+            Save.customFemaleRatNames.Clear();
+            CustomNamesClearConfirmationPending = false;
+            StatusMessage = "Custom rat names cleared.";
+            SaveSystem.Save(Save);
+            if (ui != null) ui.RefreshCustomNameControls();
+        }
+
+        public void CancelClearCustomNameLists()
+        {
+            CustomNamesClearConfirmationPending = false;
+            if (ui != null) ui.RefreshCustomNameControls();
+        }
+
+        private void QueuePendingLitterNaming(LitterData litter)
+        {
+            if (Save == null || litter == null) return;
+            Save.EnsureLists();
+            if (!Save.pendingNamingLitterIds.Contains(litter.id)) Save.pendingNamingLitterIds.Add(litter.id);
+        }
+
+        private void PreparePendingLitterNaming(List<LitterData> litters)
+        {
+            if (Save == null || litters == null || litters.Count == 0) return;
+            foreach (LitterData litter in litters) QueuePendingLitterNaming(litter);
+            Save.clock.lastRealTimestamp = GameConfig.NowMs();
+            GrowthSystem.SetSimulationPaused(true);
+            SaveSystem.Save(Save);
+            if (ui != null) ui.OpenPendingLitterNaming();
         }
 
         public void ToggleKeepScreenAwake()

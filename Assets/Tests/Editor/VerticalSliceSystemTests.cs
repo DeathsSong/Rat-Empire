@@ -43,6 +43,69 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void BuiltInNamePoolsAreLargeAndDoNotGenerateAutomaticJrNames()
+        {
+            Assert.GreaterOrEqual(new HashSet<string>(GameConfig.MaleRatNames).Count, 200);
+            Assert.GreaterOrEqual(new HashSet<string>(GameConfig.FemaleRatNames).Count, 200);
+            foreach (string name in GameConfig.MaleRatNames)
+                Assert.IsFalse(name.EndsWith(" Jr", StringComparison.OrdinalIgnoreCase));
+            foreach (string name in GameConfig.FemaleRatNames)
+                Assert.IsFalse(name.EndsWith(" Jr", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [Test]
+        public void DirectParentNameInheritanceUsesOnlyTheRequestedLineageSuffixes()
+        {
+            ColonySaveData save = ColonyFactory.CreateNew(1000000L);
+            save.rats.Clear();
+            RatData parent = ColonyFactory.CreateRat("parent-harry", "Harry", RatSex.Male, 0L, 0,
+                GeneticsSystem.CreateFounder("B", "B", "C", "C", "D", "D", "s", "s"),
+                new TraitData(10f, 10f, 10f), RatStage.Adult);
+            save.rats.Add(parent);
+            RatData pup = ColonyFactory.CreateRat("pup-harry", "Harry", RatSex.Female, 0L, 0,
+                parent.genotype, new TraitData(10f, 10f, 10f), RatStage.Pinkie);
+            pup.motherId = parent.id;
+            save.rats.Add(pup);
+            RatNameSystem.EnsureBirthName(save, pup, 1000L);
+            Assert.AreEqual("Harry Jr", pup.name);
+
+            parent.name = "Harry Jr";
+            RatData grandPup = ColonyFactory.CreateRat("grand-harry", "Harry Jr", RatSex.Female, 0L, 0,
+                parent.genotype, new TraitData(10f, 10f, 10f), RatStage.Pinkie);
+            grandPup.motherId = parent.id;
+            save.rats.Add(grandPup);
+            RatNameSystem.EnsureBirthName(save, grandPup, 1000L);
+            Assert.AreEqual("Harry III", grandPup.name);
+        }
+
+        [Test]
+        public void PlayerNamesRemainOwnedAndCustomListsAreSanitized()
+        {
+            ColonySaveData save = ColonyFactory.CreateNew(1000000L);
+            RatData first = save.rats[0];
+            first.name = "Harry";
+            first.nameWasPlayerAssigned = true;
+            RatNameSystem.SetCustomNames(save, RatSex.Male, "  Custom One  \n\ncustom-one\nCustom Two");
+            Assert.AreEqual(2, save.customMaleRatNames.Count);
+            Assert.AreEqual("Custom One\nCustom Two", RatNameSystem.CustomNamesText(save, RatSex.Male));
+            RatData second = save.rats[1];
+            second.name = "Harry";
+            RatNameSystem.EnsureUniqueNames(save, save.clock.gameTimeMs);
+            Assert.AreEqual("Harry", first.name);
+            Assert.AreNotEqual("Harry", second.name);
+        }
+
+        [Test]
+        public void PendingNewbornNamingQueueSurvivesSaveLoad()
+        {
+            ColonySaveData save = ColonyFactory.CreateNew(1000000L);
+            save.pendingNamingLitterIds.Add("pending-litter");
+            ColonySaveData loaded = SaveSystem.FromJson(SaveSystem.ToJson(save));
+            Assert.IsNotNull(loaded.pendingNamingLitterIds);
+            Assert.Contains("pending-litter", loaded.pendingNamingLitterIds);
+        }
+
+        [Test]
         public void NewGameFoundersUseAbsoluteBeginnerStats()
         {
             var save = ColonyFactory.CreateNew(1000000L);

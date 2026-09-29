@@ -5,7 +5,7 @@ namespace RatHabitat
 {
     public static class GameConfig
     {
-        public const int SaveVersion = 8;
+        public const int SaveVersion = 9;
         public const long GameDayMs = 24L * 60L * 60L * 1000L;
         public const long StartGameTimeMs = 8L * 60L * 60L * 1000L;
         // Biological timing is expressed in simulated days. The legacy
@@ -222,7 +222,7 @@ namespace RatHabitat
                 "Riley", "Robin", "Rocket", "Romeo", "Roscoe", "Rufus", "Rusty", "Sammy",
                 "Scout", "Simon", "Snoopy", "Sonny", "Stanley", "Stewie", "Teddy", "Thomas",
                 "Tiger", "Tucker", "Wallace", "Watson", "Winston", "Wolfie", "Yogi", "Ziggy"
-            }, "Jr", "Bear");
+            }, "Paws", "Bear");
         public static readonly string[] FemaleRatNames = ExpandRatNamePool(
             new[]
             {

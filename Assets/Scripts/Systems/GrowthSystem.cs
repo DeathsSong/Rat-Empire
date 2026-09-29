@@ -420,6 +420,7 @@ namespace RatHabitat
                 RatActivitySystem.SetCurrent(save, rat, "deceased", "Deceased", gameTime, "Died");
                 BreedingSystem.CancelPregnanciesForRat(save, rat.id, gameTime);
                 save.retiredRats.Add(rat);
+                RatNameSystem.RecordUsage(save, rat.name, rat.sex, rat.id, gameTime);
                 changed = true;
             }
             return changed;

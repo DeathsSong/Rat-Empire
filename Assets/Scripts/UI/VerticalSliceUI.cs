@@ -42,6 +42,7 @@ namespace RatHabitat
         private GameBootstrap game;
         private Canvas canvas;
         private Canvas headerCanvas;
+        private GraphicRaycaster headerRaycaster;
         private CanvasScaler canvasScaler;
         private RectTransform safeRoot;
         private RectTransform headerContent;
@@ -53,6 +54,12 @@ namespace RatHabitat
         private ScrollRect settingsScroll;
         private Button keepScreenAwakeButton;
         private Text keepScreenAwakeStatusText;
+        private InputField customMaleNamesInput;
+        private InputField customFemaleNamesInput;
+        private Text customNamesStatusText;
+        private Button clearCustomNamesButton;
+        private Button confirmClearCustomNamesButton;
+        private Button cancelClearCustomNamesButton;
         private readonly Dictionary<string, Button> alertPreferenceButtons = new Dictionary<string, Button>();
         private Text alertPreferencesStatusText;
         private RectTransform developerToolsOverlay;
@@ -63,6 +70,19 @@ namespace RatHabitat
         private RectTransform eventLogOverlay;
         private RectTransform eventLogCard;
         private RectTransform eventLogContent;
+        private RectTransform renameOverlay;
+        private RectTransform renameCard;
+        private InputField renameInput;
+        private Text renameStatusText;
+        private string renameRatId;
+        private bool renameOpen;
+        private RectTransform namingOverlay;
+        private RectTransform namingCard;
+        private RectTransform namingContent;
+        private ScrollRect namingScroll;
+        private Text namingStatusText;
+        private bool namingOpen;
+        private readonly Dictionary<string, InputField> pendingNamingInputs = new Dictionary<string, InputField>();
         private Text clockText;
         private Text walletText;
         private Text liveEventText;
@@ -225,9 +245,13 @@ namespace RatHabitat
             ratAnimationShowcase = GetComponent<RatAnimationShowcase>();
             if (ratAnimationShowcase == null) ratAnimationShowcase = gameObject.AddComponent<RatAnimationShowcase>();
             ratAnimationShowcase.Configure(game.RatVisualFactory, FindAnimationShowcaseSample());
-            BuildShell();
+            if (canvas == null)
+                BuildShell();
+            else
+                EnsureHeaderNavigationReady();
             welcomeOpen = game.WelcomePopupPending;
-            GrowthSystem.SetSimulationPaused(welcomeOpen);
+            if (!welcomeOpen && game.HasPendingLitterNaming) OpenPendingLitterNaming();
+            GrowthSystem.SetSimulationPaused(welcomeOpen || game.HasPendingLitterNaming);
             ready = true;
             Refresh(true);
         }
@@ -255,6 +279,7 @@ namespace RatHabitat
                         fallbackTouchFingerId = touch.fingerId;
                         fallbackTouchDownPosition = touch.position;
                         fallbackTouchRelay = FindFallbackRelay(touch.position);
+                        LogNavigationDiagnostics("touch-down", touch.position, fallbackTouchRelay);
                         RegisterUiPointerDown(touch.fingerId);
                     }
                     else if (touch.phase == TouchPhase.Ended && touch.fingerId == fallbackTouchFingerId)
@@ -281,6 +306,7 @@ namespace RatHabitat
             {
                 fallbackMouseDownPosition = Input.mousePosition;
                 fallbackMouseRelay = FindFallbackRelay(fallbackMouseDownPosition);
+                LogNavigationDiagnostics("mouse-down", fallbackMouseDownPosition, fallbackMouseRelay);
                 RegisterUiPointerDown(-1);
             }
             else if (Input.GetMouseButtonUp(0))
@@ -422,9 +448,92 @@ namespace RatHabitat
         {
             if (!ready) return false;
             DirectUiClickRelay relay = FindFallbackRelay(screenPoint);
+            LogNavigationDiagnostics("page-release", screenPoint, relay);
             if (relay == null) return IsModalOverlayOpen;
             relay.InvokeFallback(int.MinValue);
             return true;
+        }
+
+        /// <summary>
+        /// Development-only navigation/input diagnostics. The fixed header is
+        /// intentionally kept out of the generated page hierarchy, so this
+        /// reports both the EventSystem's top hit and the relay selected by the
+        /// manual WebGL/mobile fallback. It is silent in release builds.
+        /// </summary>
+        private void LogNavigationDiagnostics(string context, Vector2 screenPoint, DirectUiClickRelay fallbackRelay)
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (canvas == null) return;
+
+            string eventSystemHit = "none";
+            EventSystem eventSystem = EventSystem.current;
+            if (eventSystem != null)
+            {
+                var eventData = new PointerEventData(eventSystem)
+                {
+                    position = screenPoint,
+                    pointerId = -1,
+                };
+                var results = new List<RaycastResult>();
+                eventSystem.RaycastAll(eventData, results);
+                if (results.Count > 0 && results[0].gameObject != null)
+                    eventSystemHit = results[0].gameObject.name;
+            }
+
+            var activeOverlays = new List<string>();
+            AddActiveOverlayDiagnostic(activeOverlays, "welcome", welcomeOverlay, welcomeOpen);
+            AddActiveOverlayDiagnostic(activeOverlays, "settings", settingsOverlay, settingsOpen);
+            AddActiveOverlayDiagnostic(activeOverlays, "developer", developerToolsOverlay, developerToolsOpen);
+            AddActiveOverlayDiagnostic(activeOverlays, "animation", ratAnimationShowcaseOverlay, ratAnimationShowcaseOpen);
+            AddActiveOverlayDiagnostic(activeOverlays, "events", eventLogOverlay, eventLogOpen);
+            AddActiveOverlayDiagnostic(activeOverlays, "rename", renameOverlay, renameOpen);
+            AddActiveOverlayDiagnostic(activeOverlays, "naming", namingOverlay, namingOpen);
+            string overlayState = activeOverlays.Count == 0 ? "none" : string.Join(",", activeOverlays.ToArray());
+            string relayName = fallbackRelay == null ? "none" : fallbackRelay.gameObject.name;
+            string headerState = BuildHeaderDiagnosticState();
+            Debug.Log("[Rat UI Navigation] " + context +
+                " pointer=" + screenPoint +
+                " eventSystemHit=" + eventSystemHit +
+                " fallbackHit=" + relayName +
+                " panel=" + activeMainPanel +
+                " overlays=" + overlayState +
+                " myRatsBlocker=" + IsBlockerActive(myRatsInputBlocker) +
+                " familyTreeBlocker=" + IsBlockerActive(familyTreeInputBlocker) +
+                " header=" + headerState);
+#endif
+        }
+
+        private static void AddActiveOverlayDiagnostic(List<string> output, string label, RectTransform overlay, bool state)
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (state || (overlay != null && overlay.gameObject.activeInHierarchy)) output.Add(label);
+#endif
+        }
+
+        private static bool IsBlockerActive(RectTransform blocker)
+        {
+            return blocker != null && blocker.gameObject.activeInHierarchy;
+        }
+
+        private string BuildHeaderDiagnosticState()
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (topNavigationButtons == null || topNavigationButtons.Count == 0) return "none";
+            var state = new System.Text.StringBuilder();
+            foreach (var entry in topNavigationButtons)
+            {
+                if (state.Length > 0) state.Append('|');
+                Button button = entry.Value;
+                state.Append(entry.Key).Append(':')
+                    .Append(button != null && button.gameObject.activeInHierarchy ? 'A' : 'I')
+                    .Append(button != null && button.IsInteractable() ? 'E' : 'D')
+                    .Append('@').Append(button == null ? -1 : button.transform.GetSiblingIndex());
+            }
+            state.Append(";canvas=").Append(headerCanvas == null ? -1 : headerCanvas.sortingOrder);
+            return state.ToString();
+#else
+            return string.Empty;
+#endif
         }
 
         /// <summary>
@@ -442,11 +551,11 @@ namespace RatHabitat
         {
             get
             {
-                return welcomeOpen || settingsOpen || developerToolsOpen || ratAnimationShowcaseOpen || eventLogOpen ||
+                return welcomeOpen || settingsOpen || developerToolsOpen || ratAnimationShowcaseOpen || eventLogOpen || namingOpen || renameOpen ||
                     (activeMainPanel == MainPanel.MyRats && !welcomeOpen && !settingsOpen && !developerToolsOpen &&
-                     !ratAnimationShowcaseOpen && !eventLogOpen) ||
+                     !ratAnimationShowcaseOpen && !eventLogOpen && !namingOpen && !renameOpen) ||
                     (activeMainPanel == MainPanel.FamilyTree && !welcomeOpen && !settingsOpen && !developerToolsOpen &&
-                     !ratAnimationShowcaseOpen && !eventLogOpen);
+                     !ratAnimationShowcaseOpen && !eventLogOpen && !namingOpen && !renameOpen);
             }
         }
 
@@ -623,15 +732,24 @@ namespace RatHabitat
         private bool IsRelayInsideActiveModal(DirectUiClickRelay relay)
         {
             if (relay == null) return false;
+            // The fixed header is the one navigation layer that remains
+            // reachable above ordinary page/modal content. Critical first-run
+            // and newborn-naming dialogs intentionally keep it blocked until
+            // their required acknowledgement is complete.
+            if (headerContent != null && relay.transform.IsChildOf(headerContent) &&
+                !welcomeOpen && !namingOpen)
+                return true;
             RectTransform activeOverlay = null;
             if (welcomeOpen) activeOverlay = welcomeOverlay;
             else if (settingsOpen) activeOverlay = settingsOverlay;
             else if (developerToolsOpen) activeOverlay = developerToolsOverlay;
             else if (ratAnimationShowcaseOpen) activeOverlay = ratAnimationShowcaseOverlay;
             else if (eventLogOpen) activeOverlay = eventLogOverlay;
+            else if (namingOpen) activeOverlay = namingOverlay;
+            else if (renameOpen) activeOverlay = renameOverlay;
             if (activeOverlay == null && activeMainPanel == MainPanel.MyRats &&
                 !welcomeOpen && !settingsOpen && !developerToolsOpen &&
-                !ratAnimationShowcaseOpen && !eventLogOpen)
+                !ratAnimationShowcaseOpen && !eventLogOpen && !namingOpen && !renameOpen)
             {
                 // My Rats is a modal page from the world's point of view, but
                 // its own generated controls still need the normal UI fallback
@@ -641,7 +759,7 @@ namespace RatHabitat
             }
             if (activeOverlay == null && activeMainPanel == MainPanel.FamilyTree &&
                 !welcomeOpen && !settingsOpen && !developerToolsOpen &&
-                !ratAnimationShowcaseOpen && !eventLogOpen)
+                !ratAnimationShowcaseOpen && !eventLogOpen && !namingOpen && !renameOpen)
             {
                 return (pageScroll != null && relay.transform.IsChildOf(pageScroll.transform)) ||
                     (headerContent != null && relay.transform.IsChildOf(headerContent));
@@ -720,14 +838,21 @@ namespace RatHabitat
             float previousMateNormalized = mateListScroll == null ? 1f : mateListScroll.verticalNormalizedPosition;
             float previousRosterNormalized = ratRosterScroll == null ? 1f : ratRosterScroll.verticalNormalizedPosition;
             float previousStoreNormalized = storeRatListScroll == null ? 1f : storeRatListScroll.verticalNormalizedPosition;
-            RebuildContent();
-            // The one-shot flag is consumed by AddRatProfile during this
-            // rebuild. Future clock/activity refreshes use the ordinary
-            // profile-preservation path without unexpectedly carrying the
-            // navigation transition into another rebuild.
-            profileNavigationPreserveState = false;
-            if (developerToolsOpen) RebuildDeveloperToolsContent();
-            if (ratAnimationShowcaseOpen) RefreshAnimationShowcasePanel();
+            try
+            {
+                RebuildContent();
+                // The one-shot flag is consumed by AddRatProfile during this
+                // rebuild. Future clock/activity refreshes use the ordinary
+                // profile-preservation path without unexpectedly carrying the
+                // navigation transition into another rebuild.
+                profileNavigationPreserveState = false;
+                if (developerToolsOpen) RebuildDeveloperToolsContent();
+                if (ratAnimationShowcaseOpen) RefreshAnimationShowcasePanel();
+            }
+            catch (Exception exception)
+            {
+                HandlePageRebuildFailure(exception);
+            }
             lastSignature = signature;
             if (ratProfileScroll != null && game.SelectedRat != null && ratProfileScrollRatId == game.SelectedRat.id)
                 lastProfileStructureSignature = GetProfileStructureSignature(game.SelectedRat);
@@ -743,7 +868,46 @@ namespace RatHabitat
             if (ratProfileScroll != null && ratProfileScrollRatId == (game.SelectedRat == null ? string.Empty : game.SelectedRat.id))
                 ratProfileScroll.verticalNormalizedPosition = ratProfileScrollNormalized;
             RefreshLiveRatProfile();
+            // Even when a page-specific factory throws, the fixed header is
+            // independent of that hierarchy and must remain a usable escape
+            // hatch to every top-level tab.
+            EnsureHeaderNavigationReady();
             RefreshTopNavigationState();
+        }
+
+        private void HandlePageRebuildFailure(Exception exception)
+        {
+            Debug.LogException(exception);
+            try
+            {
+                if (content != null)
+                {
+                    for (int index = content.childCount - 1; index >= 0; index--)
+                    {
+                        GameObject child = content.GetChild(index).gameObject;
+                        child.SetActive(false);
+                        Destroy(child);
+                    }
+
+                    RectTransform warning = CreateCard("Page refresh warning");
+                    AddText(warning, "This page could not refresh, but navigation is still available.", 14,
+                        new Color(1f, 0.68f, 0.40f), TextAnchor.UpperLeft);
+                    AddText(warning, "See the Unity Console for the original exception.", 12,
+                        new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
+                }
+            }
+            catch (Exception fallbackException)
+            {
+                // Preserve the original exception as the useful diagnostic;
+                // the fallback UI must never turn a recoverable page error
+                // into a second unhandled exception.
+                Debug.LogException(fallbackException);
+            }
+            finally
+            {
+                EnsureHeaderNavigationReady();
+                RefreshTopNavigationState();
+            }
         }
 
         /// <summary>
@@ -872,7 +1036,7 @@ namespace RatHabitat
             headerCanvas = header.gameObject.AddComponent<Canvas>();
             headerCanvas.overrideSorting = true;
             headerCanvas.sortingOrder = canvas.sortingOrder + 20;
-            header.gameObject.AddComponent<GraphicRaycaster>();
+            headerRaycaster = header.gameObject.AddComponent<GraphicRaycaster>();
 
             var title = AddText(headerContent, "RAT EMPIRE", 16, Color.white, TextAnchor.MiddleLeft);
             title.rectTransform.anchorMin = new Vector2(0f, 0.73f);
@@ -950,6 +1114,7 @@ namespace RatHabitat
             AddSimulationSpeedButton(speedRow, 1f);
             AddSimulationSpeedButton(speedRow, 2f);
             AddSimulationSpeedButton(speedRow, 3f);
+            EnsureHeaderNavigationReady();
             RefreshTopNavigationState();
 
             var scrollObject = new GameObject("Natural Page Scroll");
@@ -1036,6 +1201,8 @@ namespace RatHabitat
             BuildDeveloperToolsPopup();
             BuildRatAnimationShowcasePopup();
             BuildEventLogPanel();
+            BuildRenamePopup();
+            BuildPendingNamingPopup();
 
             // Force the first width calculation before the first content
             // rebuild so the initial selected-rat card is already constrained.
@@ -1106,6 +1273,8 @@ namespace RatHabitat
                 eventLogCard.sizeDelta = new Vector2(modalWidth, cardHeight);
                 eventLogCard.anchoredPosition = new Vector2(0f, -HeaderHeight - 8f);
             }
+            if (renameCard != null) renameCard.sizeDelta = new Vector2(modalWidth, 0f);
+            if (namingCard != null) namingCard.sizeDelta = new Vector2(modalWidth, 0f);
             if (developerToolsViewport != null)
             {
                 float viewportHeight = Mathf.Min(720f, Mathf.Max(360f, safeRoot.rect.height - 40f));
@@ -1167,6 +1336,23 @@ namespace RatHabitat
                 new Color(0.72f, 0.84f, 0.78f), TextAnchor.UpperLeft);
             AddButtonTo(settingsCard, "Reset Alert Preferences", true,
                 game.ResetAlertPreferences, new Color(0.12f, 0.27f, 0.29f), 40f);
+            AddText(settingsCard, "Custom Rat Names", 17, Color.white, TextAnchor.UpperLeft);
+            AddText(settingsCard, "Add one name per line. These names join the built-in pools for future rats and Randomize buttons.",
+                13, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
+            AddText(settingsCard, "Male names", 13, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft);
+            customMaleNamesInput = AddMultilineInputTo(settingsCard, game.CustomNamesText(RatSex.Male), 94f);
+            AddText(settingsCard, "Female names", 13, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft);
+            customFemaleNamesInput = AddMultilineInputTo(settingsCard, game.CustomNamesText(RatSex.Female), 94f);
+            AddButtonTo(settingsCard, "Apply Custom Names", true,
+                ApplyCustomNames, new Color(0.16f, 0.38f, 0.33f), 42f);
+            customNamesStatusText = AddText(settingsCard, string.Empty, 12,
+                new Color(0.72f, 0.84f, 0.78f), TextAnchor.UpperLeft);
+            clearCustomNamesButton = AddButtonTo(settingsCard, "Clear Custom Names", true,
+                game.RequestClearCustomNameLists, new Color(0.12f, 0.27f, 0.29f), 40f);
+            confirmClearCustomNamesButton = AddButtonTo(settingsCard, "Confirm Clear Custom Names", true,
+                game.ConfirmClearCustomNameLists, new Color(0.55f, 0.16f, 0.14f), 40f);
+            cancelClearCustomNamesButton = AddButtonTo(settingsCard, "Cancel", true,
+                game.CancelClearCustomNameLists, new Color(0.14f, 0.22f, 0.25f), 40f);
             AddButtonTo(settingsCard, "Save now", true, game.SaveNow, new Color(0.16f, 0.38f, 0.33f), 46f);
             AddButtonTo(settingsCard, "Developer Tools", true, OpenDeveloperTools, new Color(0.12f, 0.27f, 0.29f), 46f);
             AddButtonTo(settingsCard, "Close Settings", true, CloseSettings, new Color(0.14f, 0.22f, 0.25f), 46f);
@@ -1198,6 +1384,7 @@ namespace RatHabitat
             settingsScroll.content = settingsCard;
             RefreshWakeLockControls();
             RefreshAlertPreferenceControls();
+            RefreshCustomNameControls();
             SetOverlayVisibility();
         }
 
@@ -1208,6 +1395,259 @@ namespace RatHabitat
                 () => game.ToggleAlertCategory(category), new Color(0.16f, 0.38f, 0.33f), 38f);
             button.gameObject.name = "Alert Preference " + category;
             alertPreferenceButtons[category] = button;
+        }
+
+        private void BuildRenamePopup()
+        {
+            renameOverlay = CreateModalOverlay("Rename Rat Modal", new Color(0.01f, 0.03f, 0.04f, 0.74f), out renameCard);
+            AddText(renameCard, "Rename Rat", 22, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
+            AddText(renameCard, "Choose a name for this rat. It will stay until you rename it again.", 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
+            renameInput = AddInputFieldTo(renameCard, string.Empty, 48f, false);
+            renameStatusText = AddText(renameCard, string.Empty, 12, new Color(1f, 0.63f, 0.42f), TextAnchor.UpperLeft);
+            RectTransform actions = CreateRect("Rename Rat Actions", renameCard);
+            var actionLayout = actions.gameObject.AddComponent<HorizontalLayoutGroup>();
+            actionLayout.spacing = 8f;
+            actionLayout.childControlWidth = true;
+            actionLayout.childControlHeight = true;
+            actionLayout.childForceExpandWidth = false;
+            Button saveButton = AddButtonTo(actions, "Save", true, ConfirmRename, new Color(0.16f, 0.38f, 0.33f), 44f);
+            SetRenameActionWidth(saveButton, 112f);
+            AddDiceButtonTo(actions, RandomizeRename, true, 44f);
+            Button cancelButton = AddButtonTo(actions, "Cancel", true, CloseRenameModal, new Color(0.14f, 0.22f, 0.25f), 44f);
+            SetRenameActionWidth(cancelButton, 112f);
+            SetOverlayVisibility();
+        }
+
+        private static void SetRenameActionWidth(Button button, float width)
+        {
+            if (button == null) return;
+            LayoutElement layout = button.GetComponent<LayoutElement>();
+            if (layout == null) layout = button.gameObject.AddComponent<LayoutElement>();
+            layout.minWidth = width;
+            layout.preferredWidth = width;
+            layout.flexibleWidth = 1f;
+        }
+
+        private void BuildPendingNamingPopup()
+        {
+            namingOverlay = CreateModalOverlay("Newborn Naming Modal", new Color(0.01f, 0.03f, 0.04f, 0.80f), out namingCard);
+            AddText(namingCard, "Name the new pinkies", 22, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
+            AddText(namingCard, "The game is paused while you name this litter. Each pup needs its own name.", 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
+            var scrollObject = new GameObject("Newborn Naming Scroll");
+            scrollObject.transform.SetParent(namingCard, false);
+            namingScroll = scrollObject.AddComponent<ScrollRect>();
+            namingScroll.horizontal = false;
+            namingScroll.vertical = true;
+            namingScroll.movementType = ScrollRect.MovementType.Clamped;
+            namingScroll.inertia = true;
+            namingScroll.scrollSensitivity = 30f;
+            var scrollLayout = scrollObject.AddComponent<LayoutElement>();
+            scrollLayout.preferredHeight = 330f;
+            scrollLayout.minHeight = 180f;
+            var scrollRect = scrollObject.GetComponent<RectTransform>();
+            var viewport = CreateRect("Newborn Naming Viewport", scrollRect);
+            viewport.anchorMin = Vector2.zero;
+            viewport.anchorMax = Vector2.one;
+            viewport.offsetMin = Vector2.zero;
+            viewport.offsetMax = Vector2.zero;
+            var viewportImage = viewport.gameObject.AddComponent<Image>();
+            viewportImage.color = new Color(0f, 0f, 0f, 0.04f);
+            viewportImage.raycastTarget = true;
+            viewport.gameObject.AddComponent<RectMask2D>();
+            namingContent = CreateRect("Newborn Naming Content", viewport);
+            namingContent.anchorMin = new Vector2(0f, 1f);
+            namingContent.anchorMax = new Vector2(1f, 1f);
+            namingContent.pivot = new Vector2(0.5f, 1f);
+            namingContent.anchoredPosition = Vector2.zero;
+            namingContent.sizeDelta = new Vector2(0f, 0f);
+            var contentLayout = namingContent.gameObject.AddComponent<VerticalLayoutGroup>();
+            contentLayout.spacing = 7f;
+            contentLayout.childControlWidth = true;
+            contentLayout.childControlHeight = true;
+            contentLayout.childForceExpandWidth = true;
+            contentLayout.childForceExpandHeight = false;
+            var contentFitter = namingContent.gameObject.AddComponent<ContentSizeFitter>();
+            contentFitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+            namingScroll.viewport = viewport;
+            namingScroll.content = namingContent;
+            namingStatusText = AddText(namingCard, string.Empty, 12, new Color(1f, 0.63f, 0.42f), TextAnchor.UpperLeft);
+            RectTransform actions = CreateRect("Newborn Naming Actions", namingCard);
+            var actionLayout = actions.gameObject.AddComponent<HorizontalLayoutGroup>();
+            actionLayout.spacing = 8f;
+            actionLayout.childControlWidth = true;
+            actionLayout.childControlHeight = true;
+            actionLayout.childForceExpandWidth = true;
+            AddButtonTo(actions, "Randomize All", true, game.RandomizeAllPendingPupNames, new Color(0.14f, 0.29f, 0.29f), 44f);
+            AddButtonTo(actions, "Continue", true, ApprovePendingNaming, new Color(0.16f, 0.38f, 0.33f), 44f);
+            SetOverlayVisibility();
+        }
+
+        private InputField AddInputFieldTo(Transform parent, string value, float height, bool multiline)
+        {
+            var root = new GameObject("Name Input");
+            root.transform.SetParent(parent, false);
+            var image = root.AddComponent<Image>();
+            image.color = new Color(0.09f, 0.17f, 0.18f, 1f);
+            image.raycastTarget = true;
+            var layout = root.AddComponent<LayoutElement>();
+            layout.preferredHeight = height;
+            layout.minHeight = height;
+            var input = root.AddComponent<InputField>();
+            input.targetGraphic = image;
+            input.lineType = multiline ? InputField.LineType.MultiLineNewline : InputField.LineType.SingleLine;
+            input.contentType = InputField.ContentType.Standard;
+            input.characterLimit = multiline ? 0 : RatNameSystem.MaximumNameLength;
+            var textObject = new GameObject("Input Text");
+            textObject.transform.SetParent(root.transform, false);
+            var text = textObject.AddComponent<Text>();
+            text.font = ResolveUiFont();
+            text.fontSize = UiFontSize(14);
+            text.color = Color.white;
+            text.alignment = multiline ? TextAnchor.UpperLeft : TextAnchor.MiddleLeft;
+            text.horizontalOverflow = HorizontalWrapMode.Wrap;
+            text.verticalOverflow = VerticalWrapMode.Overflow;
+            text.raycastTarget = false;
+            text.rectTransform.anchorMin = Vector2.zero;
+            text.rectTransform.anchorMax = Vector2.one;
+            text.rectTransform.offsetMin = new Vector2(10f, 5f);
+            text.rectTransform.offsetMax = new Vector2(-10f, -5f);
+            input.textComponent = text;
+            input.text = value ?? string.Empty;
+            return input;
+        }
+
+        private InputField AddMultilineInputTo(Transform parent, string value, float height)
+        {
+            return AddInputFieldTo(parent, value, height, true);
+        }
+
+        private void ApplyCustomNames()
+        {
+            if (game == null) return;
+            game.ApplyCustomNameLists(customMaleNamesInput == null ? string.Empty : customMaleNamesInput.text,
+                customFemaleNamesInput == null ? string.Empty : customFemaleNamesInput.text);
+            if (customNamesStatusText != null) customNamesStatusText.text = "Custom names applied.";
+        }
+
+        public void RefreshCustomNameControls()
+        {
+            if (game == null) return;
+            if (customMaleNamesInput != null && !customMaleNamesInput.isFocused) customMaleNamesInput.text = game.CustomNamesText(RatSex.Male);
+            if (customFemaleNamesInput != null && !customFemaleNamesInput.isFocused) customFemaleNamesInput.text = game.CustomNamesText(RatSex.Female);
+            bool confirm = game.CustomNamesClearConfirmationPending;
+            if (clearCustomNamesButton != null) clearCustomNamesButton.gameObject.SetActive(!confirm);
+            if (confirmClearCustomNamesButton != null) confirmClearCustomNamesButton.gameObject.SetActive(confirm);
+            if (cancelClearCustomNamesButton != null) cancelClearCustomNamesButton.gameObject.SetActive(confirm);
+        }
+
+        private void OpenRenameModal(string ratId)
+        {
+            RatData rat = BreedingSystem.FindHistoricalRat(game.Save, ratId);
+            if (rat == null) return;
+            renameRatId = rat.id;
+            renameOpen = true;
+            if (renameInput != null) renameInput.text = rat.name;
+            if (renameStatusText != null) renameStatusText.text = string.Empty;
+            SetOverlayVisibility();
+        }
+
+        private void ConfirmRename()
+        {
+            if (game == null || string.IsNullOrEmpty(renameRatId)) return;
+            string error;
+            if (!game.TryRenameRat(renameRatId, renameInput == null ? string.Empty : renameInput.text, out error))
+            {
+                if (renameStatusText != null) renameStatusText.text = error;
+                return;
+            }
+            CloseRenameModal();
+        }
+
+        private void RandomizeRename()
+        {
+            if (game == null || string.IsNullOrEmpty(renameRatId)) return;
+            string name = game.RandomizeRatName(renameRatId);
+            if (renameInput != null) renameInput.text = name;
+            if (renameStatusText != null) renameStatusText.text = "Random name selected. Save to keep it.";
+        }
+
+        private void CloseRenameModal()
+        {
+            renameOpen = false;
+            renameRatId = null;
+            SetOverlayVisibility();
+            Refresh(true);
+        }
+
+        public void OpenPendingLitterNaming()
+        {
+            if (game == null || !game.HasPendingLitterNaming) return;
+            namingOpen = true;
+            welcomeOpen = false;
+            settingsOpen = false;
+            developerToolsOpen = false;
+            ratAnimationShowcaseOpen = false;
+            eventLogOpen = false;
+            GrowthSystem.SetSimulationPaused(true);
+            RefreshPendingNamingPopup();
+            SetOverlayVisibility();
+        }
+
+        public void RefreshPendingNamingPopup()
+        {
+            if (namingContent == null || game == null) return;
+            for (int index = namingContent.childCount - 1; index >= 0; index--)
+                DestroyImmediate(namingContent.GetChild(index).gameObject);
+            pendingNamingInputs.Clear();
+            foreach (RatData pup in game.PendingNamingPups)
+            {
+                if (pup == null) continue;
+                RectTransform row = CreateRect("Newborn Name " + pup.id, namingContent);
+                var rowLayout = row.gameObject.AddComponent<HorizontalLayoutGroup>();
+                rowLayout.spacing = 6f;
+                rowLayout.childControlWidth = true;
+                rowLayout.childControlHeight = true;
+                rowLayout.childForceExpandWidth = false;
+                Text label = AddTextTo(row, ColonyFactory.DisplayName(pup), 13, Color.white, TextAnchor.MiddleLeft);
+                var labelLayout = label.gameObject.AddComponent<LayoutElement>();
+                labelLayout.preferredWidth = 105f;
+                InputField input = AddInputFieldTo(row, pup.name, 44f, false);
+                input.GetComponent<LayoutElement>().flexibleWidth = 1f;
+                pendingNamingInputs[pup.id] = input;
+                string pupId = pup.id;
+                AddDiceButtonTo(row, () =>
+                {
+                    string randomized = game.RandomizePendingPupName(pupId);
+                    if (pendingNamingInputs.ContainsKey(pupId)) pendingNamingInputs[pupId].text = randomized;
+                }, true, 44f);
+            }
+            Canvas.ForceUpdateCanvases();
+            if (namingScroll != null) namingScroll.verticalNormalizedPosition = 1f;
+        }
+
+        private void ApprovePendingNaming()
+        {
+            if (game == null) return;
+            foreach (KeyValuePair<string, InputField> entry in pendingNamingInputs)
+            {
+                string error;
+                if (!game.TryRenamePendingPup(entry.Key, entry.Value == null ? string.Empty : entry.Value.text, out error))
+                {
+                    if (namingStatusText != null) namingStatusText.text = error;
+                    return;
+                }
+            }
+            if (!game.ApprovePendingLitterNames()) return;
+            if (!game.HasPendingLitterNaming) namingOpen = false;
+            if (namingOpen) RefreshPendingNamingPopup();
+            SetOverlayVisibility();
+        }
+
+        public void ClosePendingLitterNaming()
+        {
+            namingOpen = false;
+            SetOverlayVisibility();
+            Refresh(true);
         }
 
         public void RefreshAlertPreferenceControls()
@@ -1570,8 +2010,9 @@ namespace RatHabitat
             overlay.anchorMax = Vector2.one;
             overlay.offsetMin = Vector2.zero;
             // Cover the complete canvas so no world raycast, drag, or zoom
-            // can leak through a modal. The overlay is inserted first, which
-            // leaves the always-visible header above it as the close path.
+            // can leak through a modal. The overlay is placed above page and
+            // profile content; the dedicated header Canvas still remains above
+            // it as the reliable navigation layer.
             overlay.offsetMax = Vector2.zero;
             var dimmer = overlay.gameObject.AddComponent<Image>();
             dimmer.color = dimColor;
@@ -1587,7 +2028,7 @@ namespace RatHabitat
             var blockerImage = blocker.gameObject.AddComponent<Image>();
             blockerImage.color = new Color(0f, 0f, 0f, 0.01f);
             blockerImage.raycastTarget = true;
-            overlay.SetAsFirstSibling();
+            overlay.SetAsLastSibling();
 
             card = CreateRect(name + " Card", overlay);
             card.anchorMin = new Vector2(0.5f, 0.5f);
@@ -1625,17 +2066,14 @@ namespace RatHabitat
             var button = objectRoot.AddComponent<Button>();
             button.targetGraphic = image;
             button.navigation = new Navigation { mode = Navigation.Mode.None };
-            if (panel == MainPanel.Habitat)
-            {
-                // Habitat is the same escape hatch as the profile's
-                // "Return to Habitat" action: clear the selected entity and
-                // leave the player looking at the unobstructed habitat.
-                button.onClick.AddListener(ReturnToHabitatFromNavigation);
-            }
-            else
-            {
-                button.onClick.AddListener(() => ToggleTopPanel(panel));
-            }
+            // Keep the fixed header on the same guarded input path as all
+            // generated controls. This avoids a rebuild leaving the header on
+            // a separate direct-listener path while a page relay is still
+            // holding the pointer sequence. Configure adds the one listener
+            // exactly once and also gives the manual WebGL/mobile fallback a
+            // stable hit target.
+            var clickRelay = objectRoot.AddComponent<DirectUiClickRelay>();
+            clickRelay.Configure(this, button, () => ToggleTopPanel(panel));
             var labelText = AddTextTo(objectRoot.transform, label, 13, Color.white, TextAnchor.MiddleCenter);
             labelText.rectTransform.anchorMin = Vector2.zero;
             labelText.rectTransform.anchorMax = Vector2.one;
@@ -1645,6 +2083,58 @@ namespace RatHabitat
             topNavigationImages[panel] = image;
             topNavigationLabels[panel] = labelText;
             return button;
+        }
+
+        /// <summary>
+        /// Reasserts the fixed navigation contract after a page/modal rebuild.
+        /// The header itself is created once in BuildShell; only its state is
+        /// refreshed, so page content cannot destroy listeners or create a
+        /// duplicate set of top buttons.
+        /// </summary>
+        private void EnsureHeaderNavigationReady()
+        {
+            if (headerCanvas != null && canvas != null)
+            {
+                // Critical welcome and newborn naming dialogs intentionally
+                // own input until acknowledged. All ordinary pages and
+                // optional popups leave the header above page/modal content.
+                headerCanvas.overrideSorting = true;
+                headerCanvas.sortingOrder = (welcomeOpen || namingOpen)
+                    ? canvas.sortingOrder - 1
+                    : canvas.sortingOrder + 20;
+                Transform headerParent = headerCanvas.transform.parent;
+                if (headerParent != null && headerCanvas.transform.GetSiblingIndex() != headerParent.childCount - 1)
+                    headerCanvas.transform.SetAsLastSibling();
+                if (headerRaycaster == null)
+                    headerRaycaster = headerCanvas.gameObject.GetComponent<GraphicRaycaster>();
+                if (headerRaycaster == null)
+                    headerRaycaster = headerCanvas.gameObject.AddComponent<GraphicRaycaster>();
+                headerRaycaster.enabled = true;
+                headerRaycaster.blockingObjects = GraphicRaycaster.BlockingObjects.None;
+            }
+
+            foreach (var entry in topNavigationButtons)
+            {
+                Button button = entry.Value;
+                if (button == null) continue;
+                if (!button.gameObject.activeSelf) button.gameObject.SetActive(true);
+                button.interactable = true;
+                Image image = button.GetComponent<Image>();
+                if (image != null) image.raycastTarget = true;
+                Text label = button.GetComponentInChildren<Text>(true);
+                if (label != null) label.raycastTarget = false;
+            }
+            foreach (var entry in simulationSpeedButtons)
+            {
+                Button button = entry.Value;
+                if (button == null) continue;
+                if (!button.gameObject.activeSelf) button.gameObject.SetActive(true);
+                button.interactable = true;
+                Image image = button.GetComponent<Image>();
+                if (image != null) image.raycastTarget = true;
+                Text label = button.GetComponentInChildren<Text>(true);
+                if (label != null) label.raycastTarget = false;
+            }
         }
 
         private Button AddSimulationSpeedButton(Transform parent, float speed)
@@ -1661,36 +2151,9 @@ namespace RatHabitat
 
         private void ReturnToHabitatFromNavigation()
         {
-            bool collapse = activeMainPanel == MainPanel.Habitat;
-            ResetMyRatsSortState();
-            if (game != null)
-            {
-                game.DeactivateMultipleSelection();
-                game.ClearSelectionForNavigation();
-            }
-            expandedMyRatsId = null;
-            familyTreeSubjectId = null;
-            ResetProfileInformationExpansion();
-            welcomeOpen = false;
-            settingsOpen = false;
-            developerToolsOpen = false;
-            ratAnimationShowcaseOpen = false;
-            eventLogOpen = false;
-            activeMainPanel = collapse ? MainPanel.None : MainPanel.Habitat;
-
-            if (game != null)
-            {
-                if (game.BreedingOpen) game.CloseBreeding();
-                // The selection was cleared above. Rebuild once below so the
-                // habitat page and the selected navigation state are applied
-                // atomically; calling ReturnToHabitat here would refresh the
-                // old page once in between and could leave stale profile
-                // content visible for a frame.
-            }
-
-            SetOverlayVisibility();
-            Refresh(true);
-            RefreshTopNavigationState();
+            // Kept as a compatibility wrapper for older generated callers;
+            // all navigation now uses the single tab transition below.
+            ToggleTopPanel(MainPanel.Habitat);
         }
 
         private void ToggleTopPanel(MainPanel panel)
@@ -1746,6 +2209,12 @@ namespace RatHabitat
             developerToolsOpen = false;
             ratAnimationShowcaseOpen = false;
             eventLogOpen = false;
+            // Rename is an optional modal. A top-level navigation choice is
+            // authoritative, so close it before rebuilding the requested
+            // page instead of leaving its full-screen blocker over the new
+            // tab.
+            renameOpen = false;
+            renameRatId = null;
 
             if (game != null && game.BreedingOpen && panel != MainPanel.Breeding)
             {
@@ -1763,6 +2232,12 @@ namespace RatHabitat
                 game.ClearSelectionForNavigation();
 
             activeMainPanel = samePanel ? MainPanel.None : panel;
+            // Apply the new input ownership before rebuilding the page. This
+            // removes the previous page blocker and clears its pointer state
+            // in the same transition that changes the authoritative tab, so
+            // a rebuild can never leave an old My Rats/Family Tree shield
+            // intercepting the next header tap for one rendered frame.
+            SetOverlayVisibility();
             Refresh(true);
             SetOverlayVisibility();
             RefreshTopNavigationState();
@@ -1770,6 +2245,7 @@ namespace RatHabitat
 
         private void RefreshTopNavigationState()
         {
+            EnsureHeaderNavigationReady();
             foreach (var entry in topNavigationButtons)
             {
                 Button button = entry.Value;
@@ -1823,27 +2299,33 @@ namespace RatHabitat
             // header deliberately renders above panels, but temporarily place
             // it below this overlay so its raycaster cannot bypass the modal
             // blocker while a genuinely new colony is paused.
-            if (headerCanvas != null)
-                headerCanvas.sortingOrder = welcomeOpen ? canvas.sortingOrder - 1 : canvas.sortingOrder + 20;
+            EnsureHeaderNavigationReady();
             if (welcomeOverlay != null) welcomeOverlay.gameObject.SetActive(welcomeOpen);
-            if (settingsOverlay != null) settingsOverlay.gameObject.SetActive(settingsOpen && !welcomeOpen);
-            if (developerToolsOverlay != null) developerToolsOverlay.gameObject.SetActive(developerToolsOpen && !welcomeOpen && !settingsOpen);
-            if (ratAnimationShowcaseOverlay != null) ratAnimationShowcaseOverlay.gameObject.SetActive(ratAnimationShowcaseOpen && !welcomeOpen && !settingsOpen && !developerToolsOpen);
-            if (eventLogOverlay != null) eventLogOverlay.gameObject.SetActive(eventLogOpen && !welcomeOpen && !settingsOpen && !developerToolsOpen && !ratAnimationShowcaseOpen);
+            if (settingsOverlay != null) settingsOverlay.gameObject.SetActive(settingsOpen && !welcomeOpen && !namingOpen && !renameOpen);
+            if (developerToolsOverlay != null) developerToolsOverlay.gameObject.SetActive(developerToolsOpen && !welcomeOpen && !settingsOpen && !namingOpen && !renameOpen);
+            if (ratAnimationShowcaseOverlay != null) ratAnimationShowcaseOverlay.gameObject.SetActive(ratAnimationShowcaseOpen && !welcomeOpen && !settingsOpen && !developerToolsOpen && !namingOpen && !renameOpen);
+            if (eventLogOverlay != null) eventLogOverlay.gameObject.SetActive(eventLogOpen && !welcomeOpen && !settingsOpen && !developerToolsOpen && !ratAnimationShowcaseOpen && !namingOpen && !renameOpen);
+            if (renameOverlay != null) renameOverlay.gameObject.SetActive(renameOpen && !welcomeOpen && !namingOpen);
+            if (namingOverlay != null) namingOverlay.gameObject.SetActive(namingOpen && !welcomeOpen);
             if (myRatsInputBlocker != null)
             {
                 bool blockWorldForMyRats = activeMainPanel == MainPanel.MyRats &&
                     !welcomeOpen && !settingsOpen && !developerToolsOpen &&
-                    !ratAnimationShowcaseOpen && !eventLogOpen;
+                    !ratAnimationShowcaseOpen && !eventLogOpen && !namingOpen && !renameOpen;
                 myRatsInputBlocker.gameObject.SetActive(blockWorldForMyRats);
             }
             if (familyTreeInputBlocker != null)
             {
                 bool blockWorldForFamilyTree = activeMainPanel == MainPanel.FamilyTree &&
                     !welcomeOpen && !settingsOpen && !developerToolsOpen &&
-                    !ratAnimationShowcaseOpen && !eventLogOpen;
+                    !ratAnimationShowcaseOpen && !eventLogOpen && !namingOpen && !renameOpen;
                 familyTreeInputBlocker.gameObject.SetActive(blockWorldForFamilyTree);
             }
+            // Overlay activation can change sibling order. Reassert the
+            // header contract after all blockers have been toggled so the
+            // navigation canvas remains the final pointer layer for every
+            // ordinary page and optional modal.
+            EnsureHeaderNavigationReady();
         }
 
         private void CloseWelcome()
@@ -1873,8 +2355,10 @@ namespace RatHabitat
             developerToolsOpen = false;
             ratAnimationShowcaseOpen = false;
             eventLogOpen = false;
+            renameOpen = false;
             settingsOpen = true;
             activeMainPanel = MainPanel.Settings;
+            RefreshCustomNameControls();
             SetOverlayVisibility();
             // Settings owns the navigation state immediately. Rebuild the
             // page now so a profile cannot remain underneath as stale page
@@ -1899,6 +2383,8 @@ namespace RatHabitat
             developerToolsOpen = false;
             ratAnimationShowcaseOpen = false;
             eventLogOpen = false;
+            renameOpen = false;
+            namingOpen = false;
             activeMainPanel = MainPanel.None;
             SetOverlayVisibility();
             Refresh(true);
@@ -1911,6 +2397,7 @@ namespace RatHabitat
             settingsOpen = false;
             ratAnimationShowcaseOpen = false;
             eventLogOpen = false;
+            renameOpen = false;
             developerToolsOpen = true;
             activeMainPanel = MainPanel.DeveloperTools;
             RebuildDeveloperToolsContent();
@@ -1924,6 +2411,7 @@ namespace RatHabitat
             ratAnimationShowcaseOpen = false;
             settingsOpen = true;
             eventLogOpen = false;
+            renameOpen = false;
             activeMainPanel = MainPanel.Settings;
             SetOverlayVisibility();
             RefreshTopNavigationState();
@@ -1942,6 +2430,8 @@ namespace RatHabitat
             developerToolsOpen = false;
             ratAnimationShowcaseOpen = false;
             eventLogOpen = false;
+            renameOpen = false;
+            namingOpen = false;
             activeMainPanel = MainPanel.None;
             SetOverlayVisibility();
             RefreshTopNavigationState();
@@ -3069,6 +3559,9 @@ namespace RatHabitat
 
             AddExpandedRatProfileDetails(more, rat, 14);
             AddRatActivityHistory(more, rat);
+
+            AddButtonTo(more, "Rename Rat", true, () => OpenRenameModal(rat.id),
+                new Color(0.20f, 0.34f, 0.38f), 42f);
 
             AddButtonTo(more, "Family Tree", true, () => OpenFamilyTree(rat.id),
                 new Color(0.22f, 0.34f, 0.43f), 42f);
@@ -5241,18 +5734,7 @@ namespace RatHabitat
             // one font on every generated label also makes the shared
             // ColonyFactory.DisplayName formatter render consistently across
             // profiles, lists, family history, and event messages.
-            if (builtInUiFont == null)
-            {
-                builtInUiFont = Resources.Load<Font>(BundledUiFontResourcePath);
-                if (builtInUiFont == null)
-                    builtInUiFont = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-                if (builtInUiFont == null && !uiFontWarningLogged)
-                {
-                    uiFontWarningLogged = true;
-                    Debug.LogError("[Rat Habitat] UI font could not be loaded from Resources/UI/NotoSansJP-Regular or LegacyRuntime.ttf. Generated controls will remain active, but text rendering needs an available UI font.");
-                }
-            }
-            text.font = builtInUiFont;
+            text.font = ResolveUiFont();
             text.text = value;
             text.fontSize = UiFontSize(fontSize);
             text.color = color;
@@ -5275,9 +5757,73 @@ namespace RatHabitat
             return text;
         }
 
+        /// <summary>
+        /// Resolve the shared runtime font once, with guarded fallbacks. A
+        /// missing optional font must never throw while the shell is being
+        /// built; otherwise Unity leaves the generated button backgrounds in
+        /// place but none of their labels are rendered.
+        /// </summary>
+        private static Font ResolveUiFont()
+        {
+            if (builtInUiFont != null) return builtInUiFont;
+            try
+            {
+                builtInUiFont = Resources.Load<Font>(BundledUiFontResourcePath);
+                if (builtInUiFont == null)
+                    builtInUiFont = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+                if (builtInUiFont == null)
+                    builtInUiFont = Resources.GetBuiltinResource<Font>("Arial.ttf");
+            }
+            catch (Exception exception)
+            {
+                if (!uiFontWarningLogged)
+                {
+                    uiFontWarningLogged = true;
+                    Debug.LogError("[Rat Habitat] UI font lookup failed; generated controls remain active. " + exception);
+                }
+            }
+            if (builtInUiFont == null && !uiFontWarningLogged)
+            {
+                uiFontWarningLogged = true;
+                Debug.LogError("[Rat Habitat] UI font could not be loaded from Resources/UI/NotoSansJP-Regular, LegacyRuntime.ttf, or Arial.ttf. Generated controls remain active but need an available Unity UI font.");
+            }
+            return builtInUiFont;
+        }
+
         private Button AddButton(RectTransform parent, string label, bool enabled, UnityEngine.Events.UnityAction action)
         {
             return AddButtonTo(parent, label, enabled, action, new Color(0.16f, 0.38f, 0.33f), 48f);
+        }
+
+        private Button AddDiceButtonTo(Transform parent, UnityEngine.Events.UnityAction action, bool enabled, float height)
+        {
+            Button button = AddButtonTo(parent, string.Empty, enabled, action,
+                new Color(0.14f, 0.29f, 0.29f), height, false);
+            button.gameObject.name = "Randomize name";
+            LayoutElement layout = button.GetComponent<LayoutElement>();
+            if (layout != null)
+            {
+                layout.preferredWidth = height;
+                layout.minWidth = height;
+                layout.flexibleWidth = 0f;
+            }
+
+            RectTransform iconRoot = CreateRect("Dice Icon", button.transform);
+            iconRoot.anchorMin = new Vector2(0.5f, 0.5f);
+            iconRoot.anchorMax = new Vector2(0.5f, 0.5f);
+            iconRoot.pivot = new Vector2(0.5f, 0.5f);
+            iconRoot.anchoredPosition = Vector2.zero;
+            float iconSize = Mathf.Clamp(height * 0.66f, 28f, 34f);
+            iconRoot.sizeDelta = new Vector2(iconSize, iconSize);
+            DiceIconGraphic icon = iconRoot.gameObject.AddComponent<DiceIconGraphic>();
+            icon.color = enabled
+                ? new Color(0.96f, 0.92f, 0.78f, 1f)
+                : new Color(0.55f, 0.58f, 0.56f, 1f);
+            icon.raycastTarget = false;
+
+            RatUiTooltip tooltip = button.gameObject.AddComponent<RatUiTooltip>();
+            tooltip.Label = "Randomize name.";
+            return button;
         }
 
         private static void ValidatePortraitSlot(Transform slot, string label)
@@ -5310,7 +5856,7 @@ namespace RatHabitat
             aspect.aspectRatio = 1f;
         }
 
-        private Button AddButtonTo(Transform parent, string label, bool enabled, UnityEngine.Events.UnityAction action, Color color, float height)
+        private Button AddButtonTo(Transform parent, string label, bool enabled, UnityEngine.Events.UnityAction action, Color color, float height, bool includeLabel = true)
         {
             var objectRoot = new GameObject("Button");
             objectRoot.transform.SetParent(parent, false);
@@ -5328,11 +5874,14 @@ namespace RatHabitat
             var layout = objectRoot.AddComponent<LayoutElement>();
             layout.preferredHeight = height;
             layout.minHeight = height;
-            var labelText = AddTextTo(objectRoot.transform, label, 14, enabled ? Color.white : new Color(0.55f, 0.58f, 0.56f), TextAnchor.MiddleCenter);
-            labelText.rectTransform.anchorMin = Vector2.zero;
-            labelText.rectTransform.anchorMax = Vector2.one;
-            labelText.rectTransform.offsetMin = new Vector2(10f, 4f);
-            labelText.rectTransform.offsetMax = new Vector2(-10f, -4f);
+            if (includeLabel)
+            {
+                var labelText = AddTextTo(objectRoot.transform, label, 14, enabled ? Color.white : new Color(0.55f, 0.58f, 0.56f), TextAnchor.MiddleCenter);
+                labelText.rectTransform.anchorMin = Vector2.zero;
+                labelText.rectTransform.anchorMax = Vector2.one;
+                labelText.rectTransform.offsetMin = new Vector2(10f, 4f);
+                labelText.rectTransform.offsetMax = new Vector2(-10f, -4f);
+            }
             return button;
         }
 

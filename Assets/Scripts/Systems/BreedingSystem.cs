@@ -1140,7 +1140,11 @@ namespace RatHabitat
                     RatActivitySystem.SetCurrent(save, pup, "nest", "Resting in nest", gameTime);
                     save.rats.Add(pup);
                     save.ratIds.Add(pup.id);
-                    RatNameSystem.EnsureUniqueName(save, pup, gameTime);
+                    // Parent IDs are set before naming so the only automatic
+                    // Jr/Roman suffixes that can be produced are direct-lineage
+                    // names. Otherwise the normal stable, non-repeating pool
+                    // is used.
+                    RatNameSystem.EnsureBirthName(save, pup, gameTime);
                     createdPups.Add(pup);
                     litter.pupIds.Add(pup.id);
                 }

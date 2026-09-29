@@ -22,6 +22,10 @@ namespace RatHabitat
         private const float GroundingRefreshIntervalSeconds = 0.075f;
         private float presentationCullingTimer;
         private const float PresentationCullingIntervalSeconds = 0.20f;
+        // A malformed saved rat or an optional visual asset must not abort the
+        // entire presentation pass. Keep the warning once per stable ID so a
+        // late-game save cannot flood the WebGL console every frame.
+        private readonly HashSet<string> presentationFailureWarnings = new HashSet<string>();
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
         private readonly HashSet<string> pinkiePlacementDiagnostics = new HashSet<string>();
 #endif
@@ -46,7 +50,15 @@ namespace RatHabitat
 
         public void Render(ColonySaveData save, Vector3 nestPosition)
         {
-            EnsureVisualFactory();
+            try
+            {
+                EnsureVisualFactory();
+            }
+            catch (System.Exception exception)
+            {
+                Debug.LogError("[Rat Habitat] Rat visual factory could not initialize; habitat geometry and UI will remain available. " + exception);
+                return;
+            }
             if (save == null)
             {
                 ClearRats();
@@ -56,7 +68,14 @@ namespace RatHabitat
             // Placement is relationship-driven (pregnancy, dependent
             // Pinkies, and stage/sex). Reconcile it before reusing any stable
             // visual roots so a render never leaves a rat in its old zone.
-            EnclosureSystem.RecalculateAssignments(save);
+            try
+            {
+                EnclosureSystem.RecalculateAssignments(save);
+            }
+            catch (System.Exception exception)
+            {
+                Debug.LogError("[Rat Habitat] Rat enclosure reconciliation failed; preserving saved placements for this render. " + exception);
+            }
             var liveIds = new HashSet<string>();
             var pinkieSlotById = BuildPinkieSlotMap(save.rats);
             int pinkieIndex = 0;
@@ -69,69 +88,77 @@ namespace RatHabitat
             {
                 if (rat == null || string.IsNullOrEmpty(rat.id)) continue;
                 liveIds.Add(rat.id);
-                liveRats[rat.id] = rat;
-                Vector3 position = GetPosition(rat, nestPosition, pinkieSlotById, ref pinkieIndex, ref maleIndex, ref femaleIndex, ref nurseryIndex, ref breedingIndex, ref pairingIndex);
+                try
+                {
+                    liveRats[rat.id] = rat;
+                    Vector3 position = GetPosition(rat, nestPosition, pinkieSlotById, ref pinkieIndex, ref maleIndex, ref femaleIndex, ref nurseryIndex, ref breedingIndex, ref pairingIndex);
 
-                GameObject root;
-                RatVisualController controller;
-                if (!ratRoots.TryGetValue(rat.id, out root) || root == null || !visualControllers.TryGetValue(rat.id, out controller) || controller == null)
-                {
-                    CreateRatRoot(rat, position, out root, out controller);
-                }
-                else
-                {
-                    // Rendering can be requested by a simulation-only update,
-                    // such as the Pairing Habitat's 30-second pregnancy
-                    // check. Preserve the live root position while the rat
-                    // remains in its current enclosure so a UI/world refresh
-                    // cannot teleport every rat back to its spawn slot.
-                    // Reposition only when the current root is outside the
-                    // authoritative enclosure (for example, after a manual
-                    // move, pregnancy relocation, birth, or growth).
+                    GameObject root;
+                    RatVisualController controller;
+                    if (!ratRoots.TryGetValue(rat.id, out root) || root == null || !visualControllers.TryGetValue(rat.id, out controller) || controller == null)
+                    {
+                        CreateRatRoot(rat, position, out root, out controller);
+                    }
+                    else
+                    {
+                        // Rendering can be requested by a simulation-only update,
+                        // such as the Pairing Habitat's 30-second pregnancy
+                        // check. Preserve the live root position while the rat
+                        // remains in its current enclosure so a UI/world refresh
+                        // cannot teleport every rat back to its spawn slot.
+                        // Reposition only when the current root is outside the
+                        // authoritative enclosure (for example, after a manual
+                        // move, pregnancy relocation, birth, or growth).
+                        if (rat.stage == RatStage.Pinkie)
+                        {
+                            // Pinkies are nest-bound. Reapply their deterministic
+                            // litter arrangement on every render so an old saved
+                            // grid position cannot survive a refresh or reload.
+                            root.transform.position = position;
+                        }
+                        else if (!EnclosureSystem.IsInside(rat.enclosure, root.transform.position, 0f))
+                        {
+                            // Do not snap an adult or young rat out of the nest
+                            // during a harmless render refresh. RatHabitatBehavior
+                            // steers its next movement around the nest instead.
+                            root.transform.position = position;
+                        }
+                        else if (Mathf.Abs(root.transform.position.y - position.y) > 0.02f)
+                        {
+                            // Correct only the enclosure-specific vertical plane
+                            // reference. Preserve the live X/Z position so a
+                            // pairing check or UI refresh cannot reset movement.
+                            root.transform.position = new Vector3(
+                                root.transform.position.x,
+                                position.y,
+                                root.transform.position.z);
+                        }
+                        root.name = rat.name + " Rat";
+                        ConfigureRatCollider(root, rat.stage);
+                        RemoveLegacySelectionMarker(root);
+                    }
+
+                    controller.Configure(visualFactory);
+                    // A controller keeps the visual child between renders. When a
+                    // saved stage changes, it performs the configured smooth
+                    // pinkie->young or young->adult transition.
+                    controller.Apply(rat, true);
+                    ConfigureRatCollider(root, rat.stage, controller);
+                    // Pinkies are nest-bound and never receive a behavior
+                    // component. Attach/configure movement only after the visual
+                    // stage has been confirmed to be Young or Adult.
                     if (rat.stage == RatStage.Pinkie)
                     {
-                        // Pinkies are nest-bound. Reapply their deterministic
-                        // litter arrangement on every render so an old saved
-                        // grid position cannot survive a refresh or reload.
-                        root.transform.position = position;
+                        ApplyDeterministicPinkiePose(rat, root, controller);
                     }
-                    else if (!EnclosureSystem.IsInside(rat.enclosure, root.transform.position, 0f))
-                    {
-                        // Do not snap an adult or young rat out of the nest
-                        // during a harmless render refresh. RatHabitatBehavior
-                        // steers its next movement around the nest instead.
-                        root.transform.position = position;
-                    }
-                    else if (Mathf.Abs(root.transform.position.y - position.y) > 0.02f)
-                    {
-                        // Correct only the enclosure-specific vertical plane
-                        // reference. Preserve the live X/Z position so a
-                        // pairing check or UI refresh cannot reset movement.
-                        root.transform.position = new Vector3(
-                            root.transform.position.x,
-                            position.y,
-                            root.transform.position.z);
-                    }
-                    root.name = rat.name + " Rat";
-                    ConfigureRatCollider(root, rat.stage);
-                    RemoveLegacySelectionMarker(root);
+                    EnsureBehaviorForStage(root, rat);
+                    configuredSelectionBoundsVersions[rat.id] = controller.SelectionBoundsVersion;
                 }
-
-                controller.Configure(visualFactory);
-                // A controller keeps the visual child between renders. When a
-                // saved stage changes, it performs the configured smooth
-                // pinkie->young or young->adult transition.
-                controller.Apply(rat, true);
-                ConfigureRatCollider(root, rat.stage, controller);
-                // Pinkies are nest-bound and never receive a behavior
-                // component. Attach/configure movement only after the visual
-                // stage has been confirmed to be Young or Adult.
-                if (rat.stage == RatStage.Pinkie)
+                catch (System.Exception exception)
                 {
-                    ApplyDeterministicPinkiePose(rat, root, controller);
+                    if (presentationFailureWarnings.Add(rat.id))
+                        Debug.LogError("[Rat Habitat] Rat presentation failed for '" + (rat.name ?? rat.id) + "' (" + rat.id + "). The saved rat was kept and the remaining colony will continue rendering. " + exception);
                 }
-                EnsureBehaviorForStage(root, rat);
-                configuredSelectionBoundsVersions[rat.id] = controller.SelectionBoundsVersion;
             }
 
             RemoveMissingRats(liveIds);
@@ -489,6 +516,7 @@ namespace RatHabitat
                 behaviors.Remove(id);
                 liveRats.Remove(id);
                 configuredSelectionBoundsVersions.Remove(id);
+                presentationFailureWarnings.Remove(id);
             }
         }
 
@@ -503,6 +531,7 @@ namespace RatHabitat
             behaviors.Clear();
             liveRats.Clear();
             configuredSelectionBoundsVersions.Clear();
+            presentationFailureWarnings.Clear();
         }
 
         private static Dictionary<string, int> BuildPinkieSlotMap(List<RatData> rats)

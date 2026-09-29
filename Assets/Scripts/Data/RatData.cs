@@ -188,6 +188,10 @@ namespace RatHabitat
     {
         public string id;
         public string name;
+        // True only after the player explicitly confirms or randomizes this
+        // rat's name. Automatic migration and future save passes must never
+        // overwrite a player-owned name.
+        public bool nameWasPlayerAssigned;
         public string species = "rat";
         public RatSex sex;
         public RatStage stage;
@@ -368,10 +372,14 @@ namespace RatHabitat
     {
         public string normalizedName;
         public string displayName;
+        public string firstName;
+        public string secondName;
         public RatSex sex;
         public string ratId;
         public long lastUsedGameTime;
         public long lastUsedRealTimestamp;
+        public long lastFirstNameUsedGameTime;
+        public long lastSecondNameUsedGameTime;
     }
 
     [Serializable]
@@ -445,6 +453,15 @@ namespace RatHabitat
         // established living names during a UI refresh.
         public List<RatNameUseData> ratNameHistory = new List<RatNameUseData>();
         public int ratNameMigrationVersion;
+        // Player-provided names are additive to the built-in pools and are
+        // kept separate by sex so a custom list can be edited without
+        // changing the shipped name data.
+        public List<string> customMaleRatNames = new List<string>();
+        public List<string> customFemaleRatNames = new List<string>();
+        // Birth creates and saves the pups before the player names them. A
+        // queue of litter IDs makes the naming modal recoverable after reload
+        // and supports multiple births resolved in one simulation pass.
+        public List<string> pendingNamingLitterIds = new List<string>();
         // Top-alert preferences are separate from event history. Disabling a
         // category hides its live banner but never removes its history row.
         public List<AlertPreferenceData> alertPreferences = new List<AlertPreferenceData>();
@@ -485,6 +502,9 @@ namespace RatHabitat
             storeRatListings ??= new List<StoreRatListingData>();
             usedLitterNames ??= new List<string>();
             ratNameHistory ??= new List<RatNameUseData>();
+            customMaleRatNames ??= new List<string>();
+            customFemaleRatNames ??= new List<string>();
+            pendingNamingLitterIds ??= new List<string>();
             alertPreferences ??= new List<AlertPreferenceData>();
             eventLog ??= new List<ColonyEventData>();
             if (string.IsNullOrEmpty(myRatsSortField)) myRatsSortField = "Name";

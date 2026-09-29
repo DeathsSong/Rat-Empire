@@ -348,22 +348,15 @@ namespace RatHabitat
                 ? maleFamily
                 : PickMarkingFamily(random);
 
+            string maleId = "store_adult_male_" + cycle;
+            string maleName = RatNameSystem.GenerateAvailableName(save, maleId, RatSex.Male, save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
             save.storeRatListings.Add(CreateListing(
-                "store_adult_male_" + cycle,
-                RatSex.Male,
-                MaleNames[random.Next(MaleNames.Length)],
-                maleFamily,
-                random,
-                sharedBaseline,
-                qualityCap));
+                maleId, RatSex.Male, maleName, maleFamily, random, sharedBaseline, qualityCap));
+
+            string femaleId = "store_adult_female_" + cycle;
+            string femaleName = RatNameSystem.GenerateAvailableName(save, femaleId, RatSex.Female, save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
             save.storeRatListings.Add(CreateListing(
-                "store_adult_female_" + cycle,
-                RatSex.Female,
-                FemaleNames[random.Next(FemaleNames.Length)],
-                femaleFamily,
-                random,
-                sharedBaseline,
-                qualityCap));
+                femaleId, RatSex.Female, femaleName, femaleFamily, random, sharedBaseline, qualityCap));
         }
 
         private static RatData CreateGeneratedAdultRat(
