@@ -105,6 +105,7 @@ namespace RatHabitat
         private RectTransform familyTreeViewport;
         private RectTransform familyTreeContent;
         private RectTransform familyTreeInputBlocker;
+        private FamilyTreePanZoomController familyTreePanZoom;
         // The previous default was 1.0. A 0.72 scale starts the tree 28%
         // farther out while keeping the authored layout and connector geometry.
         private const float FamilyTreeInitialZoom = 0.72f;
@@ -123,6 +124,7 @@ namespace RatHabitat
         private RectTransform content;
         private VerticalLayoutGroup contentLayout;
         private string lastSignature;
+        private string lastFamilyTreeStructureSignature;
         private bool ready;
         private static Font builtInUiFont;
         private static bool uiFontWarningLogged;
@@ -966,6 +968,23 @@ namespace RatHabitat
             string signature = game.UiSignature;
             if (!force && signature == lastSignature) return;
 
+            // The full UI signature includes the live clock so profiles and
+            // countdown labels can refresh. Family Tree geometry has no
+            // clock-driven content, however. Rebuilding it on every clock
+            // tick destroys the active viewport/controller in the middle of
+            // a drag, which makes zoom appear to work while panning fails.
+            // Only rebuild the tree when its subject or family/reproductive
+            // structure actually changes.
+            if (!force && activeMainPanel == MainPanel.FamilyTree &&
+                familyTreePanZoom != null &&
+                string.Equals(game.UiStructureSignature, lastFamilyTreeStructureSignature,
+                    StringComparison.Ordinal))
+            {
+                lastSignature = signature;
+                UpdateFamilyTreeZoomInput();
+                return;
+            }
+
             // Do not destroy the profile ScrollRect while Unity is processing
             // a drag or its inertial tail. Defer the data refresh until the
             // gesture settles; otherwise a harmless clock/activity update can
@@ -1034,6 +1053,9 @@ namespace RatHabitat
                 HandlePageRebuildFailure(exception);
             }
             lastSignature = signature;
+            lastFamilyTreeStructureSignature = activeMainPanel == MainPanel.FamilyTree
+                ? game.UiStructureSignature
+                : null;
             if (ratProfileScroll != null && game.SelectedRat != null && ratProfileScrollRatId == game.SelectedRat.id)
                 lastProfileStructureSignature = GetProfileStructureSignature(game.SelectedRat);
             else
@@ -1089,6 +1111,15 @@ namespace RatHabitat
                 EnsureHeaderNavigationReady();
                 ReassertPageInputLayerOrder();
                 RefreshTopNavigationState();
+            }
+        }
+
+        private bool IsFamilyTreePanDragging
+        {
+            get
+            {
+                return activeMainPanel == MainPanel.FamilyTree &&
+                    familyTreePanZoom != null && familyTreePanZoom.IsDragging;
             }
         }
 
@@ -2989,6 +3020,18 @@ namespace RatHabitat
                 return;
             }
 
+            // The dedicated controller owns pointer drag, wheel, and pinch
+            // input. Keep the legacy state fields synchronized for refresh
+            // preservation and diagnostics, but do not run a second zoom
+            // implementation in this UI owner.
+            if (familyTreePanZoom != null)
+            {
+                familyTreeZoom = familyTreePanZoom.Zoom;
+                familyTreeNormalizedPosition = familyTreePanZoom.NormalizedPosition;
+                TrackFamilyTreeGestureDiagnostics();
+                return;
+            }
+
             TrackFamilyTreeGestureDiagnostics();
 
             if (Input.touchCount >= 2)
@@ -3027,9 +3070,9 @@ namespace RatHabitat
         }
 
         /// <summary>
-        /// ScrollRect owns the actual pan gesture. This development-only
-        /// observer records the gesture boundary without becoming another
-        /// drag handler, so it cannot steal the event from the tree ScrollRect.
+        /// The dedicated FamilyTreePanZoomController owns the actual pan
+        /// gesture. This development-only observer records the gesture
+        /// boundary without becoming another drag handler.
         /// </summary>
         private void TrackFamilyTreeGestureDiagnostics()
         {
@@ -3135,9 +3178,45 @@ namespace RatHabitat
         private void SetFamilyTreeZoom(float value)
         {
             familyTreeZoom = Mathf.Clamp(value, 0.35f, 2.2f);
+            if (familyTreePanZoom != null)
+            {
+                familyTreePanZoom.SetZoom(familyTreeZoom);
+                familyTreeNormalizedPosition = familyTreePanZoom.NormalizedPosition;
+                return;
+            }
             if (familyTreeContent == null) return;
             familyTreeContent.localScale = Vector3.one * familyTreeZoom;
             Canvas.ForceUpdateCanvases();
+        }
+
+        private string BuildFamilyTreeGestureContext()
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            Image viewportImage = familyTreeViewport == null
+                ? null : familyTreeViewport.GetComponent<Image>();
+            GraphicRaycaster raycaster = familyTreeViewport == null
+                ? null : familyTreeViewport.GetComponentInParent<GraphicRaycaster>();
+            CanvasGroup viewportGroup = familyTreeViewport == null
+                ? null : familyTreeViewport.GetComponentInParent<CanvasGroup>();
+            return "viewport=" + (familyTreeViewport != null && familyTreeViewport.gameObject.activeInHierarchy) +
+                " raycast=" + (viewportImage != null && viewportImage.raycastTarget) +
+                " graphicRaycaster=" + (raycaster != null && raycaster.isActiveAndEnabled) +
+                " mask=" + (familyTreeViewport != null && familyTreeViewport.GetComponent<RectMask2D>() != null) +
+                " treeScroll=" + (familyTreeScroll != null && familyTreeScroll.isActiveAndEnabled) +
+                ",enabled=" + (familyTreeScroll != null && familyTreeScroll.enabled) +
+                " pageScroll=" + (pageScroll != null && pageScroll.isActiveAndEnabled) +
+                ",enabled=" + (pageScroll != null && pageScroll.enabled) +
+                " pageVertical=" + (pageScroll != null && pageScroll.vertical) +
+                " familyBlocker=" + IsBlockerActive(familyTreeInputBlocker) +
+                " myRatsBlocker=" + IsBlockerActive(myRatsInputBlocker) +
+                " modals=welcome:" + welcomeOpen + ",naming:" + namingOpen +
+                ",rename:" + renameOpen + ",settings:" + settingsOpen +
+                ",dev:" + developerToolsOpen + ",events:" + eventLogOpen +
+                " canvasGroup=" + (viewportGroup == null
+                    ? "none" : ("blocks=" + viewportGroup.blocksRaycasts + ",interactable=" + viewportGroup.interactable));
+#else
+            return string.Empty;
+#endif
         }
 
         private void RefreshAnimationShowcasePanel()
@@ -3242,13 +3321,22 @@ namespace RatHabitat
                 string.Equals(familyTreeRenderedSubjectId, familyTreeSubjectId, StringComparison.Ordinal);
             if (preserveFamilyTreeView)
             {
-                familyTreeNormalizedPosition = new Vector2(
-                    familyTreeScroll.horizontalNormalizedPosition,
-                    familyTreeScroll.verticalNormalizedPosition);
+                if (familyTreePanZoom != null)
+                {
+                    familyTreeZoom = familyTreePanZoom.Zoom;
+                    familyTreeNormalizedPosition = familyTreePanZoom.NormalizedPosition;
+                }
+                else
+                {
+                    familyTreeNormalizedPosition = new Vector2(
+                        familyTreeScroll.horizontalNormalizedPosition,
+                        familyTreeScroll.verticalNormalizedPosition);
+                }
             }
             familyTreeScroll = null;
             familyTreeViewport = null;
             familyTreeContent = null;
+            familyTreePanZoom = null;
             familyTreePinching = false;
             familyTreeMouseGestureActive = false;
             familyTreeTouchGestureFingerId = -1;
@@ -4447,6 +4535,10 @@ namespace RatHabitat
             scroll.inertia = true;
             scroll.movementType = ScrollRect.MovementType.Elastic;
             scroll.scrollSensitivity = 30f;
+            // Keep the component reference for diagnostics and migration,
+            // but do not let the nested ScrollRect compete with the dedicated
+            // FamilyTreePanZoomController below for the same pointer stream.
+            scroll.enabled = false;
 
             var viewport = CreateRect("Family Tree Viewport", scrollRoot);
             familyTreeViewport = viewport;
@@ -4479,6 +4571,7 @@ namespace RatHabitat
             }
             treeContent.localScale = Vector3.one * familyTreeZoom;
             scroll.content = treeContent;
+            familyTreePanZoom = viewport.gameObject.AddComponent<FamilyTreePanZoomController>();
 
             var entries = new List<FamilyTreeEntry>();
             BuildFamilyTreeAncestors(subject, 0, "root", null, entries);
@@ -4554,8 +4647,8 @@ namespace RatHabitat
                 AddFamilyTreeNode(treeContent, entry, nodeWidth, nodeHeight);
             }
             Canvas.ForceUpdateCanvases();
-            scroll.horizontalNormalizedPosition = familyTreeNormalizedPosition.x;
-            scroll.verticalNormalizedPosition = familyTreeNormalizedPosition.y;
+            familyTreePanZoom.Configure(viewport, treeContent, familyTreeZoom,
+                familyTreeNormalizedPosition, ResolveUiFont(), BuildFamilyTreeGestureContext);
             familyTreeRenderedSubjectId = familyTreeSubjectId;
             familyTreeViewResetRequested = false;
         }
@@ -6548,6 +6641,7 @@ namespace RatHabitat
 
             private void HandleButtonClick()
             {
+                if (owner != null && owner.IsFamilyTreePanDragging) return;
                 InvokeOnce(pointerSequenceId);
             }
 
@@ -6582,6 +6676,7 @@ namespace RatHabitat
             public void OnPointerClick(PointerEventData eventData)
             {
                 pointerSequenceActive = false;
+                if (owner != null && owner.IsFamilyTreePanDragging) return;
                 int pointerId = eventData == null ? pointerSequenceId : eventData.pointerId;
                 if (pointerSequenceActionInvoked) return;
                 if (eventData == null || eventData.button == PointerEventData.InputButton.Left)
@@ -6608,6 +6703,7 @@ namespace RatHabitat
 
             private bool InvokeOnce(int pointerId)
             {
+                if (owner != null && owner.IsFamilyTreePanDragging) return false;
                 if (!IsFallbackInteractable || lastInvokeFrame == Time.frameCount) return false;
                 if (owner != null && !owner.CanInvokeUiAction(pointerId)) return false;
                 lastInvokeFrame = Time.frameCount;
