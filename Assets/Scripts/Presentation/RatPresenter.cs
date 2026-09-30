@@ -22,6 +22,12 @@ namespace RatHabitat
         private readonly Dictionary<string, Vector3> pinkieNestAnchors = new Dictionary<string, Vector3>();
         private readonly Dictionary<string, RatEnclosure> pinkieNestAnchorEnclosures =
             new Dictionary<string, RatEnclosure>();
+        // Pinkies are static nest occupants. Their rendered bounds are only
+        // needed when the visual changes or when an external system has
+        // actually moved the root. Avoid doing a full skinned-renderer bounds
+        // solve for every pinkie on every rendered frame.
+        private readonly Dictionary<string, int> pinkieGroundedSelectionBoundsVersions =
+            new Dictionary<string, int>();
         // The imported pinkie visual has an authored local facing correction.
         // Keep the deterministic litter pose keyed to the actual visual object
         // so a render refresh does not multiply the same rotation again.
@@ -31,6 +37,8 @@ namespace RatHabitat
         private HabitatBuilder habitat;
         private float groundingRefreshTimer;
         private const float GroundingRefreshIntervalSeconds = 0.075f;
+        private float pinkieGroundingRefreshTimer;
+        private const float PinkieGroundingRefreshIntervalSeconds = 0.35f;
         private float presentationCullingTimer;
         private const float PresentationCullingIntervalSeconds = 0.20f;
         // A malformed saved rat or an optional visual asset must not abort the
@@ -166,6 +174,7 @@ namespace RatHabitat
                         // rat back into the pinkie stage later.
                         pinkieNestAnchors.Remove(rat.id);
                         pinkieNestAnchorEnclosures.Remove(rat.id);
+                        pinkieGroundedSelectionBoundsVersions.Remove(rat.id);
                     }
 
                     controller.Configure(visualFactory);
@@ -203,6 +212,9 @@ namespace RatHabitat
 
         private void LateUpdate()
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            UnityEngine.Profiling.Profiler.BeginSample("Rat Empire/Presentation/RatPresenter.LateUpdate");
+#endif
             // Animator deformation and code-driven movement both occur before
             // this point in the frame. Keep the stable selection surfaces
             // aligned with the currently visible mesh instead of leaving a
@@ -210,6 +222,9 @@ namespace RatHabitat
             groundingRefreshTimer -= Time.unscaledDeltaTime;
             bool refreshGrounding = groundingRefreshTimer <= 0f;
             if (refreshGrounding) groundingRefreshTimer = GroundingRefreshIntervalSeconds;
+            pinkieGroundingRefreshTimer -= Time.unscaledDeltaTime;
+            bool refreshPinkieGrounding = pinkieGroundingRefreshTimer <= 0f;
+            if (refreshPinkieGrounding) pinkieGroundingRefreshTimer = PinkieGroundingRefreshIntervalSeconds;
             presentationCullingTimer -= Time.unscaledDeltaTime;
             bool refreshPresentationCulling = presentationCullingTimer <= 0f;
             if (refreshPresentationCulling) presentationCullingTimer = PresentationCullingIntervalSeconds;
@@ -242,13 +257,17 @@ namespace RatHabitat
                 {
                     if (rat.stage == RatStage.Pinkie)
                     {
-                        AuditPinkieRootBeforePlacement(rat, root);
-                        // Pinkies are rendered as independent nest occupants.
-                        // Re-ground the complete rendered bounds after an
-                        // animation/growth update every rendered frame so a
-                        // visual child offset, pose, or root transform write
-                        // can never lift the pup onto the mother.
-                        PlacePinkieOnNest(rat, root, controller);
+                        // Pinkies are static nest occupants. Re-ground on a
+                        // bounded cadence, on a visual-size change, or when
+                        // another system has actually changed their root.
+                        // This preserves the runtime safety check without
+                        // forcing every pinkie through multiple skinned
+                        // Renderer.bounds/overlap passes every frame.
+                        if (refreshPinkieGrounding || NeedsPinkiePlacementRefresh(rat, root, controller))
+                        {
+                            AuditPinkieRootBeforePlacement(rat, root);
+                            PlacePinkieOnNest(rat, root, controller);
+                        }
                     }
                     else if (refreshGrounding)
                     {
@@ -283,6 +302,9 @@ namespace RatHabitat
                     }
                 }
             }
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            UnityEngine.Profiling.Profiler.EndSample();
+#endif
         }
 
         public void SetSelected(string id)
@@ -687,6 +709,7 @@ namespace RatHabitat
                 pinkiePoseVisuals.Remove(id);
                 pinkieNestAnchors.Remove(id);
                 pinkieNestAnchorEnclosures.Remove(id);
+                pinkieGroundedSelectionBoundsVersions.Remove(id);
                 configuredSelectionBoundsVersions.Remove(id);
                 presentationFailureWarnings.Remove(id);
             }
@@ -705,6 +728,7 @@ namespace RatHabitat
             pinkiePoseVisuals.Clear();
             pinkieNestAnchors.Clear();
             pinkieNestAnchorEnclosures.Clear();
+            pinkieGroundedSelectionBoundsVersions.Clear();
             configuredSelectionBoundsVersions.Clear();
             presentationFailureWarnings.Clear();
         }
@@ -950,6 +974,26 @@ namespace RatHabitat
             // from relocating the pup on subsequent frames.
             pinkieNestAnchors[rat.id] = root.transform.position;
             pinkieNestAnchorEnclosures[rat.id] = rat.enclosure;
+            pinkieGroundedSelectionBoundsVersions[rat.id] = controller.SelectionBoundsVersion;
+        }
+
+        private bool NeedsPinkiePlacementRefresh(RatData rat, GameObject root, RatVisualController controller)
+        {
+            if (rat == null || root == null || controller == null || string.IsNullOrEmpty(rat.id)) return true;
+            if (root.transform.parent != transform) return true;
+
+            Vector3 anchor;
+            if (!TryGetPinkieNestAnchor(rat, out anchor)) return true;
+
+            int groundedVersion;
+            if (!pinkieGroundedSelectionBoundsVersions.TryGetValue(rat.id, out groundedVersion) ||
+                groundedVersion != controller.SelectionBoundsVersion)
+                return true;
+
+            // This is intentionally a cheap transform comparison. If a
+            // nursing, save/load, animation-root, or enclosure pass writes a
+            // new position, the next frame repairs it from Renderer.bounds.
+            return (root.transform.position - anchor).sqrMagnitude > 0.000004f;
         }
 
         private bool TryGetPinkieNestAnchor(RatData rat, out Vector3 anchor)

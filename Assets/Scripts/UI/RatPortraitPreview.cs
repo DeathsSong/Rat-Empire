@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.UI;
 
 namespace RatHabitat
 {
@@ -23,6 +24,20 @@ namespace RatHabitat
         // presentation zoom unchanged while adding only preview rotation.
         private const float PortraitPadding = 3.80f;
         private const float PortraitFramingScale = (0.34f / 2.4f) / 0.8f;
+        // Portraits are cached presentation thumbnails, not simulation
+        // visuals. Rendering every cached portrait every browser frame is a
+        // large mobile-WebGL GPU cost once Store/My Rats/family-tree previews
+        // have accumulated a larger colony. Ten refreshes per second keeps
+        // the previews visibly alive while avoiding a camera render storm.
+        private const float PreviewRefreshIntervalSeconds = 0.10f;
+        private const float PreviewConsumerScanIntervalSeconds = 0.25f;
+        private const int MaxPortraitsRenderedPerRefresh = 4;
+        private float previewRefreshTimer;
+        private float previewConsumerScanTimer;
+        private bool hasVisiblePortraitConsumer;
+        private int portraitCursor;
+        private readonly List<RawImage> portraitConsumers = new List<RawImage>(32);
+        private readonly List<PortraitEntry> portraitRenderEntries = new List<PortraitEntry>(32);
 
         private sealed class PortraitEntry
         {
@@ -111,10 +126,33 @@ namespace RatHabitat
 
             float deltaTime = Time.unscaledDeltaTime;
             if (deltaTime <= 0f) return;
-
-            foreach (var item in portraits)
+            previewConsumerScanTimer -= deltaTime;
+            if (previewConsumerScanTimer <= 0f)
             {
-                PortraitEntry entry = item.Value;
+                previewConsumerScanTimer = PreviewConsumerScanIntervalSeconds;
+                hasVisiblePortraitConsumer = HasVisiblePortraitConsumer();
+            }
+            // Cached previews remain available for page rebuilds, but when no
+            // active RawImage is displaying one (for example, while the
+            // player is in Habitat or Settings), there is no reason to keep
+            // rendering hidden cameras on the GPU.
+            if (!hasVisiblePortraitConsumer) return;
+            previewRefreshTimer -= deltaTime;
+            if (previewRefreshTimer > 0f) return;
+            previewRefreshTimer = PreviewRefreshIntervalSeconds;
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            UnityEngine.Profiling.Profiler.BeginSample("Rat Empire/Presentation/RatPortraitPreview.RenderCachedPortraits");
+#endif
+            int count = portraits.Count;
+            portraitRenderEntries.Clear();
+            foreach (PortraitEntry entry in portraits.Values) portraitRenderEntries.Add(entry);
+            count = portraitRenderEntries.Count;
+            int start = count <= 0 ? 0 : portraitCursor % count;
+            int renderCount = Mathf.Min(MaxPortraitsRenderedPerRefresh, count);
+            for (int offset = 0; offset < renderCount; offset++)
+            {
+                PortraitEntry entry = portraitRenderEntries[(start + offset) % count];
                 if (entry == null || entry.visual == null || entry.texture == null) continue;
 
                 // Keep cached portraits live as a rat grows within the same
@@ -141,6 +179,27 @@ namespace RatHabitat
                 if (TryGetBounds(entry.visual, out bounds, false)) RenderEntry(entry, bounds);
                 else entry.visual.SetActive(false);
             }
+            portraitCursor = count <= 0 ? 0 : (start + Mathf.Max(1, renderCount)) % count;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            UnityEngine.Profiling.Profiler.EndSample();
+#endif
+        }
+
+        private bool HasVisiblePortraitConsumer()
+        {
+            portraitConsumers.Clear();
+            GetComponentsInChildren<RawImage>(false, portraitConsumers);
+            for (int imageIndex = 0; imageIndex < portraitConsumers.Count; imageIndex++)
+            {
+                RawImage image = portraitConsumers[imageIndex];
+                if (image == null || !image.isActiveAndEnabled || image.texture == null) continue;
+                foreach (PortraitEntry entry in portraits.Values)
+                {
+                    if (entry != null && entry.texture != null && image.texture == entry.texture)
+                        return true;
+                }
+            }
+            return false;
         }
 
         private void RenderEntry(PortraitEntry entry, Bounds bounds)
@@ -260,6 +319,7 @@ namespace RatHabitat
         {
             foreach (var item in portraits) DestroyPortraitEntry(item.Value);
             portraits.Clear();
+            portraitCursor = 0;
             DeactivateAllPreviewVisuals();
         }
 
