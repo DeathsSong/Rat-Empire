@@ -105,9 +105,20 @@ namespace RatHabitat
         private RectTransform familyTreeViewport;
         private RectTransform familyTreeContent;
         private RectTransform familyTreeInputBlocker;
-        private float familyTreeZoom = 1f;
+        // The previous default was 1.0. A 0.72 scale starts the tree 28%
+        // farther out while keeping the authored layout and connector geometry.
+        private const float FamilyTreeInitialZoom = 0.72f;
+        private float familyTreeZoom = FamilyTreeInitialZoom;
+        private string familyTreeRenderedSubjectId;
+        private bool familyTreeViewResetRequested = true;
+        private Vector2 familyTreeNormalizedPosition = new Vector2(0.5f, 0.5f);
         private float familyTreeLastPinchDistance;
         private bool familyTreePinching;
+        private bool familyTreeMouseGestureActive;
+        private Vector2 familyTreeMouseGesturePosition;
+        private int familyTreeTouchGestureFingerId = -1;
+        private Vector2 familyTreeTouchGesturePosition;
+        private float familyTreeGestureDiagnosticTimer;
         private RectTransform myRatsInputBlocker;
         private RectTransform content;
         private VerticalLayoutGroup contentLayout;
@@ -2973,8 +2984,12 @@ namespace RatHabitat
                 familyTreeContent == null || !familyTreeViewport.gameObject.activeInHierarchy)
             {
                 familyTreePinching = false;
+                familyTreeMouseGestureActive = false;
+                familyTreeTouchGestureFingerId = -1;
                 return;
             }
+
+            TrackFamilyTreeGestureDiagnostics();
 
             if (Input.touchCount >= 2)
             {
@@ -3009,6 +3024,112 @@ namespace RatHabitat
             if (!RectTransformUtility.RectangleContainsScreenPoint(familyTreeViewport, Input.mousePosition, null)) return;
             SetFamilyTreeZoom(familyTreeZoom * (1f + wheel * 0.12f));
             if (familyTreeScroll != null) familyTreeScroll.StopMovement();
+        }
+
+        /// <summary>
+        /// ScrollRect owns the actual pan gesture. This development-only
+        /// observer records the gesture boundary without becoming another
+        /// drag handler, so it cannot steal the event from the tree ScrollRect.
+        /// </summary>
+        private void TrackFamilyTreeGestureDiagnostics()
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            familyTreeGestureDiagnosticTimer -= Time.unscaledDeltaTime;
+            bool mouseInside = RectTransformUtility.RectangleContainsScreenPoint(
+                familyTreeViewport, Input.mousePosition, null);
+
+            if (Input.GetMouseButtonDown(0) && mouseInside)
+            {
+                familyTreeMouseGestureActive = true;
+                familyTreeMouseGesturePosition = Input.mousePosition;
+                familyTreeGestureDiagnosticTimer = 0f;
+                LogFamilyTreeGestureDiagnostic("pointer-down", Input.mousePosition);
+            }
+            if (familyTreeMouseGestureActive && Input.GetMouseButton(0))
+            {
+                Vector2 current = Input.mousePosition;
+                if (Vector2.Distance(familyTreeMouseGesturePosition, current) > 2f &&
+                    familyTreeGestureDiagnosticTimer <= 0f)
+                {
+                    familyTreeMouseGesturePosition = current;
+                    familyTreeGestureDiagnosticTimer = 0.25f;
+                    LogFamilyTreeGestureDiagnostic("drag", current);
+                }
+            }
+            if (familyTreeMouseGestureActive && Input.GetMouseButtonUp(0))
+            {
+                familyTreeMouseGestureActive = false;
+                LogFamilyTreeGestureDiagnostic("pointer-up", Input.mousePosition);
+            }
+
+            for (int index = 0; index < Input.touchCount; index++)
+            {
+                Touch touch = Input.GetTouch(index);
+                bool inside = RectTransformUtility.RectangleContainsScreenPoint(
+                    familyTreeViewport, touch.position, null);
+                if (touch.phase == TouchPhase.Began && inside)
+                {
+                    familyTreeTouchGestureFingerId = touch.fingerId;
+                    familyTreeTouchGesturePosition = touch.position;
+                    familyTreeGestureDiagnosticTimer = 0f;
+                    LogFamilyTreeGestureDiagnostic("touch-down", touch.position, touch.fingerId);
+                }
+                else if (touch.fingerId == familyTreeTouchGestureFingerId &&
+                    (touch.phase == TouchPhase.Moved || touch.phase == TouchPhase.Stationary))
+                {
+                    if (Vector2.Distance(familyTreeTouchGesturePosition, touch.position) > 2f &&
+                        familyTreeGestureDiagnosticTimer <= 0f)
+                    {
+                        familyTreeTouchGesturePosition = touch.position;
+                        familyTreeGestureDiagnosticTimer = 0.25f;
+                        LogFamilyTreeGestureDiagnostic("drag", touch.position, touch.fingerId);
+                    }
+                }
+                else if (touch.fingerId == familyTreeTouchGestureFingerId &&
+                    (touch.phase == TouchPhase.Ended || touch.phase == TouchPhase.Canceled))
+                {
+                    LogFamilyTreeGestureDiagnostic("touch-up", touch.position, touch.fingerId);
+                    familyTreeTouchGestureFingerId = -1;
+                }
+            }
+#endif
+        }
+
+        private void LogFamilyTreeGestureDiagnostic(string phase, Vector2 screenPoint, int pointerId = -1)
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            string hitName = "none";
+            EventSystem eventSystem = EventSystem.current;
+            if (eventSystem != null)
+            {
+                var eventData = new PointerEventData(eventSystem)
+                {
+                    position = screenPoint,
+                    pointerId = pointerId,
+                };
+                var results = new List<RaycastResult>();
+                eventSystem.RaycastAll(eventData, results);
+                if (results.Count > 0 && results[0].gameObject != null)
+                    hitName = results[0].gameObject.name;
+            }
+
+            Vector2 pan = familyTreeScroll == null
+                ? familyTreeNormalizedPosition
+                : new Vector2(familyTreeScroll.horizontalNormalizedPosition,
+                    familyTreeScroll.verticalNormalizedPosition);
+            Debug.Log("[Rat UI FamilyTree] phase=" + phase +
+                " pointer=" + pointerId +
+                " screen=" + screenPoint +
+                " hit=" + hitName +
+                " pan=" + pan +
+                " zoom=" + familyTreeZoom.ToString("0.###") +
+                " treeScroll=" + (familyTreeScroll != null && familyTreeScroll.isActiveAndEnabled) +
+                " pageScroll=" + (pageScroll != null && pageScroll.isActiveAndEnabled) +
+                " familyTreeBlocker=" + IsBlockerActive(familyTreeInputBlocker) +
+                " worldInputBlocked=" + IsModalOverlayOpen +
+                " pointerOverUi=" + (eventSystem != null &&
+                    (pointerId < 0 ? eventSystem.IsPointerOverGameObject() : eventSystem.IsPointerOverGameObject(pointerId))));
+#endif
         }
 
         private void SetFamilyTreeZoom(float value)
@@ -3116,10 +3237,21 @@ namespace RatHabitat
             liveActivityHistoryRatId = null;
             profileActivityHistoryDeferred = false;
             storePurchaseButtons.Clear();
+            bool preserveFamilyTreeView = activeMainPanel == MainPanel.FamilyTree &&
+                familyTreeScroll != null && !familyTreeViewResetRequested &&
+                string.Equals(familyTreeRenderedSubjectId, familyTreeSubjectId, StringComparison.Ordinal);
+            if (preserveFamilyTreeView)
+            {
+                familyTreeNormalizedPosition = new Vector2(
+                    familyTreeScroll.horizontalNormalizedPosition,
+                    familyTreeScroll.verticalNormalizedPosition);
+            }
             familyTreeScroll = null;
             familyTreeViewport = null;
             familyTreeContent = null;
             familyTreePinching = false;
+            familyTreeMouseGestureActive = false;
+            familyTreeTouchGestureFingerId = -1;
             liveTimedTextUpdates.Clear();
             liveUiRefreshTimer = 0f;
             for (int i = content.childCount - 1; i >= 0; i--)
@@ -3138,8 +3270,19 @@ namespace RatHabitat
             // the outer page ScrollRect so a profile drag cannot move the
             // page underneath or compete with the nested information scroll.
             if (pageScroll != null)
-                pageScroll.vertical = !(activeMainPanel == MainPanel.None &&
-                    (selectedRat != null || selectedObject != null));
+            {
+                // The family-tree ScrollRect is the sole owner of gestures
+                // inside its viewport. Leaving the outer page ScrollRect
+                // enabled creates a nested-drag race where the page consumes
+                // the pointer before the tree can pan.
+                bool familyTreeOwnsGestures = activeMainPanel == MainPanel.FamilyTree;
+                pageScroll.enabled = !familyTreeOwnsGestures;
+                pageScroll.horizontal = false;
+                pageScroll.vertical = !familyTreeOwnsGestures &&
+                    !(activeMainPanel == MainPanel.None &&
+                        (selectedRat != null || selectedObject != null));
+                if (familyTreeOwnsGestures) pageScroll.StopMovement();
+            }
             RatData profileRat = string.IsNullOrEmpty(familyTreeSubjectId)
                 ? selectedRat
                 : BreedingSystem.FindHistoricalRat(game.Save, familyTreeSubjectId);
@@ -4224,6 +4367,13 @@ namespace RatHabitat
         private void OpenFamilyTree(string ratId)
         {
             if (game == null || BreedingSystem.FindHistoricalRat(game.Save, ratId) == null) return;
+            if (activeMainPanel != MainPanel.FamilyTree ||
+                !string.Equals(familyTreeSubjectId, ratId, StringComparison.Ordinal))
+            {
+                familyTreeZoom = FamilyTreeInitialZoom;
+                familyTreeNormalizedPosition = new Vector2(0.5f, 0.5f);
+                familyTreeViewResetRequested = true;
+            }
             ResetProfileInformationExpansion();
             familyTreeSubjectId = ratId;
             activeMainPanel = MainPanel.FamilyTree;
@@ -4234,6 +4384,7 @@ namespace RatHabitat
 
         private void ReturnToFamilyTreeProfile()
         {
+            familyTreeViewResetRequested = true;
             ResetProfileInformationExpansion();
             activeMainPanel = MainPanel.None;
             Refresh(true);
@@ -4245,6 +4396,12 @@ namespace RatHabitat
         {
             RatData rat = game == null ? null : BreedingSystem.FindHistoricalRat(game.Save, ratId);
             if (rat == null) return;
+            if (!string.Equals(familyTreeSubjectId, ratId, StringComparison.Ordinal))
+            {
+                familyTreeZoom = FamilyTreeInitialZoom;
+                familyTreeNormalizedPosition = new Vector2(0.5f, 0.5f);
+                familyTreeViewResetRequested = true;
+            }
             familyTreeSubjectId = ratId;
             // Family-tree navigation is informational. Do not change the
             // habitat selection or camera while the player is exploring
@@ -4313,6 +4470,13 @@ namespace RatHabitat
             treeContent.anchorMax = new Vector2(0f, 1f);
             treeContent.pivot = new Vector2(0f, 1f);
             treeContent.anchoredPosition = Vector2.zero;
+            bool resetTreeView = familyTreeViewResetRequested ||
+                !string.Equals(familyTreeRenderedSubjectId, familyTreeSubjectId, StringComparison.Ordinal);
+            if (resetTreeView)
+            {
+                familyTreeZoom = FamilyTreeInitialZoom;
+                familyTreeNormalizedPosition = new Vector2(0.5f, 0.5f);
+            }
             treeContent.localScale = Vector3.one * familyTreeZoom;
             scroll.content = treeContent;
 
@@ -4389,8 +4553,11 @@ namespace RatHabitat
             {
                 AddFamilyTreeNode(treeContent, entry, nodeWidth, nodeHeight);
             }
-            scroll.horizontalNormalizedPosition = 0.5f;
-            scroll.verticalNormalizedPosition = 0.5f;
+            Canvas.ForceUpdateCanvases();
+            scroll.horizontalNormalizedPosition = familyTreeNormalizedPosition.x;
+            scroll.verticalNormalizedPosition = familyTreeNormalizedPosition.y;
+            familyTreeRenderedSubjectId = familyTreeSubjectId;
+            familyTreeViewResetRequested = false;
         }
 
         private void BuildFamilyTreeAncestors(RatData rat, int level, string path, string parentPath,
