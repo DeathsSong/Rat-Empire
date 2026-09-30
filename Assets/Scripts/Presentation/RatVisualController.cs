@@ -25,6 +25,9 @@ namespace RatHabitat
         private Renderer selectionBoundsRenderer;
         private Animator cachedAnimator;
         private ShadowCastingMode[] cachedShadowCastingModes;
+        private bool[] cachedRendererEnabledStates;
+        private bool diagnosticRenderersHidden;
+        private bool diagnosticShadowsDisabled;
         private bool presentationCullingInitialized;
         private bool presentationVisible = true;
         private bool presentationNear = true;
@@ -65,6 +68,7 @@ namespace RatHabitat
             Renderer selectedRenderer = selectionBoundsRenderer;
             if (selectedRenderer == null || !selectedRenderer.enabled || !selectedRenderer.gameObject.activeInHierarchy)
             {
+                if (diagnosticRenderersHidden) return false;
                 CacheBoundsRenderer();
                 selectedRenderer = selectionBoundsRenderer;
             }
@@ -141,6 +145,7 @@ namespace RatHabitat
             if (selectedRenderer == null || !selectedRenderer.enabled ||
                 !selectedRenderer.gameObject.activeInHierarchy)
             {
+                if (diagnosticRenderersHidden) return false;
                 CacheBoundsRenderer();
                 selectedRenderer = selectionBoundsRenderer;
             }
@@ -185,7 +190,7 @@ namespace RatHabitat
                 : AnimatorCullingMode.CullCompletely;
 
             if (cachedRenderers == null || cachedShadowCastingModes == null) return;
-            bool castShadows = visible && near;
+            bool castShadows = visible && near && !diagnosticShadowsDisabled;
             for (int index = 0; index < cachedRenderers.Length; index++)
             {
                 Renderer renderer = cachedRenderers[index];
@@ -194,6 +199,29 @@ namespace RatHabitat
                     ? cachedShadowCastingModes[index]
                     : ShadowCastingMode.Off;
             }
+        }
+
+        public void SetPerformanceIsolation(bool hideRenderers, bool disableShadows)
+        {
+            if (cachedRenderers == null) CacheBoundsRenderer();
+            bool rendererStateChanged = diagnosticRenderersHidden != hideRenderers;
+            bool shadowStateChanged = diagnosticShadowsDisabled != disableShadows;
+            diagnosticRenderersHidden = hideRenderers;
+            diagnosticShadowsDisabled = disableShadows;
+            if (cachedRenderers == null) return;
+
+            for (int index = 0; index < cachedRenderers.Length; index++)
+            {
+                Renderer renderer = cachedRenderers[index];
+                if (renderer == null) continue;
+                if (rendererStateChanged && cachedRendererEnabledStates != null && index < cachedRendererEnabledStates.Length)
+                    renderer.enabled = hideRenderers ? false : cachedRendererEnabledStates[index];
+                if (shadowStateChanged && cachedShadowCastingModes != null && index < cachedShadowCastingModes.Length)
+                    renderer.shadowCastingMode = disableShadows
+                        ? ShadowCastingMode.Off
+                        : cachedShadowCastingModes[index];
+            }
+            presentationCullingInitialized = false;
         }
 
         public void Configure(RatVisualFactory visualFactory)
@@ -383,6 +411,7 @@ namespace RatHabitat
             selectionBoundsRenderer = null;
             cachedAnimator = null;
             cachedShadowCastingModes = null;
+            cachedRendererEnabledStates = null;
             presentationCullingInitialized = false;
             presentationVisible = true;
             presentationNear = true;
@@ -408,11 +437,15 @@ namespace RatHabitat
             cachedShadowCastingModes = cachedRenderers == null
                 ? null
                 : new ShadowCastingMode[cachedRenderers.Length];
+            cachedRendererEnabledStates = cachedRenderers == null
+                ? null
+                : new bool[cachedRenderers.Length];
             if (cachedRenderers != null)
             {
                 for (int index = 0; index < cachedRenderers.Length; index++)
                 {
                     Renderer renderer = cachedRenderers[index];
+                    cachedRendererEnabledStates[index] = renderer != null && renderer.enabled;
                     cachedShadowCastingModes[index] = renderer == null
                         ? ShadowCastingMode.Off
                         : renderer.shadowCastingMode;
@@ -430,7 +463,7 @@ namespace RatHabitat
                 if (string.Equals(renderer.gameObject.name, "rat_mesh", System.StringComparison.OrdinalIgnoreCase))
                 {
                     selectionBoundsRenderer = renderer;
-                    return;
+                    break;
                 }
 
                 float area = renderer.bounds.size.sqrMagnitude;
@@ -439,6 +472,15 @@ namespace RatHabitat
                     selectionBoundsRenderer = renderer;
                     largestBounds = area;
                 }
+            }
+            // A stage visual can be replaced while an A/B mode is active.
+            // Apply the transient diagnostic flags to its newly cached renderers.
+            for (int i = 0; i < cachedRenderers.Length; i++)
+            {
+                Renderer renderer = cachedRenderers[i];
+                if (renderer == null) continue;
+                if (diagnosticRenderersHidden) renderer.enabled = false;
+                if (diagnosticShadowsDisabled) renderer.shadowCastingMode = ShadowCastingMode.Off;
             }
         }
 

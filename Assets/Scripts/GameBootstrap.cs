@@ -81,6 +81,7 @@ namespace RatHabitat
         private float lastViewportFrameDurationMs;
         private float lastClockFrameDurationMs;
         private float lastMovementFrameDurationMs;
+        private float lastBootstrapUpdateDurationMs;
         private string selectedRatId;
         private string selectedObjectId;
         private string parentAId;
@@ -344,6 +345,20 @@ namespace RatHabitat
                     "  tick: " + (ColonyMaintenanceIntervalGameMs / (60L * 1000L)) + " game minutes";
             }
         }
+        public string PerformanceSimulationSummary
+        {
+            get
+            {
+                return SimulationSpeedLabel + " clock=" +
+                    GrowthSystem.GameSecondsPerRealSecond(SimulationSpeed).ToString("0.##") +
+                    " game-s/real-s; steps=" + GrowthSystem.LastSimulationStepCount +
+                    "; maintenance=" + lastMaintenanceDurationMs.ToString("0.00") + "ms" +
+                    "; UI=" + lastUiRefreshDurationMs.ToString("0.00") + "ms" +
+                    "; frame work=" + lastBootstrapUpdateDurationMs.ToString("0.00") + "ms";
+            }
+        }
+        public float LastMaintenanceDurationMs { get { return lastMaintenanceDurationMs; } }
+        public float LastUiRefreshDurationMs { get { return lastUiRefreshDurationMs; } }
         public bool ResetConfirmationPending { get { return resetConfirmationPending; } }
         public bool WelcomePopupPending { get { return Save != null && Save.welcomePopupPending; } }
         public bool HasPendingLitterNaming
@@ -704,6 +719,11 @@ namespace RatHabitat
         private void Awake()
         {
             Debug.Log("[Rat Habitat] GameBootstrap.Awake started.");
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            RuntimePerformanceOverlay performanceOverlay = GetComponent<RuntimePerformanceOverlay>();
+            if (performanceOverlay == null) performanceOverlay = gameObject.AddComponent<RuntimePerformanceOverlay>();
+            performanceOverlay.Configure(this);
+#endif
             GrowthSystem.SetSimulationPaused(false);
             Application.targetFrameRate = 60;
             try
@@ -1616,6 +1636,25 @@ namespace RatHabitat
         // authoritative across WebGL frames.
         private void Update()
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            long performanceSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.BootstrapUpdate);
+            float startedAt = Time.realtimeSinceStartup;
+            try
+            {
+                UpdateCore();
+            }
+            finally
+            {
+                lastBootstrapUpdateDurationMs = (Time.realtimeSinceStartup - startedAt) * 1000f;
+                RuntimePerformanceDiagnostics.End(PerformanceProbeArea.BootstrapUpdate, performanceSample);
+            }
+#else
+            UpdateCore();
+#endif
+        }
+
+        private void UpdateCore()
+        {
             float frameSampleStartedAt = Time.realtimeSinceStartup;
             BeginPerformanceSample("Rat Empire/Frame/Viewport and Camera");
             UpdateWorldViewport();
@@ -1656,10 +1695,16 @@ namespace RatHabitat
             }
 
             frameSampleStartedAt = Time.realtimeSinceStartup;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            long clockAgeSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.ClockAndAge);
+#endif
             BeginPerformanceSample("Rat Empire/Frame/Clock and Age");
             GrowthSystem.AdvanceClock(Save, GameConfig.NowMs());
             bool ageThresholdCrossed = GrowthSystem.RefreshRatAges(Save, GameTime);
             EndPerformanceSample();
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            RuntimePerformanceDiagnostics.End(PerformanceProbeArea.ClockAndAge, clockAgeSample);
+#endif
             lastClockFrameDurationMs = (Time.realtimeSinceStartup - frameSampleStartedAt) * 1000f;
 
             // Movement and the active pairing interaction stay per-frame. All
@@ -1688,9 +1733,13 @@ namespace RatHabitat
             List<DedicatedBreedingSessionData> completedSessions = null;
             List<LitterData> newLitters = null;
 
-            bool maintenanceDue = !colonyMaintenanceInitialized ||
+            bool maintenanceDue =
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                !RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.ColonyMaintenance) &&
+#endif
+                (!colonyMaintenanceInitialized ||
                 GameTime >= nextColonyMaintenanceGameTime ||
-                ageThresholdCrossed || IsTimedSimulationWorkDue();
+                ageThresholdCrossed || IsTimedSimulationWorkDue());
             if (maintenanceDue)
             {
                 float maintenanceStartedAt = Time.realtimeSinceStartup;
@@ -1836,10 +1885,17 @@ namespace RatHabitat
                 {
                     BeginPerformanceSample("Rat Empire/UI Update");
                     float uiStartedAt = Time.realtimeSinceStartup;
-                    if (structuralPresentationChange || saleEligibilityChanged || storeChanged || births > 0 || completedSessionCount > 0)
-                        ui.Refresh(true);
-                    else
-                        ui.RefreshHeader();
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                    if (!RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.AutomaticUiRefresh))
+                    {
+#endif
+                        if (structuralPresentationChange || saleEligibilityChanged || storeChanged || births > 0 || completedSessionCount > 0)
+                            ui.Refresh(true);
+                        else
+                            ui.RefreshHeader();
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                    }
+#endif
                     if (births > 0) ui.LogBirthTransitionState("birth-ui-refresh-complete");
                     lastUiRefreshDurationMs = (Time.realtimeSinceStartup - uiStartedAt) * 1000f;
                     EndPerformanceSample();
@@ -1861,6 +1917,29 @@ namespace RatHabitat
                     if (births > 0) ui.RestoreInputStateAfterBirthTransition();
                 }
             }
+        }
+
+        public void SetPerformanceIsolation(PerformanceIsolationMode mode)
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            RuntimePerformanceDiagnostics.SetIsolationMode(mode);
+            if (rats != null) rats.ApplyPerformanceIsolationMode();
+            Debug.Log("[Performance Diagnostics] Isolation mode: " + mode + ". This mode is transient and does not modify the save.");
+#endif
+        }
+
+        public void SetPerformanceHudVisible(bool visible)
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            RuntimePerformanceDiagnostics.SetHudVisible(visible);
+#endif
+        }
+
+        public void SetPerformanceCaptureEnabled(bool enabled)
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            RuntimePerformanceDiagnostics.SetCaptureEnabled(enabled);
+#endif
         }
 
         private bool UpdateSaleEligibilitySignature()

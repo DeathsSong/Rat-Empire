@@ -673,6 +673,23 @@ namespace RatHabitat
 
         private void Update()
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            long performanceSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.RatBehaviorUpdate);
+            try
+            {
+                UpdateCore();
+            }
+            finally
+            {
+                RuntimePerformanceDiagnostics.End(PerformanceProbeArea.RatBehaviorUpdate, performanceSample);
+            }
+#else
+            UpdateCore();
+#endif
+        }
+
+        private void UpdateCore()
+        {
             if (!configured || rat == null || habitat == null) return;
             if (!animatorLookupAttempted || animator == null)
             {
@@ -690,6 +707,12 @@ namespace RatHabitat
                 ? GrowthSystem.MaximumFastRouteMovementUnitsPerFrame
                 : GrowthSystem.MaximumVisualMovementUnitsPerFrame;
             ApplySimulationAnimationSpeed();
+
+            // A/B-only diagnostic: leaves the clock and all other systems
+            // untouched while suppressing this rat's decision/movement loop.
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.RatBehavior)) return;
+#endif
 
             if (state == RatBehaviorState.Dying)
             {
@@ -780,7 +803,31 @@ namespace RatHabitat
 
         private void LateUpdate()
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            long performanceSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.RatBehaviorLateUpdate);
+            try
+            {
+                LateUpdateCore();
+            }
+            finally
+            {
+                RuntimePerformanceDiagnostics.End(PerformanceProbeArea.RatBehaviorLateUpdate, performanceSample);
+            }
+#else
+            LateUpdateCore();
+#endif
+        }
+
+        private void LateUpdateCore()
+        {
             if (!configured || rat == null || animator == null) return;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.RatAnimation))
+            {
+                animator.speed = 0f;
+                lastAppliedAnimatorSpeed = 0f;
+            }
+#endif
             float realDelta = Time.unscaledDeltaTime;
             if (diagnosticsHavePreviousPosition && realDelta > 0.0001f)
             {
@@ -936,6 +983,11 @@ namespace RatHabitat
 
         private void BeginTravel()
         {
+            BeginTravelCore();
+        }
+
+        private void BeginTravelCore()
+        {
             nestDetourWaypoints.Clear();
             nestDetourWaypointIndex = 0;
             if (rat != null && rat.nursing && EnclosureSystem.HasNest(rat.enclosure))
@@ -960,6 +1012,23 @@ namespace RatHabitat
         }
 
         private RatBehaviorTarget ChooseTarget()
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            long performanceSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.RatDestinationSelection);
+            try
+            {
+                return ChooseTargetCore();
+            }
+            finally
+            {
+                RuntimePerformanceDiagnostics.End(PerformanceProbeArea.RatDestinationSelection, performanceSample);
+            }
+#else
+            return ChooseTargetCore();
+#endif
+        }
+
+        private RatBehaviorTarget ChooseTargetCore()
         {
             if (habitat == null) return null;
             List<RatBehaviorTarget> targets = habitat.GetBehaviorTargets(rat == null ? RatEnclosure.FemaleColony : rat.enclosure);
@@ -1516,6 +1585,15 @@ namespace RatHabitat
         private void ApplySimulationAnimationSpeed()
         {
             if (animator == null || !animator.enabled) return;
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.RatAnimation))
+            {
+                if (!Mathf.Approximately(animator.speed, 0f)) animator.speed = 0f;
+                lastAppliedAnimatorSpeed = 0f;
+                return;
+            }
+#endif
 
             float statePlaybackScale = state == RatBehaviorState.Wander ||
                 state == RatBehaviorState.WalkToTarget

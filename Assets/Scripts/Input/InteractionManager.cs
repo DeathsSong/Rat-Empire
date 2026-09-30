@@ -163,6 +163,17 @@ namespace RatHabitat
 
         private void Update()
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            long performanceSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.InteractionUpdate);
+            try { UpdateCore(); }
+            finally { RuntimePerformanceDiagnostics.End(PerformanceProbeArea.InteractionUpdate, performanceSample); }
+#else
+            UpdateCore();
+#endif
+        }
+
+        private void UpdateCore()
+        {
             if (!configured || !managerReady || !isActiveAndEnabled) return;
 
             // Generated page controls normally use Unity's EventSystem. Keep

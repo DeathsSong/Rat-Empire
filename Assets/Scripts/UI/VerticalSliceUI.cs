@@ -935,6 +935,17 @@ namespace RatHabitat
 
         public void Refresh(bool force)
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            long performanceSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.UiRefresh);
+            try { RefreshCore(force); }
+            finally { RuntimePerformanceDiagnostics.End(PerformanceProbeArea.UiRefresh, performanceSample); }
+#else
+            RefreshCore(force);
+#endif
+        }
+
+        private void RefreshCore(bool force)
+        {
             if (!ready || game == null) return;
             // A birth can finish between two normal UI refreshes. Reconcile
             // the persisted naming queue before rebuilding page content so a
@@ -1039,7 +1050,13 @@ namespace RatHabitat
             float previousStoreNormalized = storeRatListScroll == null ? 1f : storeRatListScroll.verticalNormalizedPosition;
             try
             {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                long rebuildSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.UiRebuildAndLayout);
+                try { RebuildContent(); }
+                finally { RuntimePerformanceDiagnostics.End(PerformanceProbeArea.UiRebuildAndLayout, rebuildSample); }
+#else
                 RebuildContent();
+#endif
                 // The one-shot flag is consumed by AddRatProfile during this
                 // rebuild. Future clock/activity refreshes use the ordinary
                 // profile-preservation path without unexpectedly carrying the
@@ -1060,7 +1077,13 @@ namespace RatHabitat
                 lastProfileStructureSignature = GetProfileStructureSignature(game.SelectedRat);
             else
                 lastProfileStructureSignature = null;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            long layoutSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.UiRebuildAndLayout);
+            try { Canvas.ForceUpdateCanvases(); }
+            finally { RuntimePerformanceDiagnostics.End(PerformanceProbeArea.UiRebuildAndLayout, layoutSample); }
+#else
             Canvas.ForceUpdateCanvases();
+#endif
             // Rebuilds preserve the user's current page position. No focus or
             // viewport jump is requested by a selection or clock refresh.
             pageScroll.verticalNormalizedPosition = previousNormalized;
@@ -2975,6 +2998,17 @@ namespace RatHabitat
         }
 
         private void Update()
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            long performanceSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.UiUpdate);
+            try { UpdateCore(); }
+            finally { RuntimePerformanceDiagnostics.End(PerformanceProbeArea.UiUpdate, performanceSample); }
+#else
+            UpdateCore();
+#endif
+        }
+
+        private void UpdateCore()
         {
             bool physicalPointerDown = Input.GetMouseButton(0) || Input.touchCount > 0;
             if (deferredRefreshPending && Time.frameCount > deferredRefreshFrame && !physicalPointerDown)
@@ -6310,6 +6344,41 @@ namespace RatHabitat
             AddText(developerToolsCard, "Developer-only controls. Test rats use real saved genotype and phenotype data; regular growth and inheritance rules are unchanged.", 13, new Color(0.7f, 0.78f, 0.74f), TextAnchor.UpperLeft);
             AddText(developerToolsCard, "Movement diagnostic: " + game.MovementDiagnostics, 12, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
             AddText(developerToolsCard, "Simulation diagnostic: " + game.SimulationPerformanceDiagnostics, 12, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            AddText(developerToolsCard, "Runtime Performance Investigation", 17, Color.white, TextAnchor.UpperLeft);
+            AddText(developerToolsCard,
+                "Capture uses Unity frame timings/GC counters plus measured subsystem profiler samples. A/B modes are temporary and do not edit the save.",
+                12, new Color(0.7f, 0.78f, 0.74f), TextAnchor.UpperLeft);
+            AddButton(developerToolsCard,
+                RuntimePerformanceDiagnostics.HudVisible ? "Hide live Performance HUD" : "Show live Performance HUD",
+                true, () =>
+                {
+                    game.SetPerformanceHudVisible(!RuntimePerformanceDiagnostics.HudVisible);
+                    RebuildDeveloperToolsContent();
+                });
+            AddButton(developerToolsCard,
+                RuntimePerformanceDiagnostics.CaptureEnabled ? "Stop profiler sample capture" : "Start profiler sample capture",
+                true, () =>
+                {
+                    game.SetPerformanceCaptureEnabled(!RuntimePerformanceDiagnostics.CaptureEnabled);
+                    RebuildDeveloperToolsContent();
+                });
+            AddText(developerToolsCard, "A/B one subsystem at a time • current: " + RuntimePerformanceDiagnostics.IsolationMode, 13, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
+            AddButton(developerToolsCard, "A/B baseline • all systems enabled", true,
+                () => SetPerformanceIsolationMode(PerformanceIsolationMode.Normal));
+            AddButton(developerToolsCard, "A/B disable rat AI, movement and target choice", true,
+                () => SetPerformanceIsolationMode(PerformanceIsolationMode.RatBehavior));
+            AddButton(developerToolsCard, "A/B freeze rat and pinkie animations", true,
+                () => SetPerformanceIsolationMode(PerformanceIsolationMode.RatAnimation));
+            AddButton(developerToolsCard, "A/B hide rat renderers (simulation continues)", true,
+                () => SetPerformanceIsolationMode(PerformanceIsolationMode.RatRendering));
+            AddButton(developerToolsCard, "A/B disable rat shadows", true,
+                () => SetPerformanceIsolationMode(PerformanceIsolationMode.RatShadows));
+            AddButton(developerToolsCard, "A/B skip automatic page refreshes", true,
+                () => SetPerformanceIsolationMode(PerformanceIsolationMode.AutomaticUiRefresh));
+            AddButton(developerToolsCard, "A/B skip colony maintenance ticks (short test only)", true,
+                () => SetPerformanceIsolationMode(PerformanceIsolationMode.ColonyMaintenance));
+#endif
             AddText(developerToolsCard, "Visual seam isolation", 17, Color.white, TextAnchor.UpperLeft);
             AddText(developerToolsCard, "Current mode: " + RatVisualDiagnostics.ModeLabel + ". These modes affect only live visuals and never change saved phenotype data.", 13, new Color(0.7f, 0.78f, 0.74f), TextAnchor.UpperLeft);
             AddButton(developerToolsCard, "1  Plain coat  •  markings disabled", true, () => SetVisualDiagnosticMode(RatVisualDiagnosticMode.PlainCoat));
@@ -6406,6 +6475,14 @@ namespace RatHabitat
             RebuildDeveloperToolsContent();
             SetOverlayVisibility();
         }
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        private void SetPerformanceIsolationMode(PerformanceIsolationMode mode)
+        {
+            game.SetPerformanceIsolation(mode);
+            RebuildDeveloperToolsContent();
+        }
+#endif
 
         private RectTransform CreateCard(string title)
         {

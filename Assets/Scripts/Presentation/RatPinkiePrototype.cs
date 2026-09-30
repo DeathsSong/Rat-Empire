@@ -94,7 +94,21 @@ namespace RatHabitat
 
         private void Update()
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            long performanceSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.PinkieUpdate);
+            try { UpdateCore(); }
+            finally { RuntimePerformanceDiagnostics.End(PerformanceProbeArea.PinkieUpdate, performanceSample); }
+#else
+            UpdateCore();
+#endif
+        }
+
+        private void UpdateCore()
+        {
             if (!built || leftHindFoot == null || rightHindFoot == null) return;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.RatAnimation)) return;
+#endif
             animationClock += GrowthSystem.SimulationBehaviorDeltaSeconds(Time.unscaledDeltaTime);
             float phase = animationClock * 4.6f;
             Kick(leftHindFoot, leftHindFootBase, Mathf.Sin(phase));

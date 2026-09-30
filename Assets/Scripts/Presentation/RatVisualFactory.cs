@@ -151,6 +151,17 @@ namespace RatHabitat
 
         public void ApplyPhenotype(GameObject visual, RatData rat)
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            long performanceSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.RatMaterialSetup);
+            try { ApplyPhenotypeCore(visual, rat); }
+            finally { RuntimePerformanceDiagnostics.End(PerformanceProbeArea.RatMaterialSetup, performanceSample); }
+#else
+            ApplyPhenotypeCore(visual, rat);
+#endif
+        }
+
+        private void ApplyPhenotypeCore(GameObject visual, RatData rat)
+        {
             if (visual == null || rat == null) return;
             if (rat.stage == RatStage.Pinkie)
             {

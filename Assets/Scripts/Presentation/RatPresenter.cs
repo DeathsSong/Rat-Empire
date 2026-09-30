@@ -73,6 +73,17 @@ namespace RatHabitat
 
         public void Render(ColonySaveData save, Vector3 nestPosition)
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            long performanceSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.RatPresentationBuild);
+            try { RenderCore(save, nestPosition); }
+            finally { RuntimePerformanceDiagnostics.End(PerformanceProbeArea.RatPresentationBuild, performanceSample); }
+#else
+            RenderCore(save, nestPosition);
+#endif
+        }
+
+        private void RenderCore(ColonySaveData save, Vector3 nestPosition)
+        {
             try
             {
                 EnsureVisualFactory();
@@ -213,8 +224,22 @@ namespace RatHabitat
         private void LateUpdate()
         {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-            UnityEngine.Profiling.Profiler.BeginSample("Rat Empire/Presentation/RatPresenter.LateUpdate");
+            long performanceSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.RatPresenterLateUpdate);
+            try
+            {
+                LateUpdateCore();
+            }
+            finally
+            {
+                RuntimePerformanceDiagnostics.End(PerformanceProbeArea.RatPresenterLateUpdate, performanceSample);
+            }
+#else
+            LateUpdateCore();
 #endif
+        }
+
+        private void LateUpdateCore()
+        {
             // Animator deformation and code-driven movement both occur before
             // this point in the frame. Keep the stable selection surfaces
             // aligned with the currently visible mesh instead of leaving a
@@ -239,6 +264,11 @@ namespace RatHabitat
                 RatVisualController controller = item.Value;
                 GameObject root;
                 if (controller == null || !ratRoots.TryGetValue(item.Key, out root) || root == null) continue;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                controller.SetPerformanceIsolation(
+                    RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.RatRendering),
+                    RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.RatShadows));
+#endif
 
                 RatData rat;
                 GameObject currentVisual;
@@ -249,7 +279,13 @@ namespace RatHabitat
                     // stage label changes. Apply the shared age curve before
                     // bounds/grounding work so the live model grows smoothly
                     // and its selection surface follows the same scale.
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                    long boundsSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.GroundingAndBounds);
+                    try { controller.ApplyAgeScale(rat); }
+                    finally { RuntimePerformanceDiagnostics.End(PerformanceProbeArea.GroundingAndBounds, boundsSample); }
+#else
                     controller.ApplyAgeScale(rat);
+#endif
                 }
 
                 if (liveRats.TryGetValue(item.Key, out rat) &&
@@ -266,7 +302,13 @@ namespace RatHabitat
                         if (refreshPinkieGrounding || NeedsPinkiePlacementRefresh(rat, root, controller))
                         {
                             AuditPinkieRootBeforePlacement(rat, root);
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                            long boundsSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.GroundingAndBounds);
+                            try { PlacePinkieOnNest(rat, root, controller); }
+                            finally { RuntimePerformanceDiagnostics.End(PerformanceProbeArea.GroundingAndBounds, boundsSample); }
+#else
                             PlacePinkieOnNest(rat, root, controller);
+#endif
                         }
                     }
                     else if (refreshGrounding)
@@ -275,7 +317,13 @@ namespace RatHabitat
                         // the actual Pairing cage floor after the render pass.
                         // This changes only the visual child and never the
                         // stable gameplay root.
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                        long boundsSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.GroundingAndBounds);
+                        try { visualFactory.KeepPairingVisualGrounded(currentVisual, rat, controller); }
+                        finally { RuntimePerformanceDiagnostics.End(PerformanceProbeArea.GroundingAndBounds, boundsSample); }
+#else
                         visualFactory.KeepPairingVisualGrounded(currentVisual, rat, controller);
+#endif
                     }
                 }
 
@@ -294,16 +342,37 @@ namespace RatHabitat
                 // lift can never leave its hitbox behind on the floor.
                 if (refreshGrounding || boundsVersionChanged)
                 {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                    long boundsSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.GroundingAndBounds);
+                    try
+                    {
+                        Bounds bounds;
+                        if (controller.TryGetSelectionBounds(out bounds))
+                        {
+                            ConfigureRatCollider(root, controller.CurrentStage, controller);
+                            configuredSelectionBoundsVersions[item.Key] = controller.SelectionBoundsVersion;
+                        }
+                    }
+                    finally { RuntimePerformanceDiagnostics.End(PerformanceProbeArea.GroundingAndBounds, boundsSample); }
+#else
                     Bounds bounds;
                     if (controller.TryGetSelectionBounds(out bounds))
                     {
                         ConfigureRatCollider(root, controller.CurrentStage, controller);
                         configuredSelectionBoundsVersions[item.Key] = controller.SelectionBoundsVersion;
                     }
+#endif
                 }
             }
+        }
+
+        public void ApplyPerformanceIsolationMode()
+        {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-            UnityEngine.Profiling.Profiler.EndSample();
+            bool hideRenderers = RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.RatRendering);
+            bool disableShadows = RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.RatShadows);
+            foreach (RatVisualController controller in visualControllers.Values)
+                if (controller != null) controller.SetPerformanceIsolation(hideRenderers, disableShadows);
 #endif
         }
 
