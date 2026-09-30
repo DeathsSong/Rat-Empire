@@ -41,6 +41,16 @@ namespace RatHabitat
         [Tooltip("Emergency-only fallback. Keep disabled during normal play so an invalid imported pinkie cannot silently become the old procedural blob.")]
         public bool allowProceduralPinkieFallback = false;
 
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        [Header("Diagnostics")]
+        [Tooltip("Opt-in material diagnostics. Keep disabled during normal play; enabled audits build large strings and write to the browser console.")]
+        public bool enablePhenotypeMaterialAudit = false;
+#else
+        // Release builds must never pay for the verbose material audit, even
+        // if an old serialized scene once enabled the development toggle.
+        private const bool enablePhenotypeMaterialAudit = false;
+#endif
+
         private GameObject cachedHandPaintedPrefab;
         private GameObject cachedPinkiePrefab;
         private string cachedPinkieResourcePath;
@@ -86,7 +96,11 @@ namespace RatHabitat
             new Color(0.82f, 0.84f, 0.87f), // light gray
             new Color(0.98f, 0.97f, 0.94f), // cream white
         };
-        private string lastPhenotypeAuditSignature;
+        // Keep audit state per rat when the opt-in diagnostic is enabled. A
+        // single global signature made every different rat look like a change
+        // on the next pass, causing a large console/string-allocation storm.
+        private readonly Dictionary<string, string> phenotypeAuditSignatures =
+            new Dictionary<string, string>(StringComparer.Ordinal);
 
         // The imported HandPaintedRat UV layout has two small eye islands in
         // the central face island. Keep this mask separate from the broad
@@ -201,7 +215,11 @@ namespace RatHabitat
             Texture2D eyeMask = useCoatShader
                 ? GetOrCreateEyeRegionMask()
                 : null;
-            string materialAudit = string.Empty;
+            // This is deliberately null in normal play. The audit is useful
+            // when investigating material regressions, but constructing its
+            // renderer/texture/color summary for every rat is expensive in
+            // WebGL and must never be part of the steady-state path.
+            string materialAudit = enablePhenotypeMaterialAudit ? string.Empty : null;
             var renderers = visual.GetComponentsInChildren<Renderer>(true);
             foreach (var renderer in renderers)
             {
@@ -244,8 +262,11 @@ namespace RatHabitat
                     // white albino coat.
                     if (featureMaterial)
                     {
-                        if (materialAudit.Length > 0) materialAudit += "; ";
-                        materialAudit += renderer.gameObject.name + "=" + material.name + " preserved-feature";
+                        if (enablePhenotypeMaterialAudit)
+                        {
+                            if (materialAudit.Length > 0) materialAudit += "; ";
+                            materialAudit += renderer.gameObject.name + "=" + material.name + " preserved-feature";
+                        }
                         continue;
                     }
 
@@ -347,40 +368,49 @@ namespace RatHabitat
                         if (material.HasProperty("_AlbinoBodyColor")) material.SetColor("_AlbinoBodyColor", new Color(0.98f, 0.965f, 0.92f, 1f));
                     }
                     renderer.sharedMaterials = materials;
-                    if (materialAudit.Length > 0) materialAudit += "; ";
-                    materialAudit += renderer.gameObject.name + "=" + material.name + " instanceId=" + material.GetInstanceID() +
-                        " shader=" + (material.shader == null ? "none" : material.shader.name) +
-                        " texture=" + TexturePropertySummary(material) +
-                        " featureSource=" + TexturePropertySummary(material, "_FeatureSourceTex") +
-                        " color=" + ColorPropertySummary(material) +
-                        " albinoBody=" + ColorPropertySummary(material, "_AlbinoBodyColor") +
-                        " spotColor=" + ColorPropertySummary(material, "_SpotColor") +
-                        " eyeColor=" + ColorPropertySummary(material, "_EyeColor") +
-                        " eyeMask=" + TexturePropertySummary(material, "_EyeMask") +
-                        " eyeMaskCoverage=" + cachedEyeMaskCoverage.ToString("0.000") +
-                        " stage=" + rat.stage +
-                        " albinoMode=" + AlbinoModeSummary(material) +
-                        " finalAlbedoPath=" + (albino ? "AlbinoNeutralBodyThenEye" : "CoatThenEye");
+                    if (enablePhenotypeMaterialAudit)
+                    {
+                        if (materialAudit.Length > 0) materialAudit += "; ";
+                        materialAudit += renderer.gameObject.name + "=" + material.name + " instanceId=" + material.GetInstanceID() +
+                            " shader=" + (material.shader == null ? "none" : material.shader.name) +
+                            " texture=" + TexturePropertySummary(material) +
+                            " featureSource=" + TexturePropertySummary(material, "_FeatureSourceTex") +
+                            " color=" + ColorPropertySummary(material) +
+                            " albinoBody=" + ColorPropertySummary(material, "_AlbinoBodyColor") +
+                            " spotColor=" + ColorPropertySummary(material, "_SpotColor") +
+                            " eyeColor=" + ColorPropertySummary(material, "_EyeColor") +
+                            " eyeMask=" + TexturePropertySummary(material, "_EyeMask") +
+                            " eyeMaskCoverage=" + cachedEyeMaskCoverage.ToString("0.000") +
+                            " stage=" + rat.stage +
+                            " albinoMode=" + AlbinoModeSummary(material) +
+                            " finalAlbedoPath=" + (albino ? "AlbinoNeutralBodyThenEye" : "CoatThenEye");
+                    }
                 }
             }
-            if (materialAudit.Length == 0) materialAudit = "none";
-
-            string auditSignature = (string.IsNullOrEmpty(rat.id) ? rat.name : rat.id) + "|" +
-                GenotypeSummary(rat.genotype) + "|" + rat.phenotype.coatColorId + "|" +
-                rat.phenotype.coatColorHex + "|" + rat.phenotype.accentHex + "|" + spotted + "|" + materialAudit;
-            auditSignature += "|markingFamily=" + (rat.markingFamily ?? string.Empty) +
-                "|markingLabel=" + (rat.phenotype.markingsLabel ?? string.Empty);
-            if (auditSignature != lastPhenotypeAuditSignature)
+            if (enablePhenotypeMaterialAudit)
             {
-                lastPhenotypeAuditSignature = auditSignature;
-                Debug.Log("[Rat Habitat] Phenotype material audit: rat=" + rat.name +
-                    " genotype=" + GenotypeSummary(rat.genotype) +
-                    " coatColorId=" + rat.phenotype.coatColorId +
-                    " coatColorHex=" + rat.phenotype.coatColorHex +
-                    " accentHex=" + rat.phenotype.accentHex +
-                    " spotted=" + rat.phenotype.spotted +
-                    " selectedTexture=" + (coatTexture == null ? "<null>" : coatTexture.name) +
-                    " selectedMaterial=" + materialAudit);
+                if (materialAudit.Length == 0) materialAudit = "none";
+
+                string auditKey = string.IsNullOrEmpty(rat.id) ? rat.name : rat.id;
+                string auditSignature = auditKey + "|" +
+                    GenotypeSummary(rat.genotype) + "|" + rat.phenotype.coatColorId + "|" +
+                    rat.phenotype.coatColorHex + "|" + rat.phenotype.accentHex + "|" + spotted + "|" + materialAudit;
+                auditSignature += "|markingFamily=" + (rat.markingFamily ?? string.Empty) +
+                    "|markingLabel=" + (rat.phenotype.markingsLabel ?? string.Empty);
+                string previousSignature;
+                if (!phenotypeAuditSignatures.TryGetValue(auditKey, out previousSignature) ||
+                    !string.Equals(previousSignature, auditSignature, StringComparison.Ordinal))
+                {
+                    phenotypeAuditSignatures[auditKey] = auditSignature;
+                    Debug.Log("[Rat Habitat] Phenotype material audit: rat=" + rat.name +
+                        " genotype=" + GenotypeSummary(rat.genotype) +
+                        " coatColorId=" + rat.phenotype.coatColorId +
+                        " coatColorHex=" + rat.phenotype.coatColorHex +
+                        " accentHex=" + rat.phenotype.accentHex +
+                        " spotted=" + rat.phenotype.spotted +
+                        " selectedTexture=" + (coatTexture == null ? "<null>" : coatTexture.name) +
+                        " selectedMaterial=" + materialAudit);
+                }
             }
             RatVisualDiagnostics.ApplyToVisual(visual);
         }
