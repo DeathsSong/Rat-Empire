@@ -83,6 +83,10 @@ namespace RatHabitat
         private float lastClockFrameDurationMs;
         private float lastMovementFrameDurationMs;
         private float lastBootstrapUpdateDurationMs;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        private float performanceMaintenanceWindowMs;
+        private float performanceUiRefreshWindowMs;
+#endif
         private string selectedRatId;
         private string selectedObjectId;
         private string parentAId;
@@ -361,6 +365,21 @@ namespace RatHabitat
         }
         public float LastMaintenanceDurationMs { get { return lastMaintenanceDurationMs; } }
         public float LastUiRefreshDurationMs { get { return lastUiRefreshDurationMs; } }
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        public string PerformancePanelName { get { return ui == null ? "None" : ui.PerformancePanelName; } }
+        public float ConsumePerformanceMaintenanceWindowMs()
+        {
+            float value = performanceMaintenanceWindowMs;
+            performanceMaintenanceWindowMs = 0f;
+            return value;
+        }
+        public float ConsumePerformanceUiRefreshWindowMs()
+        {
+            float value = performanceUiRefreshWindowMs;
+            performanceUiRefreshWindowMs = 0f;
+            return value;
+        }
+#endif
         public bool ResetConfirmationPending { get { return resetConfirmationPending; } }
         public bool WelcomePopupPending { get { return Save != null && Save.welcomePopupPending; } }
         public bool HasPendingLitterNaming
@@ -1811,6 +1830,9 @@ namespace RatHabitat
                 colonyMaintenanceInitialized = true;
                 maintenancePassCount++;
                 lastMaintenanceDurationMs = (Time.realtimeSinceStartup - maintenanceStartedAt) * 1000f;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                performanceMaintenanceWindowMs += lastMaintenanceDurationMs;
+#endif
                 EndPerformanceSample();
             }
 
@@ -1900,6 +1922,9 @@ namespace RatHabitat
 #endif
                     if (births > 0) ui.LogBirthTransitionState("birth-ui-refresh-complete");
                     lastUiRefreshDurationMs = (Time.realtimeSinceStartup - uiStartedAt) * 1000f;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                    performanceUiRefreshWindowMs += lastUiRefreshDurationMs;
+#endif
                     EndPerformanceSample();
                 }
                 catch (Exception exception)

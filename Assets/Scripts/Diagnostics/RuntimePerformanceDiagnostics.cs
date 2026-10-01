@@ -1,5 +1,7 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 using UnityEngine;
 using UnityEngine.Profiling;
@@ -38,6 +40,53 @@ namespace RatHabitat
         Count,
     }
 
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+    public enum PerformanceLogSeverity
+    {
+        None,
+        Lag,
+        Critical,
+    }
+
+    /// <summary>Compact, allocation-free payload stored in the bounded diagnostic rings.</summary>
+    public struct PerformanceLogSample
+    {
+        public long UtcTicks;
+        public long GameTimeMs;
+        public int Speed;
+        public float Fps;
+        public float AverageFrameMs;
+        public float WorstFrameMs;
+        public float CpuMainThreadMs;
+        public float GpuMs;
+        public long GcAllocatedBytes;
+        public int Gc0Collections;
+        public int Gc1Collections;
+        public int Gc2Collections;
+        public int ActiveRatCount;
+        public int PinkieCount;
+        public int AnimatorCount;
+        public int RendererCount;
+        public int UiGraphicCount;
+        public int CanvasCount;
+        public int SimulationSteps;
+        public float SimulationMaintenanceMs;
+        public float UiRefreshMs;
+        public float RatAiMovementMs;
+        public float AnimationMs;
+        public float GroundingBoundsMs;
+        public float RatPresentationMs;
+        public float InputInteractionsMs;
+        public string CurrentPanel;
+    }
+
+    public struct PerformanceSpikeRecord
+    {
+        public PerformanceLogSeverity Severity;
+        public PerformanceLogSample Context;
+    }
+#endif
+
     /// <summary>
     /// Development-build-only profiling switches and low-allocation sample
     /// aggregation. All test modes are transient and never touch colony data.
@@ -66,6 +115,19 @@ namespace RatHabitat
         private static readonly long[] MaxTicks = new long[(int)PerformanceProbeArea.Count];
         private static readonly int[] Calls = new int[(int)PerformanceProbeArea.Count];
         private static readonly StringBuilder SummaryBuilder = new StringBuilder(512);
+        private static readonly PerformanceLogSample[] SampleRing = new PerformanceLogSample[GameConfig.PerformanceLogSampleCapacity];
+        private static readonly PerformanceSpikeRecord[] SpikeRing = new PerformanceSpikeRecord[GameConfig.PerformanceLogSpikeCapacity];
+        private static readonly StringBuilder ExportBuilder = new StringBuilder(32768);
+        private static int sampleWriteIndex = -1;
+        private static int sampleCount;
+        private static int spikeWriteIndex = -1;
+        private static int spikeCount;
+        private static bool spikeEpisodeActive;
+        private static PerformanceLogSeverity spikeEpisodeSeverity;
+        private static float sessionWorstFrameMs;
+        private static PerformanceLogSample sessionWorstFrame;
+        private static float sessionWorstSubsystemMs;
+        private static string sessionWorstSubsystem = "n/a";
         private static bool captureEnabled = true;
         private static bool hudVisible;
         private static PerformanceIsolationMode isolationMode;
@@ -73,6 +135,11 @@ namespace RatHabitat
         public static bool CaptureEnabled { get { return captureEnabled; } }
         public static bool HudVisible { get { return hudVisible; } }
         public static PerformanceIsolationMode IsolationMode { get { return isolationMode; } }
+        public static int SampleCount { get { return sampleCount; } }
+        public static int SpikeCount { get { return spikeCount; } }
+        public static float SessionWorstFrameMs { get { return sessionWorstFrameMs; } }
+        public static float SessionWorstSubsystemMs { get { return sessionWorstSubsystemMs; } }
+        public static string SessionWorstSubsystem { get { return sessionWorstSubsystem; } }
 
         public static long Begin(PerformanceProbeArea area)
         {
@@ -91,6 +158,343 @@ namespace RatHabitat
             WindowTicks[index] += elapsed;
             if (elapsed > MaxTicks[index]) MaxTicks[index] = elapsed;
             Calls[index]++;
+        }
+
+        public static float WindowMilliseconds(PerformanceProbeArea area)
+        {
+            return (float)TicksToMilliseconds(WindowTicks[(int)area]);
+        }
+
+        public static void RecordSample(PerformanceLogSample sample)
+        {
+            if (!captureEnabled || SampleRing.Length == 0) return;
+            sampleWriteIndex = (sampleWriteIndex + 1) % SampleRing.Length;
+            SampleRing[sampleWriteIndex] = sample;
+            if (sampleCount < SampleRing.Length) sampleCount++;
+            TrackWorstSubsystem("Simulation/maintenance", sample.SimulationMaintenanceMs);
+            TrackWorstSubsystem("UI refresh", sample.UiRefreshMs);
+            TrackWorstSubsystem("Rat AI/movement", sample.RatAiMovementMs);
+            TrackWorstSubsystem("Animation", sample.AnimationMs);
+            TrackWorstSubsystem("Grounding/bounds", sample.GroundingBoundsMs);
+            TrackWorstSubsystem("Rat presentation/rendering", sample.RatPresentationMs);
+            TrackWorstSubsystem("Input/interactions", sample.InputInteractionsMs);
+        }
+
+        /// <summary>Called once per rendered frame; creates a record only for a new lag episode or severity escalation.</summary>
+        public static void ObserveFrame(float frameMs, long gameTimeMs, int speed, float cpuMs, float gpuMs,
+            long gcAllocatedBytes, int gc0, int gc1, int gc2, int activeRats, int pinkies,
+            int animators, int renderers, int uiGraphics, int canvases, int simulationSteps,
+            float maintenanceMs, float uiRefreshMs, float animationMs, string panelName)
+        {
+            if (!captureEnabled) return;
+            PerformanceLogSeverity severity = frameMs >= GameConfig.PerformanceCriticalSpikeThresholdMs
+                ? PerformanceLogSeverity.Critical
+                : frameMs >= GameConfig.PerformanceLagSpikeThresholdMs
+                    ? PerformanceLogSeverity.Lag
+                    : PerformanceLogSeverity.None;
+
+            if (frameMs > sessionWorstFrameMs)
+            {
+                sessionWorstFrameMs = frameMs;
+                sessionWorstFrame = BuildFrameContext(frameMs, gameTimeMs, speed, cpuMs, gpuMs,
+                    gcAllocatedBytes, gc0, gc1, gc2, activeRats, pinkies, animators, renderers,
+                    uiGraphics, canvases, simulationSteps, maintenanceMs, uiRefreshMs, animationMs, panelName);
+            }
+
+            if (severity == PerformanceLogSeverity.None)
+            {
+                spikeEpisodeActive = false;
+                spikeEpisodeSeverity = PerformanceLogSeverity.None;
+                return;
+            }
+            if (spikeEpisodeActive && severity <= spikeEpisodeSeverity) return;
+
+            spikeEpisodeActive = true;
+            spikeEpisodeSeverity = severity;
+            if (SpikeRing.Length == 0) return;
+            spikeWriteIndex = (spikeWriteIndex + 1) % SpikeRing.Length;
+            SpikeRing[spikeWriteIndex] = new PerformanceSpikeRecord
+            {
+                Severity = severity,
+                Context = BuildFrameContext(frameMs, gameTimeMs, speed, cpuMs, gpuMs,
+                    gcAllocatedBytes, gc0, gc1, gc2, activeRats, pinkies, animators, renderers,
+                    uiGraphics, canvases, simulationSteps, maintenanceMs, uiRefreshMs, animationMs, panelName),
+            };
+            if (spikeCount < SpikeRing.Length) spikeCount++;
+        }
+
+        private static PerformanceLogSample BuildFrameContext(float frameMs, long gameTimeMs, int speed,
+            float cpuMs, float gpuMs, long allocatedBytes, int gc0, int gc1, int gc2,
+            int activeRats, int pinkies, int animators, int renderers, int uiGraphics, int canvases,
+            int simulationSteps, float maintenanceMs, float uiRefreshMs, float animationMs, string panelName)
+        {
+            return new PerformanceLogSample
+            {
+                UtcTicks = DateTime.UtcNow.Ticks,
+                GameTimeMs = gameTimeMs,
+                Speed = speed,
+                WorstFrameMs = frameMs,
+                CpuMainThreadMs = cpuMs,
+                GpuMs = gpuMs,
+                GcAllocatedBytes = allocatedBytes,
+                Gc0Collections = gc0,
+                Gc1Collections = gc1,
+                Gc2Collections = gc2,
+                ActiveRatCount = activeRats,
+                PinkieCount = pinkies,
+                AnimatorCount = animators,
+                RendererCount = renderers,
+                UiGraphicCount = uiGraphics,
+                CanvasCount = canvases,
+                SimulationSteps = simulationSteps,
+                SimulationMaintenanceMs = maintenanceMs,
+                UiRefreshMs = uiRefreshMs,
+                RatAiMovementMs = WindowMilliseconds(PerformanceProbeArea.RatBehaviorUpdate) +
+                    WindowMilliseconds(PerformanceProbeArea.RatBehaviorLateUpdate) +
+                    WindowMilliseconds(PerformanceProbeArea.RatDestinationSelection),
+                AnimationMs = animationMs,
+                GroundingBoundsMs = WindowMilliseconds(PerformanceProbeArea.GroundingAndBounds),
+                RatPresentationMs = WindowMilliseconds(PerformanceProbeArea.RatPresenterLateUpdate) +
+                    WindowMilliseconds(PerformanceProbeArea.RatPresentationBuild) +
+                    WindowMilliseconds(PerformanceProbeArea.RatMaterialSetup),
+                InputInteractionsMs = WindowMilliseconds(PerformanceProbeArea.InteractionUpdate),
+                CurrentPanel = panelName,
+            };
+        }
+
+        private static void TrackWorstSubsystem(string name, float value)
+        {
+            if (value <= sessionWorstSubsystemMs) return;
+            sessionWorstSubsystemMs = value;
+            sessionWorstSubsystem = name;
+        }
+
+        public static void ClearLog()
+        {
+            Array.Clear(SampleRing, 0, SampleRing.Length);
+            Array.Clear(SpikeRing, 0, SpikeRing.Length);
+            sampleWriteIndex = spikeWriteIndex = -1;
+            sampleCount = spikeCount = 0;
+            spikeEpisodeActive = false;
+            spikeEpisodeSeverity = PerformanceLogSeverity.None;
+            sessionWorstFrameMs = sessionWorstSubsystemMs = 0f;
+            sessionWorstFrame = default(PerformanceLogSample);
+            sessionWorstSubsystem = "n/a";
+            ClearWindow();
+        }
+
+        public static string BuildLiveSummary()
+        {
+            if (sampleCount == 0) return captureEnabled ? "Capture running • waiting for the first 1-second sample." : "Capture stopped.";
+            PerformanceLogSample latest = SampleAt(sampleCount - 1);
+            ExportBuilder.Length = 0;
+            ExportBuilder.Append(captureEnabled ? "CAPTURE ON" : "CAPTURE OFF")
+                .Append(" • ").Append(latest.CurrentPanel ?? "None")
+                .Append(" • Day ").Append(GameDayLabel(latest.GameTimeMs))
+                .Append(" • ").Append(latest.Speed).Append('x')
+                .Append(" • ").Append(latest.Fps.ToString("0.0", CultureInfo.InvariantCulture)).Append(" FPS / ")
+                .Append(latest.AverageFrameMs.ToString("0.0", CultureInfo.InvariantCulture)).Append(" ms avg / ")
+                .Append(latest.WorstFrameMs.ToString("0.0", CultureInfo.InvariantCulture)).Append(" ms worst")
+                .Append("\nRats ").Append(latest.ActiveRatCount).Append(" (pinkies ").Append(latest.PinkieCount)
+                .Append(") • animators ").Append(latest.AnimatorCount).Append(" • renderers ").Append(latest.RendererCount)
+                .Append(" • UI ").Append(latest.UiGraphicCount).Append(" graphics/").Append(latest.CanvasCount).Append(" canvases")
+                .Append("\nCPU ").Append(FormatMetric(latest.CpuMainThreadMs)).Append(" • GPU ").Append(FormatMetric(latest.GpuMs))
+                .Append(" • GC ").Append(latest.GcAllocatedBytes).Append(" B in sample; collections ")
+                .Append(latest.Gc0Collections).Append('/').Append(latest.Gc1Collections).Append('/').Append(latest.Gc2Collections)
+                .Append(" • steps ").Append(latest.SimulationSteps)
+                .Append("\nWorst session frame ").Append(sessionWorstFrameMs.ToString("0.0", CultureInfo.InvariantCulture)).Append(" ms")
+                .Append(" @ ").Append(new DateTime(sessionWorstFrame.UtcTicks, DateTimeKind.Utc).ToString("HH:mm:ss'Z'", CultureInfo.InvariantCulture))
+                .Append(" • ").Append(sessionWorstFrame.CurrentPanel ?? "None")
+                .Append(" • rats/pinkies ").Append(sessionWorstFrame.ActiveRatCount).Append('/').Append(sessionWorstFrame.PinkieCount)
+                .Append(" • worst subsystem ").Append(sessionWorstSubsystem).Append(" ")
+                .Append(sessionWorstSubsystemMs.ToString("0.00", CultureInfo.InvariantCulture)).Append(" ms/window");
+            return ExportBuilder.ToString();
+        }
+
+        public static string BuildRecentSamplesText(int maximumCount)
+        {
+            ExportBuilder.Length = 0;
+            int count = Math.Min(Math.Max(0, maximumCount), sampleCount);
+            if (count == 0) return "No performance samples yet.";
+            int first = sampleCount - count;
+            for (int index = first; index < sampleCount; index++)
+            {
+                PerformanceLogSample sample = SampleAt(index);
+                AppendCompactSample(ExportBuilder, sample);
+                if (index < sampleCount - 1) ExportBuilder.Append('\n');
+            }
+            return ExportBuilder.ToString();
+        }
+
+        public static string BuildRecentSpikesText(int maximumCount)
+        {
+            ExportBuilder.Length = 0;
+            int count = Math.Min(Math.Max(0, maximumCount), spikeCount);
+            if (count == 0) return "No lag spikes recorded (threshold " + GameConfig.PerformanceLagSpikeThresholdMs + " ms).";
+            int first = spikeCount - count;
+            for (int index = first; index < spikeCount; index++)
+            {
+                PerformanceSpikeRecord spike = SpikeAt(index);
+                ExportBuilder.Append(spike.Severity == PerformanceLogSeverity.Critical ? "CRITICAL" : "LAG")
+                    .Append(" • ");
+                AppendCompactSample(ExportBuilder, spike.Context);
+                if (index < spikeCount - 1) ExportBuilder.Append('\n');
+            }
+            return ExportBuilder.ToString();
+        }
+
+        public static string BuildExportText(bool csv)
+        {
+            string summary = csv ? null : BuildLiveSummary();
+            ExportBuilder.Length = 0;
+            if (!csv)
+            {
+                ExportBuilder.AppendLine("Rat Empire Performance Log")
+                    .AppendLine(summary)
+                    .AppendLine("\nSamples (oldest to newest)");
+            }
+            else
+            {
+                ExportBuilder.AppendLine("record,severity,utc,game_day_time,speed,fps,avg_frame_ms,worst_frame_ms,cpu_main_ms,gpu_ms,gc_alloc_bytes,gc0,gc1,gc2,rats,pinkies,animators,renderers,ui_graphics,canvases,simulation_steps,maintenance_ms,ui_refresh_ms,rat_ai_movement_ms,animation_ms,grounding_bounds_ms,presentation_ms,input_ms,panel");
+            }
+
+            for (int index = 0; index < sampleCount; index++)
+            {
+                PerformanceLogSample sample = SampleAt(index);
+                if (csv) AppendCsvRecord(ExportBuilder, "sample", "", sample);
+                else AppendCompactSample(ExportBuilder, sample).Append('\n');
+            }
+            if (!csv) ExportBuilder.AppendLine("\nLag spikes (oldest to newest)");
+            for (int index = 0; index < spikeCount; index++)
+            {
+                PerformanceSpikeRecord spike = SpikeAt(index);
+                if (csv) AppendCsvRecord(ExportBuilder, "spike", spike.Severity.ToString(), spike.Context);
+                else
+                {
+                    ExportBuilder.Append(spike.Severity == PerformanceLogSeverity.Critical ? "CRITICAL • " : "LAG • ");
+                    AppendCompactSample(ExportBuilder, spike.Context).Append('\n');
+                }
+            }
+            return ExportBuilder.ToString();
+        }
+
+        public static string BuildCompactDiagnostics()
+        {
+            string summary = BuildLiveSummary();
+            string spikes = BuildRecentSpikesText(5);
+            ExportBuilder.Length = 0;
+            ExportBuilder.Append(summary).Append("\n\nRecent spikes\n").Append(spikes);
+            return ExportBuilder.ToString();
+        }
+
+        public static bool TryCopyText(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+#if UNITY_WEBGL && !UNITY_EDITOR
+            try { return RatPerformanceCopyText(text) != 0; }
+            catch (Exception) { return false; }
+#elif UNITY_EDITOR
+            GUIUtility.systemCopyBuffer = text;
+            return true;
+#else
+            return false;
+#endif
+        }
+
+        public static bool TryDownloadLog(bool csv)
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            try
+            {
+                string content = BuildExportText(csv);
+                RatPerformanceDownloadText(csv ? "rat-empire-performance.csv" : "rat-empire-performance.txt",
+                    content, csv ? "text/csv;charset=utf-8" : "text/plain;charset=utf-8");
+                return true;
+            }
+            catch (Exception) { return false; }
+#else
+            return false;
+#endif
+        }
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+        [DllImport("__Internal")] private static extern int RatPerformanceCopyText(string text);
+        [DllImport("__Internal")] private static extern void RatPerformanceDownloadText(string fileName, string content, string mimeType);
+#endif
+
+        private static PerformanceLogSample SampleAt(int chronologicalIndex)
+        {
+            int oldest = sampleCount < SampleRing.Length ? 0 : (sampleWriteIndex + 1) % SampleRing.Length;
+            return SampleRing[(oldest + chronologicalIndex) % SampleRing.Length];
+        }
+
+        private static PerformanceSpikeRecord SpikeAt(int chronologicalIndex)
+        {
+            int oldest = spikeCount < SpikeRing.Length ? 0 : (spikeWriteIndex + 1) % SpikeRing.Length;
+            return SpikeRing[(oldest + chronologicalIndex) % SpikeRing.Length];
+        }
+
+        private static string FormatMetric(float value)
+        {
+            return value < 0f ? "n/a" : value.ToString("0.00", CultureInfo.InvariantCulture) + " ms";
+        }
+
+        private static string GameDayLabel(long gameTimeMs)
+        {
+            long day = Math.Max(1L, gameTimeMs / GameConfig.GameDayMs + 1L);
+            long minuteOfDay = (gameTimeMs % GameConfig.GameDayMs) / 60000L;
+            return day.ToString(CultureInfo.InvariantCulture) + " " +
+                (minuteOfDay / 60L).ToString("00", CultureInfo.InvariantCulture) + ":" +
+                (minuteOfDay % 60L).ToString("00", CultureInfo.InvariantCulture);
+        }
+
+        private static StringBuilder AppendCompactSample(StringBuilder builder, PerformanceLogSample sample)
+        {
+            builder.Append(new DateTime(sample.UtcTicks, DateTimeKind.Utc).ToString("yyyy-MM-dd HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture))
+                .Append(" • Day ").Append(GameDayLabel(sample.GameTimeMs)).Append(" • ").Append(sample.Speed).Append('x')
+                .Append(" • FPS ").Append(sample.Fps.ToString("0.0", CultureInfo.InvariantCulture))
+                .Append(" • frame ").Append(sample.AverageFrameMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("/")
+                .Append(sample.WorstFrameMs.ToString("0.00", CultureInfo.InvariantCulture)).Append(" ms")
+                .Append(" • CPU/GPU ").Append(FormatMetric(sample.CpuMainThreadMs)).Append('/').Append(FormatMetric(sample.GpuMs))
+                .Append(" • GC ").Append(sample.GcAllocatedBytes).Append(" B, ")
+                .Append(sample.Gc0Collections).Append('/').Append(sample.Gc1Collections).Append('/').Append(sample.Gc2Collections)
+                .Append(" • rats/pinkies ").Append(sample.ActiveRatCount).Append('/').Append(sample.PinkieCount)
+                .Append(" • sim steps ").Append(sample.SimulationSteps)
+                .Append(" • maint/UI ").Append(sample.SimulationMaintenanceMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(sample.UiRefreshMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("ms")
+                .Append(" • AI/anim/ground ").Append(sample.RatAiMovementMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(sample.AnimationMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(sample.GroundingBoundsMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("ms")
+                .Append(" • present/input ").Append(sample.RatPresentationMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(sample.InputInteractionsMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("ms")
+                .Append(" • ").Append(sample.CurrentPanel ?? "None");
+            return builder;
+        }
+
+        private static void AppendCsvRecord(StringBuilder builder, string type, string severity, PerformanceLogSample sample)
+        {
+            builder.Append(type).Append(',').Append(severity).Append(',')
+                .Append(new DateTime(sample.UtcTicks, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture)).Append(',')
+                .Append(GameDayLabel(sample.GameTimeMs)).Append(',').Append(sample.Speed).Append(',')
+                .Append(sample.Fps.ToString("0.00", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.AverageFrameMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.WorstFrameMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.CpuMainThreadMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.GpuMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.GcAllocatedBytes).Append(',').Append(sample.Gc0Collections).Append(',')
+                .Append(sample.Gc1Collections).Append(',').Append(sample.Gc2Collections).Append(',')
+                .Append(sample.ActiveRatCount).Append(',').Append(sample.PinkieCount).Append(',')
+                .Append(sample.AnimatorCount).Append(',').Append(sample.RendererCount).Append(',')
+                .Append(sample.UiGraphicCount).Append(',').Append(sample.CanvasCount).Append(',')
+                .Append(sample.SimulationSteps).Append(',')
+                .Append(sample.SimulationMaintenanceMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.UiRefreshMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.RatAiMovementMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.AnimationMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.GroundingBoundsMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.RatPresentationMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.InputInteractionsMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append('"').Append((sample.CurrentPanel ?? "None").Replace("\"", "\"\"")).Append('"').AppendLine();
         }
 
         public static void SetCaptureEnabled(bool enabled)
@@ -116,6 +520,16 @@ namespace RatHabitat
 
         public static string ConsumeSampleSummary()
         {
+            return ConsumeSampleSummary(true);
+        }
+
+        public static string ConsumeSampleSummary(bool formatForHud)
+        {
+            if (!formatForHud)
+            {
+                ClearWindow();
+                return string.Empty;
+            }
             SummaryBuilder.Length = 0;
             bool found = false;
             for (int i = 0; i < Calls.Length; i++)
@@ -194,7 +608,6 @@ namespace RatHabitat
     public sealed class RuntimePerformanceOverlay : MonoBehaviour
     {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-        private const float ReportIntervalSeconds = 1f;
         private GameBootstrap game;
         private ProfilerRecorder mainThreadRecorder;
         private ProfilerRecorder gcAllocatedRecorder;
@@ -215,6 +628,7 @@ namespace RatHabitat
         private long gcAllocatedBytes = -1L;
         private long gcAllocatedPeakBytes = -1L;
         private long gcAllocatedWindowPeakBytes = -1L;
+        private long gcAllocatedWindowBytes;
         private int gc0Delta;
         private int gc1Delta;
         private int gc2Delta;
@@ -223,6 +637,7 @@ namespace RatHabitat
         private int previousGc2;
         private long animatorUpdatesNs = -1L;
         private long animatorWindowPeakNs = -1L;
+        private long animatorWindowTotalNs;
         private double mainThreadWindowTotalMs;
         private int mainThreadWindowSamples;
         private int activeRatCount;
@@ -231,6 +646,7 @@ namespace RatHabitat
         private int rendererCount;
         private int uiGraphicCount;
         private int canvasCount;
+        private long previousSimulationStepTotal;
         private bool frameTimingWarningLogged;
         private GUIStyle boxStyle;
         private GUIStyle labelStyle;
@@ -242,6 +658,7 @@ namespace RatHabitat
 
         private void Awake()
         {
+            previousSimulationStepTotal = GrowthSystem.TotalSimulationSteps;
             previousGc0 = GC.CollectionCount(0);
             previousGc1 = GC.CollectionCount(1);
             previousGc2 = GC.CollectionCount(2);
@@ -279,8 +696,22 @@ namespace RatHabitat
             frameTimeSum += frameMs;
             frameTimeMax = Mathf.Max(frameTimeMax, frameMs);
             ReadPerFrameProfilerCounters();
+            if (gcAllocatedBytes > 0L) gcAllocatedWindowBytes += gcAllocatedBytes;
+            RuntimePerformanceDiagnostics.ObserveFrame(frameMs,
+                game == null ? 0L : game.GameTime,
+                game == null ? 1 : Mathf.RoundToInt(game.SimulationSpeed),
+                cpuMainThreadMs >= 0f ? cpuMainThreadMs : profilerMainThreadMs,
+                gpuFrameMs,
+                gcAllocatedBytes,
+                gc0Delta, gc1Delta, gc2Delta,
+                activeRatCount, pinkieCount, animatorCount, rendererCount,
+                uiGraphicCount, canvasCount, GrowthSystem.LastSimulationStepCount,
+                game == null ? 0f : game.LastMaintenanceDurationMs,
+                game == null ? 0f : game.LastUiRefreshDurationMs,
+                animatorUpdatesNs < 0L ? -1f : (float)(animatorUpdatesNs / 1000000d),
+                game == null ? "None" : game.PerformancePanelName);
             reportTimer += Time.unscaledDeltaTime;
-            if (reportTimer < ReportIntervalSeconds) return;
+            if (reportTimer < GameConfig.PerformanceLogSampleIntervalSeconds) return;
 
             double sampleWindowSeconds = Math.Max(0.001d, reportTimer);
             fps = (float)(frameCount / sampleWindowSeconds);
@@ -293,9 +724,70 @@ namespace RatHabitat
 
             ReadFrameTimings();
             ReadProfilerCounters();
-            CountSceneObjects();
-            sampleSummary = RuntimePerformanceDiagnostics.ConsumeSampleSummary();
-            RebuildReport();
+            if (RuntimePerformanceDiagnostics.CaptureEnabled || RuntimePerformanceDiagnostics.HudVisible)
+                CountSceneObjects();
+            if (RuntimePerformanceDiagnostics.CaptureEnabled)
+            {
+                long simulationStepTotal = GrowthSystem.TotalSimulationSteps;
+                PerformanceLogSample sample = new PerformanceLogSample
+                {
+                    UtcTicks = DateTime.UtcNow.Ticks,
+                    GameTimeMs = game == null ? 0L : game.GameTime,
+                    Speed = game == null ? 1 : Mathf.RoundToInt(game.SimulationSpeed),
+                    Fps = fps,
+                    AverageFrameMs = averageFrameMs,
+                    WorstFrameMs = worstFrameMs,
+                    CpuMainThreadMs = cpuMainThreadMs < 0f && mainThreadWindowSamples > 0
+                        ? (float)(mainThreadWindowTotalMs / mainThreadWindowSamples)
+                        : (cpuMainThreadMs >= 0f ? cpuMainThreadMs : profilerMainThreadMs),
+                    GpuMs = gpuFrameMs,
+                    GcAllocatedBytes = gcAllocatedRecorder.Valid ? gcAllocatedWindowBytes : -1L,
+                    Gc0Collections = gc0Delta,
+                    Gc1Collections = gc1Delta,
+                    Gc2Collections = gc2Delta,
+                    ActiveRatCount = activeRatCount,
+                    PinkieCount = pinkieCount,
+                    AnimatorCount = animatorCount,
+                    RendererCount = rendererCount,
+                    UiGraphicCount = uiGraphicCount,
+                    CanvasCount = canvasCount,
+                    SimulationSteps = (int)Math.Min(int.MaxValue, Math.Max(0L, simulationStepTotal - previousSimulationStepTotal)),
+                    SimulationMaintenanceMs = game == null ? 0f : game.ConsumePerformanceMaintenanceWindowMs(),
+                    UiRefreshMs = game == null ? 0f : game.ConsumePerformanceUiRefreshWindowMs(),
+                    RatAiMovementMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatBehaviorUpdate) +
+                        RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatBehaviorLateUpdate) +
+                        RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatDestinationSelection),
+                    AnimationMs = !animatorRecorder.Valid ? -1f : (float)(animatorWindowTotalNs / 1000000d),
+                    GroundingBoundsMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.GroundingAndBounds),
+                    RatPresentationMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatPresenterLateUpdate) +
+                        RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatPresentationBuild) +
+                        RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatMaterialSetup),
+                    InputInteractionsMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.InteractionUpdate),
+                    CurrentPanel = game == null ? "None" : game.PerformancePanelName,
+                };
+                RuntimePerformanceDiagnostics.RecordSample(sample);
+                previousSimulationStepTotal = simulationStepTotal;
+            }
+            else
+            {
+                previousSimulationStepTotal = GrowthSystem.TotalSimulationSteps;
+                if (game != null)
+                {
+                    game.ConsumePerformanceMaintenanceWindowMs();
+                    game.ConsumePerformanceUiRefreshWindowMs();
+                }
+            }
+            sampleSummary = RuntimePerformanceDiagnostics.ConsumeSampleSummary(RuntimePerformanceDiagnostics.HudVisible);
+            if (RuntimePerformanceDiagnostics.HudVisible) RebuildReport();
+            else
+            {
+                mainThreadWindowTotalMs = 0d;
+                mainThreadWindowSamples = 0;
+                gcAllocatedWindowPeakBytes = -1L;
+                animatorWindowPeakNs = -1L;
+            }
+            gcAllocatedWindowBytes = 0L;
+            animatorWindowTotalNs = 0L;
         }
 
         private void ReadFrameTimings()
@@ -357,7 +849,11 @@ namespace RatHabitat
                 gcAllocatedWindowPeakBytes = Math.Max(gcAllocatedWindowPeakBytes, gcAllocatedBytes);
             }
             animatorUpdatesNs = animatorRecorder.Valid ? animatorRecorder.LastValue : -1L;
-            if (animatorUpdatesNs >= 0L) animatorWindowPeakNs = Math.Max(animatorWindowPeakNs, animatorUpdatesNs);
+            if (animatorUpdatesNs >= 0L)
+            {
+                animatorWindowPeakNs = Math.Max(animatorWindowPeakNs, animatorUpdatesNs);
+                animatorWindowTotalNs += animatorUpdatesNs;
+            }
         }
 
         private static int ReadCollectionDelta(int generation, ref int previous)

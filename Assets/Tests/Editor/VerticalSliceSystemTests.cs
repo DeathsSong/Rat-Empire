@@ -13,6 +13,75 @@ namespace RatHabitat.Tests
     public class VerticalSliceSystemTests
     {
         [Test]
+        public void RuntimePerformanceLogStaysBoundedAndRecordsLagSeverityEscalation()
+        {
+            bool wasCapturing = RuntimePerformanceDiagnostics.CaptureEnabled;
+            try
+            {
+                RuntimePerformanceDiagnostics.SetCaptureEnabled(true);
+                RuntimePerformanceDiagnostics.ClearLog();
+                int writes = GameConfig.PerformanceLogSampleCapacity + 7;
+                for (int index = 0; index < writes; index++)
+                {
+                    RuntimePerformanceDiagnostics.RecordSample(new PerformanceLogSample
+                    {
+                        UtcTicks = DateTime.UtcNow.Ticks,
+                        GameTimeMs = GameConfig.StartGameTimeMs + index * 1000L,
+                        Speed = 2,
+                        Fps = index,
+                        AverageFrameMs = 1000f / Mathf.Max(1, index),
+                        WorstFrameMs = 50f,
+                        CpuMainThreadMs = 4f,
+                        GpuMs = 6f,
+                        GcAllocatedBytes = 2048,
+                        ActiveRatCount = 18,
+                        PinkieCount = 4,
+                        AnimatorCount = 18,
+                        RendererCount = 60,
+                        UiGraphicCount = 200,
+                        CanvasCount = 2,
+                        SimulationSteps = 18,
+                        SimulationMaintenanceMs = 1.5f,
+                        UiRefreshMs = 0.8f,
+                        RatAiMovementMs = 2.2f,
+                        AnimationMs = 3.2f,
+                        GroundingBoundsMs = 0.4f,
+                        RatPresentationMs = 1.1f,
+                        InputInteractionsMs = 0.1f,
+                        CurrentPanel = "Habitat",
+                    });
+                }
+
+                Assert.AreEqual(GameConfig.PerformanceLogSampleCapacity, RuntimePerformanceDiagnostics.SampleCount);
+                StringAssert.Contains((writes - 1) + ".0", RuntimePerformanceDiagnostics.BuildRecentSamplesText(1));
+                Assert.AreEqual(0, RuntimePerformanceDiagnostics.SpikeCount);
+
+                RuntimePerformanceDiagnostics.ObserveFrame(110f, GameConfig.StartGameTimeMs, 1, 8f, 5f,
+                    512, 1, 0, 0, 18, 4, 18, 60, 200, 2, 2, 1.5f, 0.8f, 3f, "My Rats");
+                RuntimePerformanceDiagnostics.ObserveFrame(270f, GameConfig.StartGameTimeMs, 1, 8f, 5f,
+                    1024, 1, 0, 0, 18, 4, 18, 60, 200, 2, 2, 1.5f, 1.3f, 4f, "My Rats");
+                Assert.AreEqual(2, RuntimePerformanceDiagnostics.SpikeCount,
+                    "A sustained slowdown creates one lag event and one critical-severity escalation rather than flooding the ring per frame.");
+                StringAssert.Contains("CRITICAL", RuntimePerformanceDiagnostics.BuildRecentSpikesText(2));
+                StringAssert.Contains("rats/pinkies 18/4", RuntimePerformanceDiagnostics.BuildRecentSpikesText(2));
+                StringAssert.Contains("record,severity,utc", RuntimePerformanceDiagnostics.BuildExportText(true));
+                StringAssert.Contains("spike,", RuntimePerformanceDiagnostics.BuildExportText(true));
+
+                RuntimePerformanceDiagnostics.ObserveFrame(20f, GameConfig.StartGameTimeMs, 1, 8f, 5f,
+                    0, 0, 0, 0, 18, 4, 18, 60, 200, 2, 2, 0f, 0f, 1f, "My Rats");
+                RuntimePerformanceDiagnostics.ObserveFrame(110f, GameConfig.StartGameTimeMs, 3, 8f, 5f,
+                    0, 0, 0, 0, 18, 4, 18, 60, 200, 2, 3, 0f, 0f, 1f, "Store");
+                Assert.AreEqual(3, RuntimePerformanceDiagnostics.SpikeCount,
+                    "A later lag episode is recorded again after frame time recovers below threshold.");
+            }
+            finally
+            {
+                RuntimePerformanceDiagnostics.ClearLog();
+                RuntimePerformanceDiagnostics.SetCaptureEnabled(wasCapturing);
+            }
+        }
+
+        [Test]
         public void FavoriteStatusTogglesAndPersistsWithTheRatRecord()
         {
             ColonySaveData save = ColonyFactory.CreateNew(1000000L);
@@ -77,6 +146,23 @@ namespace RatHabitat.Tests
             Assert.AreEqual(0, visibleFavorites.Count);
             Assert.IsTrue(RatFavoriteSystem.IsVisibleInFavorites(first, false),
                 "Leaving Favorites must return ordinary roster rows even when there are no favorites.");
+        }
+
+        [Test]
+        public void FavoriteStatusDoesNotChangeSaleEligibilityOrPrice()
+        {
+            ColonySaveData save = ColonyFactory.CreateNew(1000000L);
+            RatData rat = save.rats[0];
+            rat.stage = RatStage.Adult;
+            rat.ageDays = GameConfig.PupSaleMinimumAgeDays + 10f;
+            long gameTime = GameConfig.StartGameTimeMs + 10L * GameConfig.GameDayMs;
+            bool canSellBefore = StoreSystem.CanSellRat(save, rat, gameTime);
+            int saleValueBefore = StoreSystem.CalculateSaleValue(save, rat, gameTime);
+
+            Assert.IsTrue(RatFavoriteSystem.SetFavorite(save, rat.id, true));
+
+            Assert.AreEqual(canSellBefore, StoreSystem.CanSellRat(save, rat, gameTime));
+            Assert.AreEqual(saleValueBefore, StoreSystem.CalculateSaleValue(save, rat, gameTime));
         }
 
         [Test]

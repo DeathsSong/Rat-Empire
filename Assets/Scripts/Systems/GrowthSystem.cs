@@ -22,6 +22,7 @@ namespace RatHabitat
         private static int diagnosticsFrame = -1;
         private static int lastSimulationStepCount;
         private static int lastCompressedVisualActionCount;
+        private static long totalSimulationSteps;
 
         // A high-speed frame can represent many in-game seconds. Subdivide
         // behavior updates into bounded chunks so state transitions remain
@@ -52,6 +53,7 @@ namespace RatHabitat
         public static float LastMovementSimulationDeltaSeconds { get { return lastMovementSimulationDeltaSeconds; } }
         public static int LastSimulationStepCount { get { return lastSimulationStepCount; } }
         public static int LastCompressedVisualActionCount { get { return lastCompressedVisualActionCount; } }
+        public static long TotalSimulationSteps { get { return totalSimulationSteps; } }
 
         public static void SetRuntimeSpeed(float speed)
         {
@@ -99,6 +101,7 @@ namespace RatHabitat
                 simulationDeltaSeconds / MaximumBehaviorStepSeconds));
             int steps = Mathf.Clamp(requested, 1, MaximumBehaviorStepsPerFrame);
             lastSimulationStepCount += steps;
+            totalSimulationSteps += steps;
             if (requested > steps) lastCompressedVisualActionCount += requested - steps;
             return steps;
         }

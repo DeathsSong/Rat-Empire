@@ -98,6 +98,14 @@ namespace RatHabitat
         public const int StorePurchaseCommonMarkingPremium = 8;
         public const int StorePurchaseRareMarkingPremium = 20;
         public const int StorePurchasePricingVersion = 1;
+        // Development-only runtime performance capture. A one-hour sample ring
+        // is bounded and small enough for WebGL while retaining long runs.
+        public const float PerformanceLogSampleIntervalSeconds = 1f;
+        public const int PerformanceLogSampleCapacity = 3600;
+        public const int PerformanceLogSpikeCapacity = 256;
+        public const float PerformanceLagSpikeThresholdMs = 100f;
+        public const float PerformanceCriticalSpikeThresholdMs = 250f;
+        public const int PerformanceLogRecentDisplayCount = 8;
         // Market founders are almost always solid; breeding is the primary
         // source of new marked lines.
         public const float StoreFounderMarkingChance = 0.01f;

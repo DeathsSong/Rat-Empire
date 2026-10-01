@@ -528,5 +528,53 @@ mergeInto(LibraryManager.library, {
             }, false);
         } catch (error) {
         }
+    },
+
+    RatPerformanceCopyText: function (textPtr) {
+        try {
+            var text = UTF8ToString(textPtr);
+            var field = document.createElement("textarea");
+            field.value = text;
+            field.setAttribute("readonly", "readonly");
+            field.style.position = "fixed";
+            field.style.left = "-10000px";
+            field.style.top = "0";
+            document.body.appendChild(field);
+            field.focus();
+            field.select();
+            field.setSelectionRange(0, field.value.length);
+            var copied = false;
+            try { copied = document.execCommand("copy"); } catch (copyError) { copied = false; }
+            document.body.removeChild(field);
+            if (copied) return 1;
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+                navigator.clipboard.writeText(text).catch(function () { });
+                return 1;
+            }
+        } catch (error) {
+        }
+        return 0;
+    },
+
+    RatPerformanceDownloadText: function (fileNamePtr, contentPtr, mimeTypePtr) {
+        var objectUrl = null;
+        var link = null;
+        try {
+            var fileName = UTF8ToString(fileNamePtr);
+            var content = UTF8ToString(contentPtr);
+            var mimeType = UTF8ToString(mimeTypePtr) || "text/plain;charset=utf-8";
+            var blob = new Blob([content], { type: mimeType });
+            objectUrl = window.URL.createObjectURL(blob);
+            link = document.createElement("a");
+            link.href = objectUrl;
+            link.download = fileName;
+            link.style.display = "none";
+            document.body.appendChild(link);
+            link.click();
+        } catch (error) {
+        } finally {
+            if (link && link.parentNode) link.parentNode.removeChild(link);
+            if (objectUrl) window.setTimeout(function () { window.URL.revokeObjectURL(objectUrl); }, 1000);
+        }
     }
 });
