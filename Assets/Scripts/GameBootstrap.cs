@@ -96,6 +96,7 @@ namespace RatHabitat
         private string sellConfirmationRatId;
         private string euthanizeConfirmationRatId;
         private readonly HashSet<string> selectedRatIds = new HashSet<string>();
+        private readonly Dictionary<string, int> ratNameRandomizeCounts = new Dictionary<string, int>(StringComparer.Ordinal);
         private bool multipleSelectionMode;
         private bool groupMoveConfirmationPending;
         private RatEnclosure groupMoveConfirmationTarget;
@@ -2965,6 +2966,24 @@ namespace RatHabitat
         }
 
         /// <summary>
+        /// Changes a living colony rat's player-owned favorite flag and saves
+        /// it immediately. The UI refresh is intentionally left to the caller
+        /// so this action cannot also select the rat or move the habitat camera.
+        /// </summary>
+        public bool SetRatFavorite(string ratId, bool isFavorite)
+        {
+            RatData rat = BreedingSystem.FindRat(Save, ratId);
+            if (rat == null) return false;
+            if (rat.isFavorite == isFavorite) return true;
+
+            bool previous = rat.isFavorite;
+            rat.isFavorite = isFavorite;
+            if (SaveSystem.Save(Save)) return true;
+            rat.isFavorite = previous;
+            return false;
+        }
+
+        /// <summary>
         /// Changes only the inspected rat for the profile header arrows. This
         /// deliberately does not close panels, toggle breeding, clear the
         /// profile, or invoke any move/sale action; the UI owns the current
@@ -3602,7 +3621,7 @@ namespace RatHabitat
             float motherAgeDays = GameConfig.FemaleSexualMaturityDays + 30f;
             RatData mother = ColonyFactory.CreateRat(
                 motherId,
-                ColonyFactory.GeneratedName(motherId, RatSex.Female),
+                RatNameSystem.GenerateAvailableName(Save, motherId, RatSex.Female, now),
                 RatSex.Female,
                 now - (long)(motherAgeDays * GameConfig.GameDayMs),
                 0,
@@ -3641,7 +3660,7 @@ namespace RatHabitat
                 string pupId = ColonyFactory.NewId("dev_pinkie");
                 RatData pup = ColonyFactory.CreateRat(
                     pupId,
-                    ColonyFactory.GeneratedName(pupId, sex),
+                    RatNameSystem.GenerateAvailableName(Save, pupId, sex, now),
                     sex,
                     now,
                     litter.generation,
@@ -4077,7 +4096,8 @@ namespace RatHabitat
         {
             RatData rat = BreedingSystem.FindHistoricalRat(Save, ratId);
             if (rat == null) return string.Empty;
-            return RatNameSystem.GenerateAvailableName(Save, rat.id + "|rename|" + Time.frameCount, rat.sex, GameTime);
+            return RatNameSystem.GenerateAvailableName(Save,
+                rat.id + "|rename|" + NextNameRandomizeCount(rat.id), rat.sex, GameTime);
         }
 
         public bool TryRenamePendingPup(string pupId, string rawName, out string error)
@@ -4111,7 +4131,8 @@ namespace RatHabitat
             var occupied = new HashSet<string>(StringComparer.Ordinal);
             foreach (RatData other in PendingNamingPups)
                 if (other != null && other.id != pup.id) occupied.Add(RatNameSystem.NormalizeForComparison(other.name));
-            string name = RatNameSystem.GenerateAvailableName(Save, pup.id, pup.sex, GameTime);
+            string name = RatNameSystem.GenerateAvailableName(Save,
+                pup.id + "|newborn-randomize|" + NextNameRandomizeCount(pup.id), pup.sex, GameTime);
             int suffix = 2;
             string baseName = name;
             while (occupied.Contains(RatNameSystem.NormalizeForComparison(name))) name = baseName + " " + suffix++;
@@ -4119,6 +4140,15 @@ namespace RatHabitat
             pup.nameWasPlayerAssigned = true;
             RatNameSystem.RecordUsage(Save, name, pup.sex, pup.id, GameTime);
             return name;
+        }
+
+        private int NextNameRandomizeCount(string ratId)
+        {
+            int count;
+            ratNameRandomizeCounts.TryGetValue(ratId ?? string.Empty, out count);
+            count++;
+            ratNameRandomizeCounts[ratId ?? string.Empty] = count;
+            return count;
         }
 
         public void RandomizeAllPendingPupNames()

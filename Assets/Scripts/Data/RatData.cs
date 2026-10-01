@@ -188,6 +188,9 @@ namespace RatHabitat
     {
         public string id;
         public string name;
+        // Player-owned roster preference. Missing from legacy JSON defaults
+        // to false, so old colonies load without a migration pass.
+        public bool isFavorite;
         // True only after the player explicitly confirms or randomizes this
         // rat's name. Automatic migration and future save passes must never
         // overwrite a player-owned name.
@@ -412,6 +415,32 @@ namespace RatHabitat
         public bool enabled = true;
     }
 
+    /// <summary>
+    /// Small domain helpers for the player's rat favorites. Favorite state is
+    /// stored on each RatData record and is never inferred from name, sex, or
+    /// growth stage.
+    /// </summary>
+    public static class RatFavoriteSystem
+    {
+        public static bool IsVisibleInFavorites(RatData rat, bool favoritesOnly)
+        {
+            return rat != null && (!favoritesOnly || rat.isFavorite);
+        }
+
+        public static bool SetFavorite(ColonySaveData save, string ratId, bool isFavorite)
+        {
+            if (save == null || save.rats == null || string.IsNullOrEmpty(ratId)) return false;
+            for (int index = 0; index < save.rats.Count; index++)
+            {
+                RatData rat = save.rats[index];
+                if (rat == null || !string.Equals(rat.id, ratId, StringComparison.Ordinal)) continue;
+                rat.isFavorite = isFavorite;
+                return true;
+            }
+            return false;
+        }
+    }
+
     [Serializable]
     public class ColonySaveData
     {
@@ -474,6 +503,7 @@ namespace RatHabitat
         public string myRatsSortField = "Name";
         public bool myRatsSortAscending = true;
         public string myRatsSexFilter = "All";
+        public bool myRatsFavoritesOnly;
         // Absolute real-time deadline for the next automatic Pairing Habitat
         // evaluation. Persisting the deadline keeps save/load from resetting
         // the 30-second cadence.

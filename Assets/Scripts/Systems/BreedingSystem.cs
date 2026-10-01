@@ -1097,7 +1097,7 @@ namespace RatHabitat
                     string pupId = ColonyFactory.NewId("rat");
                     var pup = ColonyFactory.CreateRat(
                         pupId,
-                        null,
+                        RatNameSystem.GenerateAvailableName(save, pupId, sex, gameTime),
                         sex,
                         gameTime,
                         generation,

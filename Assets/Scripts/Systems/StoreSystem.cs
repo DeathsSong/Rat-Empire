@@ -18,9 +18,6 @@ namespace RatHabitat
             public int finalPrice;
         }
 
-        private static readonly string[] MaleNames = GameConfig.MaleRatNames;
-        private static readonly string[] FemaleNames = GameConfig.FemaleRatNames;
-
         // Weighted toward common pet-rat patterns while keeping rarer families
         // in the market. The selected family is persisted on the listing.
         private static readonly string[] MarkingFamilies =
@@ -113,12 +110,16 @@ namespace RatHabitat
 
             string maleId = "starter_male_" + Math.Abs(seed).ToString("X8");
             string femaleId = "starter_female_" + Math.Abs(seed).ToString("X8");
+            // Keep the existing random stream aligned so changing the name
+            // selector does not also change the founders' genetics or stats.
+            random.Next(GameConfig.MaleRatNames.Length);
             male = CreateGeneratedAdultRat(maleId, RatSex.Male,
-                MaleNames[random.Next(MaleNames.Length)], maleFamily, random, sharedBaseline,
+                RatNameSystem.GeneratedName(maleId, RatSex.Male), maleFamily, random, sharedBaseline,
                 gameTime, GameConfig.StarterMaleMinimumAgeDays, GameConfig.StarterMaleMaximumAgeDays,
                 true);
+            random.Next(GameConfig.FemaleRatNames.Length);
             female = CreateGeneratedAdultRat(femaleId, RatSex.Female,
-                FemaleNames[random.Next(FemaleNames.Length)], femaleFamily, random, sharedBaseline,
+                RatNameSystem.GeneratedName(femaleId, RatSex.Female), femaleFamily, random, sharedBaseline,
                 gameTime, GameConfig.StarterFemaleMinimumAgeDays, GameConfig.StarterFemaleMaximumAgeDays,
                 true);
 
@@ -202,6 +203,7 @@ namespace RatHabitat
             if (listing == null) return null;
             RatData rat = CreatePreviewRat(listing, gameTime);
             rat.id = ColonyFactory.NewId("store_rat");
+            rat.isFavorite = false;
             rat.enclosure = rat.sex == RatSex.Male ? RatEnclosure.MaleColony : RatEnclosure.FemaleColony;
             return rat;
         }
@@ -440,7 +442,7 @@ namespace RatHabitat
             float maximumAgeDays,
             bool starter)
         {
-            var genotype = CreateGenotype(random, markingFamily);
+            var genotype = CreateGenotype(random, markingFamily, allowAlbino: !starter);
             GeneticsSystem.Normalize(genotype);
             float minimum = starter ? GameConfig.StarterBeginnerTraitMinimum : GameConfig.StoreLowTraitMinimum;
             float maximum = starter ? GameConfig.StarterBeginnerTraitMaximum : GameConfig.StoreLowTraitMaximum;
@@ -471,8 +473,10 @@ namespace RatHabitat
             rat.ageDays = ageDays;
             rat.baseHealth = rat.traits.health;
             rat.baseFertility = rat.traits.fertility;
-            rat.coatColorVariant = GeneticsSystem.DefaultCoatColorVariant(id, genotype);
-            rat.coatTone = GeneticsSystem.DefaultCoatTone(id, genotype);
+            rat.coatColorVariant = starter
+                ? GameConfig.StarterSolidCoatColorVariant
+                : GeneticsSystem.DefaultCoatColorVariant(id, genotype);
+            rat.coatTone = starter ? 1f : GeneticsSystem.DefaultCoatTone(id, genotype);
             rat.phenotype = GeneticsSystem.DerivePhenotype(RatStage.Adult, genotype,
                 rat.coatColorVariant, rat.coatTone);
             rat.markingFamily = GeneticsSystem.NormalizeMarkingFamily(markingFamily, genotype);
@@ -513,13 +517,13 @@ namespace RatHabitat
             };
         }
 
-        private static GenotypeData CreateGenotype(Random random, string markingFamily)
+        private static GenotypeData CreateGenotype(Random random, string markingFamily, bool allowAlbino = true)
         {
             string blackAllele = random.Next(2) == 0 ? "B" : "b";
             string otherBlackAllele = random.Next(2) == 0 ? "B" : "b";
             string diluteAllele = random.Next(3) == 0 ? "d" : "D";
             string otherDiluteAllele = random.Next(3) == 0 ? "d" : "D";
-            bool albino = random.NextDouble() < 0.08;
+            bool albino = allowAlbino && random.NextDouble() < 0.08;
             string c1 = albino ? "c" : (random.Next(4) == 0 ? "c" : "C");
             string c2 = albino ? "c" : (random.Next(4) == 0 ? "c" : "C");
             bool solid = string.Equals(markingFamily, "Solid", StringComparison.OrdinalIgnoreCase) ||

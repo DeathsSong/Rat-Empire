@@ -17,6 +17,9 @@ namespace RatHabitat
         // deterministically when a pool is exhausted, but normal colonies
         // should have many generations of unused names available first.
         public const float RatNameReuseCooldownDays = 90f;
+        // Stable-ID name generation keeps single names as the norm while
+        // allowing occasional complete two-part names from the same pools.
+        public const float RatDoubleNameChance = 0.12f;
         // A pup must be both fully weaned and six weeks old before it can be
         // sold.  Keep this separate from PinkieStageDays and WeaningDays so a
         // visual growth transition cannot accidentally unlock a sale.
@@ -95,9 +98,12 @@ namespace RatHabitat
         public const int StorePurchaseCommonMarkingPremium = 8;
         public const int StorePurchaseRareMarkingPremium = 20;
         public const int StorePurchasePricingVersion = 1;
-        // New market founders are usually solid. Marked listings remain
-        // occasional; breeding is the primary source of new marked lines.
-        public const float StoreFounderMarkingChance = 0.05f;
+        // Market founders are almost always solid; breeding is the primary
+        // source of new marked lines.
+        public const float StoreFounderMarkingChance = 0.01f;
+        // Both new-game starters share one solid visual coat while their
+        // underlying black/dilution alleles remain independently generated.
+        public const string StarterSolidCoatColorVariant = "agouti";
         public const int StarterAdultRatPrice = StorePurchaseBasePrice;
         public const long StoreRestockIntervalGameMs = GameDayMs;
         public const int StoreRestockListingCount = 2;

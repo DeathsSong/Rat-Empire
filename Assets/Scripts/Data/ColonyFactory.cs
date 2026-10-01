@@ -212,6 +212,7 @@ namespace RatHabitat
             {
                 id = id,
                 name = string.IsNullOrWhiteSpace(name) ? GeneratedName(id, sex) : NormalizeDisplayName(name),
+                isFavorite = false,
                 sex = sex,
                 stage = stageOverride,
                 generation = generation,
@@ -257,9 +258,7 @@ namespace RatHabitat
         /// </summary>
         public static string GeneratedName(string id, RatSex sex)
         {
-            string[] pool = sex == RatSex.Female ? GameConfig.FemaleRatNames : GameConfig.MaleRatNames;
-            if (pool == null || pool.Length == 0) return sex == RatSex.Female ? "Mabel" : "Otto";
-            return pool[StableHash(id) % pool.Length];
+            return RatNameSystem.GeneratedName(id, sex);
         }
 
         /// <summary>

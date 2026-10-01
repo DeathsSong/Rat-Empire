@@ -191,6 +191,7 @@ namespace RatHabitat
         private RosterSortField rosterSortField = RosterSortField.Name;
         private bool rosterSortAscending = true;
         private RosterSexFilter rosterSexFilter = RosterSexFilter.All;
+        private bool rosterFavoritesOnly;
         private string expandedMyRatsId;
         private string familyTreeSubjectId;
         private string profileMoreInformationRatId;
@@ -761,7 +762,8 @@ namespace RatHabitat
                 ? string.Empty
                 : (rat.phenotype.coatColorLabel ?? string.Empty) + ":" + (rat.phenotype.markingsLabel ?? string.Empty);
             return game.UiStructureSignature + "|profile:" + rat.id + ":" +
-                (rat.name ?? string.Empty) + ":" + rat.stage + ":" + rat.enclosure + ":" +
+                (rat.name ?? string.Empty) + ":favorite=" + rat.isFavorite + ":" +
+                rat.stage + ":" + rat.enclosure + ":" +
                 rat.reproductiveState + ":" + rat.nursing + ":" + rat.pregnancyId + ":" +
                 pregnancyKey + ":" + phenotypeKey + ":breed=" + canBreed + ":" +
                 (reason ?? string.Empty) + ":more=" + profileMoreInformationExpanded;
@@ -4174,6 +4176,9 @@ namespace RatHabitat
             nameText.rectTransform.offsetMin = new Vector2(2f, 0f);
             nameText.rectTransform.offsetMax = new Vector2(-2f, 0f);
 
+            if (game != null && BreedingSystem.FindRat(game.Save, rat.id) != null)
+                AddFavoriteToggle(header, rat, 48f);
+
             next = AddButtonTo(header, "→", hasNext,
                 hasNext ? (UnityEngine.Events.UnityAction)(() => NavigateProfile(1)) : null,
                 hasNext ? new Color(0.18f, 0.38f, 0.40f) : new Color(0.14f, 0.16f, 0.17f), 50f);
@@ -4912,9 +4917,11 @@ namespace RatHabitat
 
             int ratCount = CountVisibleColonyRats();
             var card = CreateCard("My Rats");
-            string countSummary = rosterSortField == RosterSortField.Pregnancy
-                ? ratCount + " pregnant rats shown"
-                : ratCount + " shown of " + CountColonyRats() + " colony rats";
+            string countSummary = rosterFavoritesOnly
+                ? ratCount + " favorite rats shown"
+                : rosterSortField == RosterSortField.Pregnancy
+                    ? ratCount + " pregnant rats shown"
+                    : ratCount + " shown of " + CountColonyRats() + " colony rats";
             AddText(card, countSummary + "  •  " + RosterSexFilterLabel() +
                 "  •  Sort: " + RosterSortLabel(), 13,
                 new Color(0.78f, 0.9f, 0.82f), TextAnchor.UpperLeft);
@@ -5015,7 +5022,7 @@ namespace RatHabitat
             if (roster.Count == 0)
             {
                 Text emptyState = AddTextTo(listContent,
-                    rosterSortField == RosterSortField.Pregnancy ? "No pregnant rats." : "No rats are currently in the colony.",
+                    RosterEmptyStateMessage(),
                     14, new Color(1f, 0.72f, 0.42f), TextAnchor.UpperLeft);
                 // Empty-state copy is informational only. It must never
                 // participate in EventSystem or manual fallback hit testing.
@@ -5050,7 +5057,11 @@ namespace RatHabitat
 
         private bool IsRosterRatVisible(RatData rat)
         {
-            if (rat == null) return false;
+            if (!RatFavoriteSystem.IsVisibleInFavorites(rat, rosterFavoritesOnly)) return false;
+            if (rosterFavoritesOnly)
+                return rosterSortField != RosterSortField.Pregnancy ||
+                    BreedingSystem.FindActivePregnancyForMother(game.Save, rat) != null;
+
             bool sexVisible;
             switch (rosterSexFilter)
             {
@@ -5062,6 +5073,28 @@ namespace RatHabitat
             if (rosterSortField == RosterSortField.Pregnancy)
                 return BreedingSystem.FindActivePregnancyForMother(game.Save, rat) != null;
             return true;
+        }
+
+        private string RosterEmptyStateMessage()
+        {
+            if (rosterFavoritesOnly)
+            {
+                if (CountFavoriteColonyRats() == 0) return "No favorite rats yet.";
+                if (rosterSortField == RosterSortField.Pregnancy) return "No pregnant favorite rats.";
+                return "No favorite rats yet.";
+            }
+            return rosterSortField == RosterSortField.Pregnancy
+                ? "No pregnant rats."
+                : "No rats are currently in the colony.";
+        }
+
+        private int CountFavoriteColonyRats()
+        {
+            if (game == null || game.Save == null || game.Save.rats == null) return 0;
+            int count = 0;
+            foreach (RatData rat in game.Save.rats)
+                if (rat != null && rat.isFavorite) count++;
+            return count;
         }
 
         private void AddRosterSexFilters(RectTransform parent)
@@ -5076,11 +5109,14 @@ namespace RatHabitat
             AddRosterSexFilterButton(row, RosterSexFilter.All);
             AddRosterSexFilterButton(row, RosterSexFilter.Males);
             AddRosterSexFilterButton(row, RosterSexFilter.Females);
+            bool favoritesActive = rosterFavoritesOnly;
+            AddButtonTo(row, "Favorites", true, SetRosterFavoritesFilter,
+                favoritesActive ? new Color(0.30f, 0.48f, 0.32f) : new Color(0.14f, 0.25f, 0.24f), 36f);
         }
 
         private void AddRosterSexFilterButton(RectTransform parent, RosterSexFilter filter)
         {
-            bool active = rosterSexFilter == filter;
+            bool active = !rosterFavoritesOnly && rosterSexFilter == filter;
             AddButtonTo(parent, RosterSexFilterLabel(filter), true,
                 () => SetRosterSexFilter(filter),
                 active ? new Color(0.30f, 0.48f, 0.32f) : new Color(0.14f, 0.25f, 0.24f), 36f);
@@ -5088,8 +5124,23 @@ namespace RatHabitat
 
         private void SetRosterSexFilter(RosterSexFilter filter)
         {
-            if (rosterSexFilter == filter) return;
+            if (!rosterFavoritesOnly && rosterSexFilter == filter) return;
+            rosterFavoritesOnly = false;
             rosterSexFilter = filter;
+            PersistRosterPreferences();
+            if (game != null) game.DeactivateMultipleSelection();
+            if (!string.IsNullOrEmpty(expandedMyRatsId))
+            {
+                RatData expanded = BreedingSystem.FindRat(game.Save, expandedMyRatsId);
+                if (!IsRosterRatVisible(expanded)) expandedMyRatsId = null;
+            }
+            Refresh(true);
+        }
+
+        private void SetRosterFavoritesFilter()
+        {
+            if (rosterFavoritesOnly) return;
+            rosterFavoritesOnly = true;
             PersistRosterPreferences();
             if (game != null) game.DeactivateMultipleSelection();
             if (!string.IsNullOrEmpty(expandedMyRatsId))
@@ -5105,6 +5156,7 @@ namespace RatHabitat
             rosterSortField = RosterSortField.Name;
             rosterSortAscending = true;
             rosterSexFilter = RosterSexFilter.All;
+            rosterFavoritesOnly = false;
             if (game == null || game.Save == null) return;
 
             string savedField = game.Save.myRatsSortField ?? string.Empty;
@@ -5137,6 +5189,7 @@ namespace RatHabitat
                 case "females": rosterSexFilter = RosterSexFilter.Females; break;
                 default: rosterSexFilter = RosterSexFilter.All; break;
             }
+            rosterFavoritesOnly = game.Save.myRatsFavoritesOnly;
         }
 
         private void PersistRosterPreferences()
@@ -5147,12 +5200,13 @@ namespace RatHabitat
                 : rosterSortField.ToString();
             game.Save.myRatsSortAscending = rosterSortAscending;
             game.Save.myRatsSexFilter = rosterSexFilter.ToString();
+            game.Save.myRatsFavoritesOnly = rosterFavoritesOnly;
             SaveSystem.Save(game.Save);
         }
 
         private string RosterSexFilterLabel()
         {
-            return "Sex: " + RosterSexFilterLabel(rosterSexFilter);
+            return rosterFavoritesOnly ? "Favorites" : "Sex: " + RosterSexFilterLabel(rosterSexFilter);
         }
 
         private static string RosterSexFilterLabel(RosterSexFilter filter)
@@ -5238,12 +5292,14 @@ namespace RatHabitat
         {
             rosterSortField = RosterSortField.Name;
             rosterSortAscending = true;
+            rosterFavoritesOnly = false;
             lastRosterSortSignature = null;
             if (game == null || game.Save == null) return;
             bool changed = !string.Equals(game.Save.myRatsSortField, "Name", StringComparison.OrdinalIgnoreCase) ||
-                !game.Save.myRatsSortAscending;
+                !game.Save.myRatsSortAscending || game.Save.myRatsFavoritesOnly;
             game.Save.myRatsSortField = "Name";
             game.Save.myRatsSortAscending = true;
+            game.Save.myRatsFavoritesOnly = false;
             if (changed) SaveSystem.Save(game.Save);
         }
 
@@ -5314,7 +5370,8 @@ namespace RatHabitat
         {
             if (sortedRoster == null) return string.Empty;
             var signature = new System.Text.StringBuilder();
-            signature.Append(rosterSexFilter).Append('|').Append(rosterSortField).Append(';');
+            signature.Append(rosterFavoritesOnly).Append('|').Append(rosterSexFilter)
+                .Append('|').Append(rosterSortField).Append(';');
             foreach (RatData rat in sortedRoster)
             {
                 if (rat == null) continue;
@@ -5376,7 +5433,7 @@ namespace RatHabitat
             if (roster.Count == 0)
             {
                 Text emptyState = AddTextTo(ratRosterContent,
-                    rosterSortField == RosterSortField.Pregnancy ? "No pregnant rats." : "No rats are currently in the colony.",
+                    RosterEmptyStateMessage(),
                     14, new Color(1f, 0.72f, 0.42f), TextAnchor.UpperLeft);
                 emptyState.raycastTarget = false;
             }
@@ -5498,6 +5555,7 @@ namespace RatHabitat
             infoVertical.childForceExpandHeight = false;
             var infoFitter = infoRoot.gameObject.AddComponent<ContentSizeFitter>();
             infoFitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+            AddFavoriteToggle(header, rat, 44f);
 
             Text nameText = AddTextTo(infoRoot, BuildRatRosterName(rat, selected), 15, Color.white, TextAnchor.MiddleLeft);
             BindLiveText(nameText, () => BuildRatRosterName(rat, selected));
@@ -5683,6 +5741,15 @@ namespace RatHabitat
             // My Rats selection is data-only. Do not select the world object or
             // move the camera: the pointer/touch belongs to this UI row and
             // must never be reused by the habitat raycast path.
+            Refresh(true);
+        }
+
+        private void ToggleRatFavorite(string ratId)
+        {
+            if (game == null) return;
+            RatData rat = BreedingSystem.FindRat(game.Save, ratId);
+            if (rat == null || !game.SetRatFavorite(ratId, !rat.isFavorite)) return;
+            lastRosterSortSignature = null;
             Refresh(true);
         }
 
@@ -6702,6 +6769,59 @@ namespace RatHabitat
                 labelText.rectTransform.offsetMax = new Vector2(-10f, -4f);
             }
             return button;
+        }
+
+        private Button AddFavoriteToggle(Transform parent, RatData rat, float size)
+        {
+            if (parent == null || rat == null) return null;
+            Color buttonColor = rat.isFavorite
+                ? new Color(0.26f, 0.43f, 0.32f)
+                : new Color(0.14f, 0.29f, 0.29f);
+            Button button = AddButtonTo(parent, string.Empty, true,
+                () => ToggleRatFavorite(rat.id), buttonColor, size, false);
+            button.gameObject.name = (rat.isFavorite ? "Remove Favorite " : "Add Favorite ") +
+                ColonyFactory.DisplayName(rat);
+            LayoutElement layout = button.GetComponent<LayoutElement>();
+            if (layout != null)
+            {
+                layout.minWidth = size;
+                layout.preferredWidth = size;
+                layout.flexibleWidth = 0f;
+            }
+
+            RectTransform iconRoot = CreateRect("Favorite Star Icon", button.transform);
+            iconRoot.anchorMin = new Vector2(0.5f, 0.5f);
+            iconRoot.anchorMax = new Vector2(0.5f, 0.5f);
+            iconRoot.pivot = new Vector2(0.5f, 0.5f);
+            iconRoot.sizeDelta = Vector2.one * size * 0.58f;
+            var icon = iconRoot.gameObject.AddComponent<FavoriteStarGraphic>();
+            icon.color = rat.isFavorite
+                ? new Color(1f, 0.82f, 0.38f, 1f)
+                : new Color(0.91f, 0.93f, 0.87f, 0.88f);
+            icon.raycastTarget = false;
+            return button;
+        }
+
+        private sealed class FavoriteStarGraphic : MaskableGraphic
+        {
+            protected override void OnPopulateMesh(VertexHelper vertexHelper)
+            {
+                vertexHelper.Clear();
+                Rect rect = GetPixelAdjustedRect();
+                Vector2 center = rect.center;
+                float outerRadius = Mathf.Min(rect.width, rect.height) * 0.48f;
+                float innerRadius = outerRadius * 0.43f;
+                vertexHelper.AddVert(center, color, Vector2.zero);
+                for (int index = 0; index < 10; index++)
+                {
+                    float angle = (90f - index * 36f) * Mathf.Deg2Rad;
+                    float radius = index % 2 == 0 ? outerRadius : innerRadius;
+                    Vector2 point = center + new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)) * radius;
+                    vertexHelper.AddVert(point, color, Vector2.zero);
+                }
+                for (int index = 0; index < 10; index++)
+                    vertexHelper.AddTriangle(0, index + 1, (index + 1) % 10 + 1);
+            }
         }
 
         private sealed class DirectUiClickRelay : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, IPointerClickHandler

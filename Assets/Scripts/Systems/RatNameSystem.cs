@@ -147,6 +147,33 @@ namespace RatHabitat
             return AllocateName(save, stableId, sex, gameTime, CollectOccupiedNames(save, null));
         }
 
+        /// <summary>
+        /// Stable fallback for factory paths without a colony save context.
+        /// Custom names are only considered by GenerateAvailableName, where
+        /// they are still treated as complete entries rather than combined.
+        /// </summary>
+        public static string GeneratedName(string stableId, RatSex sex)
+        {
+            string[] pool = sex == RatSex.Female ? GameConfig.FemaleRatNames : GameConfig.MaleRatNames;
+            if (pool == null || pool.Length == 0) return sex == RatSex.Female ? "Mabel" : "Otto";
+
+            bool wantsDoubleName = WantsDoubleName(stableId);
+            int start = StableHash((stableId ?? string.Empty) + "|name-choice") % pool.Length;
+            for (int pass = 0; pass < 2; pass++)
+            {
+                bool targetDoubleName = pass == 0 ? wantsDoubleName : !wantsDoubleName;
+                for (int offset = 0; offset < pool.Length; offset++)
+                {
+                    string candidate = pool[(start + offset) % pool.Length];
+                    NameParts parts = SplitName(candidate);
+                    bool candidateIsDoubleName = !string.IsNullOrEmpty(parts.second);
+                    if (candidateIsDoubleName != targetDoubleName) continue;
+                    return candidate;
+                }
+            }
+            return pool[start];
+        }
+
         public static bool IsNameAvailable(ColonySaveData save, string name, string exceptId)
         {
             if (save == null) return false;
@@ -256,39 +283,76 @@ namespace RatHabitat
         private static string AllocateName(ColonySaveData save, string stableId, RatSex sex, long gameTime, HashSet<string> occupied)
         {
             string[] pool = BuildPool(save, sex);
-            int start = StableHash(stableId) % Math.Max(1, pool.Length);
-            int best = -1;
-            long bestScore = long.MaxValue;
-            bool preferSingle = StableHash(stableId + "|name-shape") % 100 < 78;
-            int passes = preferSingle ? 2 : 1;
-            for (int pass = 0; pass < passes; pass++)
-            {
-                for (int offset = 0; offset < pool.Length; offset++)
-                {
-                    int index = (start + offset) % pool.Length;
-                    string candidate = pool[index];
-                    NameParts parts = SplitName(candidate);
-                    bool isCompound = !string.IsNullOrEmpty(parts.second);
-                    if (preferSingle && ((pass == 0 && isCompound) || (pass == 1 && !isCompound))) continue;
-                    if (occupied.Contains(NormalizeForComparison(candidate))) continue;
-                    long firstLast = LatestFirstNameUse(save, parts.first);
-                    long secondLast = isCompound ? LatestSecondNameUse(save, parts.second) : 0L;
-                    if (firstLast > 0L && gameTime - firstLast < CooldownMs) continue;
-                    if (isCompound && secondLast > 0L && gameTime - secondLast < CooldownMs) continue;
-                    long score = Math.Max(firstLast, secondLast);
-                    if (score < bestScore) { best = index; bestScore = score; }
-                    if (score == 0L) break;
-                }
-                if (best >= 0 && bestScore == 0L) break;
-            }
+            int start = StableHash((stableId ?? string.Empty) + "|name-choice") % Math.Max(1, pool.Length);
+            bool wantsDoubleName = WantsDoubleName(stableId);
+
+            // Keep the requested name shape when its candidates exist. Within
+            // that shape, prefer never-used/old first and second names. Only
+            // relax the reuse cooldown before falling back to the other shape.
+            int best = FindBestCandidate(save, pool, occupied, gameTime, start, wantsDoubleName, true);
+            if (best < 0) best = FindBestCandidate(save, pool, occupied, gameTime, start, wantsDoubleName, false);
+            if (best < 0) best = FindBestCandidate(save, pool, occupied, gameTime, start, !wantsDoubleName, true);
+            if (best < 0) best = FindBestCandidate(save, pool, occupied, gameTime, start, !wantsDoubleName, false);
             if (best >= 0) return pool[best];
+
             string fallback = pool[start];
+            for (int offset = 0; offset < pool.Length; offset++)
+            {
+                string candidate = pool[(start + offset) % pool.Length];
+                bool candidateIsDoubleName = !string.IsNullOrEmpty(SplitName(candidate).second);
+                if (candidateIsDoubleName == wantsDoubleName)
+                {
+                    fallback = candidate;
+                    break;
+                }
+            }
             for (int suffix = 2; suffix < 100000; suffix++)
             {
                 string candidate = fallback + " " + suffix;
                 if (!occupied.Contains(NormalizeForComparison(candidate))) return candidate;
             }
             return fallback + " " + StableHash(stableId);
+        }
+
+        private static int FindBestCandidate(ColonySaveData save, string[] pool,
+            HashSet<string> occupied, long gameTime, int start, bool wantsDoubleName,
+            bool respectReuseCooldown)
+        {
+            int best = -1;
+            long bestScore = long.MaxValue;
+            for (int offset = 0; offset < pool.Length; offset++)
+            {
+                int index = (start + offset) % pool.Length;
+                string candidate = pool[index];
+                NameParts parts = SplitName(candidate);
+                bool isDoubleName = !string.IsNullOrEmpty(parts.second);
+                if (isDoubleName != wantsDoubleName ||
+                    occupied.Contains(NormalizeForComparison(candidate))) continue;
+
+                long firstLast = LatestFirstNameUse(save, parts.first);
+                long secondLast = isDoubleName ? LatestSecondNameUse(save, parts.second) : 0L;
+                if (respectReuseCooldown &&
+                    ((firstLast > 0L && gameTime - firstLast < CooldownMs) ||
+                     (secondLast > 0L && gameTime - secondLast < CooldownMs))) continue;
+
+                RatNameUseData fullNameUse = FindHistory(save, candidate);
+                long fullNameLast = fullNameUse == null ? 0L : fullNameUse.lastUsedGameTime;
+                long score = Math.Max(fullNameLast, Math.Max(firstLast, secondLast));
+                if (score < bestScore)
+                {
+                    best = index;
+                    bestScore = score;
+                }
+                if (score == 0L) break;
+            }
+            return best;
+        }
+
+        private static bool WantsDoubleName(string stableId)
+        {
+            double chance = Math.Max(0d, Math.Min(1d, GameConfig.RatDoubleNameChance));
+            int threshold = (int)Math.Round(chance * 10000d);
+            return StableHash((stableId ?? string.Empty) + "|name-shape") % 10000 < threshold;
         }
 
         private static HashSet<string> CollectOccupiedNames(ColonySaveData save, string exceptId)
@@ -396,7 +460,21 @@ namespace RatHabitat
         private static NameParts SplitName(string value)
         {
             string[] parts = ColonyFactory.NormalizeDisplayName(value).Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-            return new NameParts { first = parts.Length == 0 ? string.Empty : parts[0], second = parts.Length > 1 ? parts[parts.Length - 1] : string.Empty };
+            int namePartCount = parts.Length;
+            if (namePartCount > 1 && IsGeneratedSuffixToken(parts[namePartCount - 1])) namePartCount--;
+            return new NameParts
+            {
+                first = namePartCount == 0 ? string.Empty : parts[0],
+                second = namePartCount > 1 ? parts[namePartCount - 1] : string.Empty,
+            };
+        }
+
+        private static bool IsGeneratedSuffixToken(string value)
+        {
+            if (string.Equals(value, "Jr", StringComparison.OrdinalIgnoreCase) || IsRoman(value)) return true;
+            if (string.IsNullOrEmpty(value)) return false;
+            for (int i = 0; i < value.Length; i++) if (!char.IsDigit(value[i])) return false;
+            return true;
         }
 
         private static void SetNameParts(RatNameUseData entry, string name, long gameTime)

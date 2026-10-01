@@ -4,12 +4,116 @@ using System.Collections.Generic;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.UI;
 using Object = UnityEngine.Object;
 
 namespace RatHabitat.Tests
 {
     public class VerticalSliceSystemTests
     {
+        [Test]
+        public void FavoriteStatusTogglesAndPersistsWithTheRatRecord()
+        {
+            ColonySaveData save = ColonyFactory.CreateNew(1000000L);
+            RatData rat = save.rats[0];
+            Assert.IsFalse(rat.isFavorite, "New colony rats start without favorites.");
+
+            Assert.IsTrue(RatFavoriteSystem.SetFavorite(save, rat.id, true));
+            Assert.IsTrue(rat.isFavorite);
+            Assert.IsTrue(RatFavoriteSystem.SetFavorite(save, rat.id, false));
+            Assert.IsFalse(rat.isFavorite);
+            Assert.IsFalse(RatFavoriteSystem.SetFavorite(save, "missing-rat", true));
+
+            Assert.IsTrue(RatFavoriteSystem.SetFavorite(save, rat.id, true));
+            ColonySaveData loaded = SaveSystem.FromJson(SaveSystem.ToJson(save));
+            RatData loadedRat = BreedingSystem.FindRat(loaded, rat.id);
+            Assert.IsNotNull(loadedRat);
+            Assert.IsTrue(loadedRat.isFavorite);
+
+            RatData legacyRat = JsonUtility.FromJson<RatData>("{\"id\":\"legacy\",\"name\":\"Legacy\"}");
+            Assert.IsNotNull(legacyRat);
+            Assert.IsFalse(legacyRat.isFavorite,
+                "Legacy rat JSON without the new field safely defaults to not favorited.");
+        }
+
+        [Test]
+        public void NewlyCreatedPinkiesAndPurchasedRatsStartWithoutFavorites()
+        {
+            ColonySaveData save = ColonyFactory.CreateNew(1000000L);
+            RatData pinkie = ColonyFactory.CreateRat(
+                "favorite-pinkie-test", "Pip", RatSex.Female, 1000000L, 1,
+                save.rats[0].genotype.Clone(), new TraitData(3f, 5f, 4f), RatStage.Pinkie);
+            RatData purchased = StoreSystem.CreatePurchasedRat(save.storeRatListings[0], 1000000L);
+
+            Assert.IsFalse(pinkie.isFavorite);
+            Assert.IsFalse(purchased.isFavorite);
+        }
+
+        [Test]
+        public void FavoritesFilterSupportsSortingAndAnEmptyResultWithoutChangingOtherRows()
+        {
+            ColonySaveData save = ColonyFactory.CreateNew(1000000L);
+            RatData first = save.rats[0];
+            RatData second = save.rats[1];
+            first.traits.fertility = 3f;
+            second.traits.fertility = 8f;
+            Assert.IsTrue(RatFavoriteSystem.SetFavorite(save, first.id, true));
+            Assert.IsTrue(RatFavoriteSystem.SetFavorite(save, second.id, true));
+
+            var visibleFavorites = new List<RatData>();
+            foreach (RatData rat in save.rats)
+                if (RatFavoriteSystem.IsVisibleInFavorites(rat, true)) visibleFavorites.Add(rat);
+            visibleFavorites.Sort((left, right) => left.traits.fertility.CompareTo(right.traits.fertility));
+            Assert.AreEqual(2, visibleFavorites.Count);
+            Assert.AreSame(first, visibleFavorites[0]);
+            Assert.AreSame(second, visibleFavorites[1]);
+
+            Assert.IsTrue(RatFavoriteSystem.SetFavorite(save, first.id, false));
+            Assert.IsTrue(RatFavoriteSystem.SetFavorite(save, second.id, false));
+            visibleFavorites.Clear();
+            foreach (RatData rat in save.rats)
+                if (RatFavoriteSystem.IsVisibleInFavorites(rat, true)) visibleFavorites.Add(rat);
+            Assert.AreEqual(0, visibleFavorites.Count);
+            Assert.IsTrue(RatFavoriteSystem.IsVisibleInFavorites(first, false),
+                "Leaving Favorites must return ordinary roster rows even when there are no favorites.");
+        }
+
+        [Test]
+        public void FavoriteStarPointerClickDoesNotInvokeItsRatCardParent()
+        {
+            GameObject eventSystemObject = new GameObject("Favorite Test EventSystem", typeof(EventSystem));
+            GameObject card = new GameObject("Rat Card", typeof(RectTransform), typeof(Image), typeof(Button));
+            try
+            {
+                int cardActions = 0;
+                int favoriteActions = 0;
+                card.GetComponent<Button>().onClick.AddListener(() => cardActions++);
+
+                var star = new GameObject("Favorite Star", typeof(RectTransform), typeof(Image), typeof(Button));
+                star.transform.SetParent(card.transform, false);
+                star.GetComponent<Button>().onClick.AddListener(() => favoriteActions++);
+
+                var pointer = new PointerEventData(eventSystemObject.GetComponent<EventSystem>())
+                {
+                    button = PointerEventData.InputButton.Left,
+                    eligibleForClick = true,
+                };
+                bool handled = ExecuteEvents.ExecuteHierarchy(
+                    star, pointer, ExecuteEvents.pointerClickHandler);
+
+                Assert.IsTrue(handled);
+                Assert.AreEqual(1, favoriteActions);
+                Assert.AreEqual(0, cardActions,
+                    "The nested favorite control owns the pointer click; the underlying card must not expand/select.");
+            }
+            finally
+            {
+                Object.DestroyImmediate(card);
+                Object.DestroyImmediate(eventSystemObject);
+            }
+        }
+
         [Test]
         public void FoundersAreAdultAndHaveExactlyTwoAllelesPerLocus()
         {
@@ -134,6 +238,91 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void GeneratedNamesAreMostlySingleAndStableForTheSameRatId()
+        {
+            Assert.That(GameConfig.RatDoubleNameChance, Is.InRange(0.10f, 0.15f));
+            var save = new ColonySaveData();
+            save.EnsureLists();
+            int doubleNames = 0;
+            const int sampleCount = 1000;
+            for (int i = 0; i < sampleCount; i++)
+            {
+                string id = "name-shape-rat-" + i.ToString("D4");
+                string generated = RatNameSystem.GenerateAvailableName(
+                    save, id, RatSex.Female, GameConfig.StartGameTimeMs);
+                if (generated.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).Length > 1)
+                    doubleNames++;
+
+                var reloadedSave = new ColonySaveData();
+                reloadedSave.EnsureLists();
+                Assert.AreEqual(generated, RatNameSystem.GenerateAvailableName(
+                    reloadedSave, id, RatSex.Female, GameConfig.StartGameTimeMs),
+                    "A rat's saved ID must produce the same name after reload.");
+            }
+
+            Assert.That(doubleNames, Is.InRange(100, 150),
+                "New names should remain mostly single, with about 10-15% two-part names.");
+        }
+
+        [Test]
+        public void CustomCompoundNamesStayCompleteAndRecentSecondNamesAreAvoided()
+        {
+            string[] originalFemaleNames = (string[])GameConfig.FemaleRatNames.Clone();
+            string[] originalMaleNames = (string[])GameConfig.MaleRatNames.Clone();
+            try
+            {
+                Array.Clear(GameConfig.FemaleRatNames, 0, GameConfig.FemaleRatNames.Length);
+                GameConfig.FemaleRatNames[0] = "Simple Builtin";
+                var customSave = new ColonySaveData();
+                customSave.EnsureLists();
+                customSave.customFemaleRatNames.Add("Player Chosen Full Name");
+
+                string selectedCustom = string.Empty;
+                for (int i = 0; i < 100; i++)
+                {
+                    selectedCustom = RatNameSystem.GenerateAvailableName(
+                        customSave, "custom-complete-name-" + i, RatSex.Female, GameConfig.StartGameTimeMs);
+                    if (selectedCustom == "Player Chosen Full Name") break;
+                }
+                Assert.AreEqual("Player Chosen Full Name", selectedCustom,
+                    "A custom entry is a complete candidate; the allocator must not append another name.");
+
+                Array.Clear(GameConfig.MaleRatNames, 0, GameConfig.MaleRatNames.Length);
+                GameConfig.MaleRatNames[0] = "First Bear";
+                GameConfig.MaleRatNames[1] = "Second Paws";
+                var historySave = new ColonySaveData();
+                historySave.EnsureLists();
+                long now = 100L * GameConfig.GameDayMs;
+                RatNameSystem.RecordUsage(historySave, "Previously Used Bear", RatSex.Male,
+                    "old-rat", now - GameConfig.GameDayMs);
+                string afterBear = RatNameSystem.GenerateAvailableName(
+                    historySave, "avoid-bear-repeat", RatSex.Male, now);
+                Assert.AreEqual("Second Paws", afterBear,
+                    "Recent second-name usage should steer a compound name away from Bear.");
+            }
+            finally
+            {
+                Array.Copy(originalFemaleNames, GameConfig.FemaleRatNames, originalFemaleNames.Length);
+                Array.Copy(originalMaleNames, GameConfig.MaleRatNames, originalMaleNames.Length);
+            }
+        }
+
+        [Test]
+        public void NameShapeUpdateDoesNotRenameExistingRats()
+        {
+            var save = new ColonySaveData();
+            save.EnsureLists();
+            save.ratNameMigrationVersion = RatNameSystem.CurrentMigrationVersion;
+            save.rats.Add(new RatData { id = "existing-1", name = "Shelby Mae", sex = RatSex.Female });
+            save.rats.Add(new RatData { id = "existing-2", name = "Milo Bear", sex = RatSex.Male });
+
+            RatNameSystem.EnsureUniqueNames(save, 1000000L);
+
+            Assert.AreEqual("Shelby Mae", save.rats[0].name);
+            Assert.AreEqual("Milo Bear", save.rats[1].name);
+        }
+
+        [Test]
         public void DirectParentNameInheritanceUsesOnlyTheRequestedLineageSuffixes()
         {
             ColonySaveData save = ColonyFactory.CreateNew(1000000L);
@@ -156,6 +345,13 @@ namespace RatHabitat.Tests
             save.rats.Add(grandPup);
             RatNameSystem.EnsureBirthName(save, grandPup, 1000L);
             Assert.AreEqual("Harry III", grandPup.name);
+
+            RatData greatGrandPup = ColonyFactory.CreateRat("great-grand-harry", "Harry III", RatSex.Male,
+                0L, 3, parent.genotype, new TraitData(10f, 10f, 10f), RatStage.Pinkie);
+            greatGrandPup.motherId = grandPup.id;
+            save.rats.Add(greatGrandPup);
+            RatNameSystem.EnsureBirthName(save, greatGrandPup, 1000L);
+            Assert.AreEqual("Harry IV", greatGrandPup.name);
         }
 
         [Test]
@@ -224,6 +420,16 @@ namespace RatHabitat.Tests
             Assert.IsFalse(string.IsNullOrEmpty(male.coatColorVariant));
             Assert.IsFalse(string.IsNullOrEmpty(female.markingFamily));
             Assert.IsFalse(string.IsNullOrEmpty(male.markingFamily));
+            Assert.AreEqual("Solid", female.markingFamily);
+            Assert.AreEqual("Solid", male.markingFamily);
+            Assert.IsFalse(female.phenotype.spotted);
+            Assert.IsFalse(male.phenotype.spotted);
+            Assert.AreEqual(GameConfig.StarterSolidCoatColorVariant, female.coatColorVariant);
+            Assert.AreEqual(GameConfig.StarterSolidCoatColorVariant, male.coatColorVariant);
+            Assert.AreEqual(female.phenotype.coatColorLabel, male.phenotype.coatColorLabel,
+                "The two founders should start with the same solid coat color.");
+            Assert.IsFalse(GeneticsSystem.IsAlbinoGenotype(female.genotype));
+            Assert.IsFalse(GeneticsSystem.IsAlbinoGenotype(male.genotype));
             Assert.GreaterOrEqual(female.ageDays, GameConfig.StarterFemaleMinimumAgeDays);
             Assert.LessOrEqual(female.ageDays, GameConfig.StarterFemaleMaximumAgeDays);
             Assert.GreaterOrEqual(male.ageDays, GameConfig.StarterMaleMinimumAgeDays);
@@ -234,6 +440,13 @@ namespace RatHabitat.Tests
             Assert.AreEqual(RatEnclosure.Pairing, male.enclosure);
             Assert.IsTrue(female.pairingHabitatAssigned);
             Assert.IsTrue(male.pairingHabitatAssigned);
+        }
+
+        [Test]
+        public void MarketMarkingRollIsRareByDefault()
+        {
+            Assert.AreEqual(0.01f, GameConfig.StoreFounderMarkingChance,
+                "Only one percent of market founder rolls should introduce visible markings.");
         }
 
         [Test]
