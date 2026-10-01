@@ -29,11 +29,11 @@ Rabbits, economy, upgrades, Steam integration, multiplayer, and advanced art are
 
 ## Rat Market pricing and coat markings
 
-New Rat Market listing prices are calculated at restock and stored on the listing:
+New Rat Market listing prices are calculated at restock and stored on the listing with a pricing version:
 
-`price = $100 + round((Health + Fertility) / 2) + visible-marking premium`
+`price = $100 + round-half-up((Health + Fertility) / 2) + visible-marking premium`
 
-The trait multiplier is configurable in `GameConfig.StorePurchaseTraitMultiplier` (currently $1 per average stat point). Size does not affect price. Solid/self coats and albino-masked markings add no premium; visible common markings add $8 and rarer marking families add $20. At the usual 0–15 beginner stat range, an unmarked listing stays around $100–$115; a 100/100 rat costs $200 before any marking premium. Existing listings retain their saved price until purchased or the next restock.
+The trait multiplier is configurable in `GameConfig.StorePurchaseTraitMultiplier` (currently $1 per average stat point). Size does not affect price. Solid/self coats and albino-masked markings add no premium; visible common markings add $8 and rarer marking families add $20. At the usual 0–15 beginner stat range, an unmarked listing stays around $100–$115; a 100/100 rat costs $200 before any marking premium. Legacy listings are repriced once on load from their saved traits and coat data, then retain the saved price until purchased or the next restock. The Buy card shows the base, trait adjustment, marking premium, and final stored price.
 
 New-game founders are solid s/s rats. Market-generated rats are normally solid, with a small configurable chance of visible markings. Offspring inherit the existing S-locus genetics; the existing per-allele mutation rate can introduce a new dominant spotting allele in otherwise solid lines. Mutation records, offspring genotype, and the resolved marking family are saved with the rat, so a reload does not reroll a coat. Developer Tools includes a forced S-locus mutation fixture for immediate visual testing.
 

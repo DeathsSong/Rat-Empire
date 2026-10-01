@@ -10,6 +10,14 @@ namespace RatHabitat
     /// </summary>
     public static class StoreSystem
     {
+        public struct PurchasePriceBreakdown
+        {
+            public int basePrice;
+            public int traitAdjustment;
+            public int markingPremium;
+            public int finalPrice;
+        }
+
         private static readonly string[] MaleNames = GameConfig.MaleRatNames;
         private static readonly string[] FemaleNames = GameConfig.FemaleRatNames;
 
@@ -278,23 +286,38 @@ namespace RatHabitat
         }
 
         /// <summary>
-        /// Purchase formula for newly generated listings. Prices are saved on
-        /// each listing at restock, so this function is never called by UI
-        /// refreshes to reroll an existing listing's price.
+        /// Purchase formula for newly generated or legacy-migrated listings.
+        /// Prices are saved on each listing, so this function is not called by
+        /// normal UI refreshes to reroll an existing listing's price.
         /// </summary>
         public static int CalculatePurchasePrice(TraitData traits, string markingFamily, GenotypeData genotype)
+        {
+            return GetPurchasePriceBreakdown(traits, markingFamily, genotype).finalPrice;
+        }
+
+        public static PurchasePriceBreakdown GetPurchasePriceBreakdown(
+            TraitData traits, string markingFamily, GenotypeData genotype)
         {
             traits = traits ?? new TraitData();
             float averageQuality = (Mathf.Clamp(traits.health, 0f, 100f) +
                 Mathf.Clamp(traits.fertility, 0f, 100f)) * 0.5f;
-            int price = GameConfig.StorePurchaseBasePrice +
-                Mathf.RoundToInt(averageQuality * GameConfig.StorePurchaseTraitMultiplier);
-            return price + CalculateVisibleMarkingPremium(markingFamily, genotype);
+            var breakdown = new PurchasePriceBreakdown
+            {
+                basePrice = GameConfig.StorePurchaseBasePrice,
+                // Round half dollars upward, matching ordinary currency
+                // expectations (for example, average quality 12.5 -> $13).
+                traitAdjustment = Mathf.FloorToInt(
+                    averageQuality * GameConfig.StorePurchaseTraitMultiplier + 0.5f),
+                markingPremium = CalculateVisibleMarkingPremium(markingFamily, genotype),
+            };
+            breakdown.finalPrice = breakdown.basePrice + breakdown.traitAdjustment + breakdown.markingPremium;
+            return breakdown;
         }
 
         private static int CalculateVisibleMarkingPremium(string markingFamily, GenotypeData genotype)
         {
-            if (GeneticsSystem.IsAlbinoGenotype(genotype) || string.IsNullOrWhiteSpace(markingFamily))
+            if (GeneticsSystem.IsAlbinoGenotype(genotype) ||
+                string.Equals((markingFamily ?? string.Empty).Trim(), "Albino masking", StringComparison.OrdinalIgnoreCase))
                 return 0;
 
             string normalized = GeneticsSystem.NormalizeMarkingFamily(markingFamily, genotype);
@@ -486,6 +509,7 @@ namespace RatHabitat
                 coatTone = GeneticsSystem.DefaultCoatTone(id, genotype),
                 genotype = genotype,
                 traits = traits,
+                pricingVersion = GameConfig.StorePurchasePricingVersion,
             };
         }
 
@@ -545,8 +569,17 @@ namespace RatHabitat
                     listing.coatColorVariant = GeneticsSystem.DefaultCoatColorVariant(listing.id, listing.genotype);
                 if (listing.coatTone <= 0f || float.IsNaN(listing.coatTone) || float.IsInfinity(listing.coatTone))
                     listing.coatTone = GeneticsSystem.DefaultCoatTone(listing.id, listing.genotype);
-                if (listing.price <= 0) listing.price = GameConfig.StarterAdultRatPrice;
                 if (listing.traits == null) listing.traits = new TraitData();
+
+                // Legacy saves commonly retain the former fixed $100 price.
+                // Recalculate once from the already-persisted data, without
+                // rerolling listing identity, name, traits, or appearance.
+                if (listing.pricingVersion < GameConfig.StorePurchasePricingVersion)
+                {
+                    listing.price = CalculatePurchasePrice(
+                        listing.traits, listing.markingFamily, listing.genotype);
+                    listing.pricingVersion = GameConfig.StorePurchasePricingVersion;
+                }
             }
         }
 

@@ -3844,8 +3844,12 @@ namespace RatHabitat
             AddText(info, "Coat: " + fur + "  •  " + markings, 13, new Color(1f, 0.84f, 0.52f), TextAnchor.UpperLeft);
             AddText(info, "Size " + listingTraits.size.ToString("0") + "  •  Health " + listingTraits.health.ToString("0") + "  •  Fertility " + listingTraits.fertility.ToString("0"),
                 12, Color.white, TextAnchor.UpperLeft);
-            AddText(info, "Market price: $" + listing.price.ToString("N0"),
-                12, new Color(0.68f, 0.91f, 0.76f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
+            StoreSystem.PurchasePriceBreakdown price = StoreSystem.GetPurchasePriceBreakdown(
+                listingTraits, listing.markingFamily, listing.genotype);
+            AddText(info, "Price: $" + price.basePrice.ToString("N0") + " base + $" +
+                price.traitAdjustment.ToString("N0") + " stats + $" +
+                price.markingPremium.ToString("N0") + " marks = $" + listing.price.ToString("N0"),
+                11, new Color(0.68f, 0.91f, 0.76f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
 
             bool canBuy = game.Save.colonyCredits >= listing.price;
             Button actionButton = null;

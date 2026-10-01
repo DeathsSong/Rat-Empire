@@ -29,6 +29,86 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void LegacyMarketPricesMigrateFromSavedTraitsAndMarkingsOnlyOnce()
+        {
+            ColonySaveData save = ColonyFactory.CreateNew(1000000L);
+            save.storeInventoryInitialized = true;
+            save.storeRatListings = new List<StoreRatListingData>
+            {
+                LegacyListing("legacy-self", "Legacy Self", 0f, 4f, "Self", false),
+                LegacyListing("legacy-spotted", "Legacy Spotted", 12f, 13f, "Dominant white spotted", false),
+                LegacyListing("legacy-mask", "Legacy Mask", 15f, 15f, "Mask", false),
+                LegacyListing("legacy-albino", "Legacy Albino", 7f, 9f, "Albino masking", true),
+                LegacyListing("legacy-solid", "Legacy Solid", 0f, 0f, "Solid", false),
+            };
+
+            // Serialize as an old save: each listing still carries the legacy
+            // fixed price and the newly introduced version field is zero.
+            string oldSaveJson = SaveSystem.ToJson(save);
+            ColonySaveData migrated = SaveSystem.FromJson(oldSaveJson);
+
+            Assert.IsNotNull(migrated);
+            Assert.AreEqual(102, migrated.storeRatListings[0].price);
+            Assert.AreEqual(133, migrated.storeRatListings[1].price);
+            Assert.AreEqual(123, migrated.storeRatListings[2].price);
+            Assert.AreEqual(108, migrated.storeRatListings[3].price);
+            Assert.AreEqual(100, migrated.storeRatListings[4].price);
+            foreach (StoreRatListingData listing in migrated.storeRatListings)
+                Assert.AreEqual(GameConfig.StorePurchasePricingVersion, listing.pricingVersion);
+
+            StoreRatListingData migratedListing = migrated.storeRatListings[1];
+            Assert.AreEqual("legacy-spotted", migratedListing.id);
+            Assert.AreEqual("Legacy Spotted", migratedListing.name);
+            Assert.AreEqual(12f, migratedListing.traits.health);
+            Assert.AreEqual(13f, migratedListing.traits.fertility);
+            Assert.AreEqual("Dominant white spotted", migratedListing.markingFamily);
+
+            int savedPrice = migratedListing.price;
+            migratedListing.traits.health = 100f;
+            StoreSystem.EnsureStoreState(migrated);
+            Assert.AreEqual(savedPrice, migratedListing.price,
+                "Current-version listings must not be repriced during refresh/repair.");
+        }
+
+        [Test]
+        public void NewAndRestockedMarketListingsPersistTheirPricingVersion()
+        {
+            ColonySaveData save = ColonyFactory.CreateNew(1000000L);
+            Assert.IsTrue(save.storeInventoryInitialized);
+            foreach (StoreRatListingData listing in save.storeRatListings)
+            {
+                Assert.AreEqual(GameConfig.StorePurchasePricingVersion, listing.pricingVersion);
+                Assert.AreEqual(StoreSystem.CalculatePurchasePrice(
+                    listing.traits, listing.markingFamily, listing.genotype), listing.price);
+            }
+
+            StoreSystem.RestockNow(save, save.clock.gameTimeMs + GameConfig.GameDayMs);
+            foreach (StoreRatListingData listing in save.storeRatListings)
+                Assert.AreEqual(GameConfig.StorePurchasePricingVersion, listing.pricingVersion);
+        }
+
+        private static StoreRatListingData LegacyListing(
+            string id, string name, float health, float fertility, string markingFamily, bool albino)
+        {
+            GenotypeData genotype = GeneticsSystem.CreateFounder(
+                "B", "B", albino ? "c" : "C", albino ? "c" : "C", "D", "D",
+                markingFamily == "Self" || markingFamily == "Solid" ? "s" : "S", "s");
+            return new StoreRatListingData
+            {
+                id = id,
+                name = name,
+                sex = RatSex.Female,
+                price = GameConfig.StarterAdultRatPrice,
+                pricingVersion = 0,
+                markingFamily = markingFamily,
+                coatColorVariant = albino ? "albino" : "black",
+                coatTone = 1f,
+                genotype = genotype,
+                traits = new TraitData(10f, health, fertility),
+            };
+        }
+
+        [Test]
         public void WelcomePopupIsPendingOnlyForNewOrResetColoniesAndPersistsAcknowledgement()
         {
             var save = ColonyFactory.CreateNew(1000000L);

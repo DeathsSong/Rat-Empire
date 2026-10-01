@@ -94,6 +94,7 @@ namespace RatHabitat
         public const float StorePurchaseTraitMultiplier = 1f;
         public const int StorePurchaseCommonMarkingPremium = 8;
         public const int StorePurchaseRareMarkingPremium = 20;
+        public const int StorePurchasePricingVersion = 1;
         // New market founders are usually solid. Marked listings remain
         // occasional; breeding is the primary source of new marked lines.
         public const float StoreFounderMarkingChance = 0.05f;

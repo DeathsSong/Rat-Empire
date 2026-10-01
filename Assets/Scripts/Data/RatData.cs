@@ -360,6 +360,9 @@ namespace RatHabitat
         public string name;
         public RatSex sex;
         public int price;
+        // Legacy JSON has no version and defaults to zero, triggering the
+        // one-time saved-price migration in StoreSystem.
+        public int pricingVersion;
         public string markingFamily;
         public string coatColorVariant;
         public float coatTone = -1f;
