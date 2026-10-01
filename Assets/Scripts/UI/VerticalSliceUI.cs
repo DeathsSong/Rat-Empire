@@ -3844,6 +3844,8 @@ namespace RatHabitat
             AddText(info, "Coat: " + fur + "  •  " + markings, 13, new Color(1f, 0.84f, 0.52f), TextAnchor.UpperLeft);
             AddText(info, "Size " + listingTraits.size.ToString("0") + "  •  Health " + listingTraits.health.ToString("0") + "  •  Fertility " + listingTraits.fertility.ToString("0"),
                 12, Color.white, TextAnchor.UpperLeft);
+            AddText(info, "Market price: $" + listing.price.ToString("N0"),
+                12, new Color(0.68f, 0.91f, 0.76f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
 
             bool canBuy = game.Save.colonyCredits >= listing.price;
             Button actionButton = null;
@@ -6398,6 +6400,8 @@ namespace RatHabitat
             AddButton(developerToolsCard, "Spotted Black  •  B/B C/C D/D S/S", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.SpottedBlack));
             AddButton(developerToolsCard, "Spotted Brown  •  b/b C/C D/D S/S", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.SpottedBrown));
             AddButton(developerToolsCard, "Spawn Marked Test Rat  •  blended face, body, and legs", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.MarkedTest));
+            AddButton(developerToolsCard, "Force S-locus Mutation Test  •  solid s/s → marked S/s", true,
+                () => game.SpawnDeveloperRat(DeveloperRatPreset.MarkingMutationTest));
             AddButton(developerToolsCard, "Spawn Pinkie Placement Test Litter  •  5 grounded pups", true, game.SpawnDeveloperPinkieLitter);
             AddButtonTo(developerToolsCard, "Rat Animation Showcase", true, OpenRatAnimationShowcase, new Color(0.18f, 0.34f, 0.42f), 48f);
 

@@ -83,7 +83,21 @@ namespace RatHabitat
         public const float DedicatedBreedingSuccessCap = 0.95f;
         public const int EuthanasiaCostDollars = 100;
         public const int StartingColonyCredits = 250;
-        public const int StarterAdultRatPrice = 100;
+        // Rat Market purchase price formula (calculated once per restock and
+        // persisted on StoreRatListingData):
+        // base + average(Health, Fertility) * trait multiplier + visible-marking
+        // premium. At the normal 0-15 beginner range, unmarked rats cost about
+        // $100-$115; maxed traits cost $200 before a modest marking premium.
+        // Size is intentionally excluded and solid/self/albino-masked coats
+        // never receive a marking premium.
+        public const int StorePurchaseBasePrice = 100;
+        public const float StorePurchaseTraitMultiplier = 1f;
+        public const int StorePurchaseCommonMarkingPremium = 8;
+        public const int StorePurchaseRareMarkingPremium = 20;
+        // New market founders are usually solid. Marked listings remain
+        // occasional; breeding is the primary source of new marked lines.
+        public const float StoreFounderMarkingChance = 0.05f;
+        public const int StarterAdultRatPrice = StorePurchaseBasePrice;
         public const long StoreRestockIntervalGameMs = GameDayMs;
         public const int StoreRestockListingCount = 2;
         public const float StoreSharedMarkingFamilyChance = 0.70f;

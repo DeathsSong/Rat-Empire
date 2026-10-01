@@ -97,10 +97,11 @@ namespace RatHabitat
             float sharedBaseline = NextTrait(random,
                 GameConfig.StarterBeginnerTraitMinimum,
                 GameConfig.StarterBeginnerTraitMaximum);
-            string maleFamily = PickMarkingFamily(random);
-            string femaleFamily = random.NextDouble() < GameConfig.StoreSharedMarkingFamilyChance
-                ? maleFamily
-                : PickMarkingFamily(random);
+            // The founders establish a solid-color breeding line. The S-locus
+            // remains s/s, so later spotted offspring can arise through the
+            // existing inherited-allele mutation path.
+            const string maleFamily = "Solid";
+            const string femaleFamily = "Solid";
 
             string maleId = "starter_male_" + Math.Abs(seed).ToString("X8");
             string femaleId = "starter_female_" + Math.Abs(seed).ToString("X8");
@@ -276,6 +277,51 @@ namespace RatHabitat
             return Mathf.Max(1, Mathf.RoundToInt(baseValue * ageMultiplier));
         }
 
+        /// <summary>
+        /// Purchase formula for newly generated listings. Prices are saved on
+        /// each listing at restock, so this function is never called by UI
+        /// refreshes to reroll an existing listing's price.
+        /// </summary>
+        public static int CalculatePurchasePrice(TraitData traits, string markingFamily, GenotypeData genotype)
+        {
+            traits = traits ?? new TraitData();
+            float averageQuality = (Mathf.Clamp(traits.health, 0f, 100f) +
+                Mathf.Clamp(traits.fertility, 0f, 100f)) * 0.5f;
+            int price = GameConfig.StorePurchaseBasePrice +
+                Mathf.RoundToInt(averageQuality * GameConfig.StorePurchaseTraitMultiplier);
+            return price + CalculateVisibleMarkingPremium(markingFamily, genotype);
+        }
+
+        private static int CalculateVisibleMarkingPremium(string markingFamily, GenotypeData genotype)
+        {
+            if (GeneticsSystem.IsAlbinoGenotype(genotype) || string.IsNullOrWhiteSpace(markingFamily))
+                return 0;
+
+            string normalized = GeneticsSystem.NormalizeMarkingFamily(markingFamily, genotype);
+            if (string.Equals(normalized, "Solid", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(normalized, "Self", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(normalized, "Albino masking", StringComparison.OrdinalIgnoreCase))
+                return 0;
+
+            switch (normalized)
+            {
+                case "Variegated":
+                case "Variberk":
+                case "Black-eye white":
+                case "White side":
+                case "Dalmatian-style":
+                case "Dominant white spotted":
+                case "Merle":
+                case "Tabby/Marble":
+                case "Lightning blaze Siamese":
+                case "Badger blaze Siamese":
+                case "Mismarked hooded":
+                    return GameConfig.StorePurchaseRareMarkingPremium;
+                default:
+                    return GameConfig.StorePurchaseCommonMarkingPremium;
+            }
+        }
+
         public static int CalculateSaleValue(ColonySaveData save, RatData rat, long gameTime)
         {
             if (rat == null) return GameConfig.SellCreditBase;
@@ -343,10 +389,10 @@ namespace RatHabitat
             // coordinated without becoming identical clones.
             float sharedBaseline = NextTrait(random, GameConfig.StoreLowTraitMinimum, qualityCap);
 
-            string maleFamily = PickMarkingFamily(random);
+            string maleFamily = PickMarketMarkingFamily(random);
             string femaleFamily = random.NextDouble() < GameConfig.StoreSharedMarkingFamilyChance
                 ? maleFamily
-                : PickMarkingFamily(random);
+                : PickMarketMarkingFamily(random);
 
             string maleId = "store_adult_male_" + cycle;
             string maleName = RatNameSystem.GenerateAvailableName(save, maleId, RatSex.Male, save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
@@ -425,20 +471,21 @@ namespace RatHabitat
             float minimum = GameConfig.StoreLowTraitMinimum;
             float maximum = qualityCap;
             string coatColorVariant = GeneticsSystem.DefaultCoatColorVariant(id, genotype);
+            var traits = new TraitData(
+                NearSharedTrait(random, sharedBaseline, minimum, maximum),
+                NearSharedTrait(random, sharedBaseline, minimum, maximum),
+                NearSharedTrait(random, sharedBaseline, minimum, maximum));
             return new StoreRatListingData
             {
                 id = id,
                 name = name,
                 sex = sex,
-                price = GameConfig.StarterAdultRatPrice,
+                price = CalculatePurchasePrice(traits, markingFamily, genotype),
                 markingFamily = markingFamily,
                 coatColorVariant = coatColorVariant,
                 coatTone = GeneticsSystem.DefaultCoatTone(id, genotype),
                 genotype = genotype,
-                traits = new TraitData(
-                    NearSharedTrait(random, sharedBaseline, minimum, maximum),
-                    NearSharedTrait(random, sharedBaseline, minimum, maximum),
-                    NearSharedTrait(random, sharedBaseline, minimum, maximum)),
+                traits = traits,
             };
         }
 
@@ -476,6 +523,13 @@ namespace RatHabitat
         private static string PickMarkingFamily(Random random)
         {
             return MarkingFamilies[random.Next(MarkingFamilies.Length)];
+        }
+
+        private static string PickMarketMarkingFamily(Random random)
+        {
+            return random.NextDouble() < GameConfig.StoreFounderMarkingChance
+                ? PickMarkingFamily(random)
+                : "Solid";
         }
 
         private static void RepairListings(ColonySaveData save)

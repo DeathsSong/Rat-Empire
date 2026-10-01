@@ -211,6 +211,47 @@ namespace RatHabitat
             return mutated;
         }
 
+        /// <summary>
+        /// Developer fixture helper: changes one solid S-locus allele to the
+        /// dominant spotting allele and records it through the same persisted
+        /// mutation history used by normal inheritance.
+        /// </summary>
+        public static bool ForceMarkingMutation(GenotypeData genotype, string parentRole, long recordedAt)
+        {
+            if (genotype == null) return false;
+            Normalize(genotype);
+            LocusData marking = GetLocus(genotype, "S");
+            if (marking == null) return false;
+
+            string from;
+            if (marking.firstAllele == "s")
+            {
+                from = marking.firstAllele;
+                marking.firstAllele = "S";
+            }
+            else if (marking.secondAllele == "s")
+            {
+                from = marking.secondAllele;
+                marking.secondAllele = "S";
+            }
+            else
+            {
+                return false;
+            }
+
+            if (genotype.mutations == null) genotype.mutations = new List<MutationRecordData>();
+            genotype.mutations.Add(new MutationRecordData
+            {
+                locus = "S",
+                parentRole = string.IsNullOrEmpty(parentRole) ? "developer-test" : parentRole,
+                from = from,
+                to = "S",
+                recordedAt = recordedAt,
+            });
+            Normalize(genotype);
+            return true;
+        }
+
         public static TraitData InheritTraits(TraitData mother, TraitData father)
         {
             // Null parent trait data is missing data; a numeric zero on a
@@ -596,7 +637,8 @@ namespace RatHabitat
             return NormalizeMarkingFamily(null, genotype);
         }
 
-        public static string ResolveOffspringMarkingFamily(RatData mother, RatData father, GenotypeData childGenotype)
+        public static string ResolveOffspringMarkingFamily(
+            RatData mother, RatData father, GenotypeData childGenotype, string stableChildId = null)
         {
             string fallback = DefaultMarkingFamily(childGenotype);
             string motherFamily = NormalizeMarkingFamily(mother == null ? null : mother.markingFamily,
@@ -610,7 +652,16 @@ namespace RatHabitat
             if (motherFamily == fatherFamily && !motherSolid) return motherFamily;
             if (!motherSolid && fatherSolid) return motherFamily;
             if (!fatherSolid && motherSolid) return fatherFamily;
-            if (!motherSolid && UnityEngine.Random.value < 0.5f) return motherFamily;
+            if (!motherSolid && !fatherSolid)
+            {
+                string stableKey = string.IsNullOrEmpty(stableChildId)
+                    ? (mother == null ? string.Empty : mother.id) + "|" +
+                      (father == null ? string.Empty : father.id) + "|" + GenotypeKey(childGenotype)
+                    : stableChildId;
+                return (StableColorHash(stableKey + "|marking-family") & 1u) == 0u
+                    ? motherFamily
+                    : fatherFamily;
+            }
             if (!fatherSolid) return fatherFamily;
             return fallback;
         }
@@ -625,6 +676,11 @@ namespace RatHabitat
         {
             var pair = GetLocus(genotype, locus);
             return pair.firstAllele == GameConfig.DominantAllele(locus) || pair.secondAllele == GameConfig.DominantAllele(locus);
+        }
+
+        public static bool IsAlbinoGenotype(GenotypeData genotype)
+        {
+            return IsRecessive(genotype, "C");
         }
 
         private static bool IsRecessive(GenotypeData genotype, string locus)

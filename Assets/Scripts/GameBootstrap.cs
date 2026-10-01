@@ -19,6 +19,7 @@ namespace RatHabitat
         SpottedBlack,
         SpottedBrown,
         MarkedTest,
+        MarkingMutationTest,
     }
 
     public enum BreedingParentSlot
@@ -3489,6 +3490,10 @@ namespace RatHabitat
                     break;
                 case DeveloperRatPreset.MarkedTest:
                     genotype = GeneticsSystem.CreateFounder("B", "B", "C", "C", "D", "D", "S", "S");
+                    break;
+                case DeveloperRatPreset.MarkingMutationTest:
+                    genotype = GeneticsSystem.CreateFounder("B", "B", "C", "C", "D", "D", "s", "s");
+                    GeneticsSystem.ForceMarkingMutation(genotype, "developer-test", GameTime);
                     break;
                 default:
                     genotype = GeneticsSystem.CreateFounder("b", "b", "C", "C", "D", "D", "S", "S");

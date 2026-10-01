@@ -1112,7 +1112,8 @@ namespace RatHabitat
                     pup.ageDays = 0f;
                     pup.developerGrowthOverride = false;
                     pup.growthAnchorAgeDays = 0f;
-                    pup.markingFamily = GeneticsSystem.ResolveOffspringMarkingFamily(mother, father, pup.genotype);
+                    pup.markingFamily = GeneticsSystem.ResolveOffspringMarkingFamily(
+                        mother, father, pup.genotype, pup.id);
                     // Preserve the stable coat-family appearance through
                     // inheritance. The variant is chosen from both parents and
                     // the pup's stable ID, so a UI refresh or reload never
