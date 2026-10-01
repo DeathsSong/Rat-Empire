@@ -228,6 +228,9 @@ namespace RatHabitat.Tests
             bool previousIgnoreFailingMessages = LogAssert.ignoreFailingMessages;
             var gameObject = new GameObject("My Rats Scroll Test Game");
             var canvasObject = new GameObject("My Rats Scroll Test Canvas", typeof(RectTransform), typeof(Canvas), typeof(GraphicRaycaster));
+            var eventSystemObject = new GameObject("My Rats Scroll Test EventSystem", typeof(EventSystem));
+            var presenterObject = new GameObject("My Rats Scroll Test Presenter");
+            var pinkieRoot = new GameObject("My Rats Scroll Test Pinkie", typeof(BoxCollider));
             try
             {
                 // RatPortraitPreview is intentionally omitted in this focused
@@ -261,6 +264,7 @@ namespace RatHabitat.Tests
 
                 Canvas canvas = canvasObject.GetComponent<Canvas>();
                 canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+                eventSystemObject.GetComponent<EventSystem>().enabled = true;
                 RectTransform canvasRect = canvasObject.GetComponent<RectTransform>();
                 canvasRect.sizeDelta = new Vector2(540f, 960f);
                 var pageObject = new GameObject("My Rats Test Page", typeof(RectTransform));
@@ -301,6 +305,58 @@ namespace RatHabitat.Tests
                 Assert.IsNotNull(rosterScroll.viewport.GetComponent<RectMask2D>());
                 Assert.IsTrue(rosterScroll.viewport.GetComponent<Image>().raycastTarget,
                     "The roster viewport must be a valid EventSystem hit surface.");
+                MyRatsScrollDragRelay dragRelay = rosterScroll.viewport.GetComponent<MyRatsScrollDragRelay>();
+                Assert.IsNotNull(dragRelay,
+                    "The viewport must own drag dispatch explicitly instead of relying on parent-handler discovery.");
+                int pinkieCount = 0;
+                int nonPinkieCount = 0;
+                foreach (RatData rat in save.rats)
+                {
+                    if (rat.stage == RatStage.Pinkie) pinkieCount++;
+                    else nonPinkieCount++;
+                }
+                Assert.Greater(pinkieCount, 0, "This regression case must contain pinkies.");
+                Assert.Greater(nonPinkieCount, 0, "Compare pinkie rows with young/adult rows in the same roster.");
+                for (int rowIndex = 0; rowIndex < rosterScroll.content.childCount; rowIndex++)
+                {
+                    GameObject mixedStageRow = rosterScroll.content.GetChild(rowIndex).gameObject;
+                    Assert.AreSame(dragRelay.gameObject,
+                        ExecuteEvents.GetEventHandler<IDragHandler>(mixedStageRow),
+                        "Every row, regardless of growth stage, must resolve the same My Rats viewport drag owner.");
+                }
+
+                // Simulate an imported pinkie that accidentally contains UI
+                // and physics raycasters. The presenter quarantine must leave
+                // the ordinary roster GraphicRaycaster as the only hit path.
+                var pinkieUi = new GameObject("Pinkie Accidental UI", typeof(RectTransform), typeof(Canvas),
+                    typeof(GraphicRaycaster), typeof(CanvasGroup), typeof(Image), typeof(EventTrigger));
+                pinkieUi.transform.SetParent(pinkieRoot.transform, false);
+                Canvas pinkieCanvas = pinkieUi.GetComponent<Canvas>();
+                pinkieCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
+                pinkieUi.GetComponent<Image>().raycastTarget = true;
+                pinkieUi.GetComponent<CanvasGroup>().blocksRaycasts = true;
+                var pinkieCamera = new GameObject("Pinkie Accidental Physics Raycaster", typeof(Camera), typeof(PhysicsRaycaster));
+                pinkieCamera.transform.SetParent(pinkieRoot.transform, false);
+                RatPresenter presenter = presenterObject.AddComponent<RatPresenter>();
+                RatData pinkieData = ColonyFactory.CreateRat(
+                    "scroll-test-pinkie", "Scroll Test Pinkie", RatSex.Female,
+                    GameConfig.StartGameTimeMs, 0,
+                    GeneticsSystem.CreateFounder("B", "B", "C", "C", "D", "D", "s", "s"),
+                    new TraitData(10f, 10f, 10f), RatStage.Pinkie);
+                var isolatePinkie = typeof(RatPresenter).GetMethod(
+                    "EnsurePinkieInputIsolation",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Assert.IsNotNull(isolatePinkie);
+                isolatePinkie.Invoke(presenter, new object[] { pinkieRoot, pinkieData });
+                Assert.IsFalse(pinkieRoot.GetComponent<BoxCollider>().enabled,
+                    "An imported pinkie collider must not participate in UI or world hit testing.");
+                Assert.IsFalse(pinkieUi.GetComponent<Image>().raycastTarget);
+                Assert.IsFalse(pinkieUi.GetComponent<GraphicRaycaster>().isActiveAndEnabled);
+                Assert.IsFalse(pinkieUi.GetComponent<Canvas>().isActiveAndEnabled);
+                Assert.IsFalse(pinkieUi.GetComponent<CanvasGroup>().blocksRaycasts);
+                Assert.IsFalse(pinkieUi.GetComponent<EventTrigger>().enabled);
+                Assert.IsFalse(pinkieCamera.GetComponent<PhysicsRaycaster>().isActiveAndEnabled);
+
                 var finalizeLayout = typeof(VerticalSliceUI).GetMethod(
                     "RebuildRatRosterLayout",
                     System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
@@ -308,6 +364,63 @@ namespace RatHabitat.Tests
                 finalizeLayout.Invoke(ui, new object[] { 1f });
                 Assert.Greater(rosterScroll.content.rect.height, rosterScroll.viewport.rect.height,
                     "Mixed-stage row layout must produce a scrollable content extent.");
+
+                // Follow the actual EventSystem route at a point over the
+                // mixed-stage list. The top hit may be a row Graphic, but its
+                // drag owner must be the viewport relay (not the page ScrollRect
+                // or the pinkie). Forward a touch-like swipe past the viewport
+                // edge and verify the same roster ScrollRect continues moving.
+                Vector3[] viewportCorners = new Vector3[4];
+                rosterScroll.viewport.GetWorldCorners(viewportCorners);
+                Vector2 downPosition = RectTransformUtility.WorldToScreenPoint(
+                    null, (viewportCorners[0] + viewportCorners[2]) * 0.5f);
+                var pointer = new PointerEventData(eventSystemObject.GetComponent<EventSystem>())
+                {
+                    pointerId = 7,
+                    position = downPosition,
+                    pressPosition = downPosition,
+                    button = PointerEventData.InputButton.Left,
+                };
+                // EditMode -batchmode has no rendered display surface, so
+                // exercise EventSystem's actual handler-resolution step using
+                // the same row Graphic a live GraphicRaycaster reports.
+                GameObject rowHit = rosterScroll.content.GetChild(0).gameObject;
+                pointer.pointerCurrentRaycast = new RaycastResult
+                {
+                    gameObject = rowHit,
+                    module = canvasObject.GetComponent<GraphicRaycaster>(),
+                };
+                Assert.IsFalse(rowHit.transform.IsChildOf(pinkieRoot.transform),
+                    "A pinkie presentation object must never win the page UI raycast.");
+                GameObject dragTarget = ExecuteEvents.GetEventHandler<IDragHandler>(rowHit);
+                Assert.AreSame(dragRelay.gameObject, dragTarget,
+                    "The My Rats viewport must own the drag before the parent page ScrollRect.");
+                pointer.pointerDrag = dragTarget;
+                pointer.pointerPress = ExecuteEvents.GetEventHandler<IPointerDownHandler>(rowHit);
+                pointer.rawPointerPress = rowHit;
+                Assert.IsTrue(ExecuteEvents.Execute(dragTarget, pointer, ExecuteEvents.initializePotentialDrag));
+                Assert.IsTrue(ExecuteEvents.Execute(dragTarget, pointer, ExecuteEvents.beginDragHandler));
+                Assert.IsTrue(dragRelay.IsDragging);
+                Assert.IsTrue(ui.IsPointerOverRatRosterScroll(downPosition));
+                Vector2 beforeDrag = rosterScroll.content.anchoredPosition;
+                pointer.position = downPosition + new Vector2(0f, -220f);
+                pointer.delta = new Vector2(0f, -220f);
+                Assert.IsTrue(ExecuteEvents.Execute(dragTarget, pointer, ExecuteEvents.dragHandler));
+                Assert.IsFalse(ui.IsPointerOverRatRosterScroll(pointer.position),
+                    "This test intentionally carries the active drag outside the viewport.");
+                Assert.IsTrue(dragRelay.IsDragging,
+                    "Drag ownership must persist after the pointer exits the viewport bounds.");
+                Assert.Greater(Mathf.Abs(rosterScroll.content.anchoredPosition.y - beforeDrag.y), 1f,
+                    "The nested ScrollRect must receive and apply the vertical drag.");
+                rosterScroll.velocity = Vector2.zero;
+                var isScrollMoving = typeof(VerticalSliceUI).GetMethod(
+                    "IsRatRosterScrollMoving",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Assert.IsNotNull(isScrollMoving);
+                Assert.IsTrue((bool)isScrollMoving.Invoke(ui, null),
+                    "A live pointer sequence must protect the ScrollRect from rebuilds even after the pointer leaves its bounds.");
+                Assert.IsTrue(ExecuteEvents.Execute(dragTarget, pointer, ExecuteEvents.endDragHandler));
+                Assert.IsFalse(dragRelay.IsDragging);
 
                 var visibleMethod = typeof(VerticalSliceUI).GetMethod(
                     "IsRosterRatVisible",
@@ -327,6 +440,9 @@ namespace RatHabitat.Tests
                 LogAssert.ignoreFailingMessages = previousIgnoreFailingMessages;
                 Object.DestroyImmediate(gameObject);
                 Object.DestroyImmediate(canvasObject);
+                Object.DestroyImmediate(eventSystemObject);
+                Object.DestroyImmediate(presenterObject);
+                Object.DestroyImmediate(pinkieRoot);
             }
         }
 

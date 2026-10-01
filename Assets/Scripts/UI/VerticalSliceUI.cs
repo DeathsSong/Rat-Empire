@@ -97,6 +97,7 @@ namespace RatHabitat
         private ScrollRect pageScroll;
         private ScrollRect mateListScroll;
         private ScrollRect ratRosterScroll;
+        private MyRatsScrollDragRelay ratRosterDragRelay;
         private RectTransform ratRosterContent;
         private string lastRosterSortSignature;
         private string lastRosterContentSignature;
@@ -343,7 +344,7 @@ namespace RatHabitat
                         fallbackTouchFingerId = touch.fingerId;
                         fallbackTouchDownPosition = touch.position;
                         fallbackTouchRelay = FindFallbackRelay(touch.position);
-                        LogNavigationDiagnostics("touch-down", touch.position, fallbackTouchRelay);
+                        LogNavigationDiagnostics("touch-down", touch.position, fallbackTouchRelay, touch.fingerId);
                         RegisterUiPointerDown(touch.fingerId);
                     }
                     else if (touch.phase == TouchPhase.Ended && touch.fingerId == fallbackTouchFingerId)
@@ -379,7 +380,7 @@ namespace RatHabitat
             {
                 fallbackMouseDownPosition = Input.mousePosition;
                 fallbackMouseRelay = FindFallbackRelay(fallbackMouseDownPosition);
-                LogNavigationDiagnostics("mouse-down", fallbackMouseDownPosition, fallbackMouseRelay);
+                LogNavigationDiagnostics("mouse-down", fallbackMouseDownPosition, fallbackMouseRelay, -1);
                 RegisterUiPointerDown(-1);
             }
             else if (Input.GetMouseButtonUp(0))
@@ -591,7 +592,7 @@ namespace RatHabitat
         /// reports both the EventSystem's top hit and the relay selected by the
         /// manual WebGL/mobile fallback. It is silent in release builds.
         /// </summary>
-        private void LogNavigationDiagnostics(string context, Vector2 screenPoint, DirectUiClickRelay fallbackRelay)
+        private void LogNavigationDiagnostics(string context, Vector2 screenPoint, DirectUiClickRelay fallbackRelay, int pointerId = -1)
         {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             if (canvas == null) return;
@@ -602,16 +603,22 @@ namespace RatHabitat
             EventSystem eventSystem = EventSystem.current;
             if (eventSystem != null)
             {
-                pointerOverEventSystemUi = eventSystem.IsPointerOverGameObject();
+                pointerOverEventSystemUi = pointerId < 0
+                    ? eventSystem.IsPointerOverGameObject()
+                    : eventSystem.IsPointerOverGameObject(pointerId);
                 var eventData = new PointerEventData(eventSystem)
                 {
                     position = screenPoint,
-                    pointerId = -1,
+                    pointerId = pointerId,
                 };
                 var results = new List<RaycastResult>();
                 eventSystem.RaycastAll(eventData, results);
                 if (results.Count > 0 && results[0].gameObject != null)
+                {
                     eventSystemHit = results[0].gameObject.name;
+                    GameObject dragTarget = ExecuteEvents.GetEventHandler<IDragHandler>(results[0].gameObject);
+                    eventSystemHit += " dragOwner=" + (dragTarget == null ? "none" : dragTarget.name);
+                }
                 if (results.Count > 0)
                 {
                     var hitNames = new System.Text.StringBuilder();
@@ -652,6 +659,8 @@ namespace RatHabitat
             RatPresenter presenter = FindObjectOfType<RatPresenter>();
             Debug.Log("[Rat UI Navigation] " + context +
                 " pointer=" + screenPoint +
+                " pointerId=" + pointerId +
+                " frame=" + Time.frameCount +
                 " pointerOverUi=" + pointerOverEventSystemUi +
                 " eventSystemHit=" + eventSystemHit +
                 " raycastHits=" + raycastHits +
@@ -765,6 +774,21 @@ namespace RatHabitat
             return viewport != null && RectTransformUtility.RectangleContainsScreenPoint(viewport, screenPoint, null);
         }
 
+        /// <summary>
+        /// The My Rats viewport owns every pointer sequence that begins inside
+        /// its bounds, including drags that later travel outside the viewport.
+        /// The manual world-input path uses this geometric check as a final
+        /// guard if an EventSystem raycast is missing or stale.
+        /// </summary>
+        public bool IsPointerOverRatRosterScroll(Vector2 screenPoint)
+        {
+            if (ratRosterScroll == null || !ratRosterScroll.isActiveAndEnabled) return false;
+            RectTransform viewport = ratRosterScroll.viewport != null
+                ? ratRosterScroll.viewport
+                : ratRosterScroll.transform as RectTransform;
+            return viewport != null && RectTransformUtility.RectangleContainsScreenPoint(viewport, screenPoint, null);
+        }
+
         private bool IsRatProfileScrollMoving()
         {
             if (ratProfileScroll == null || !ratProfileScroll.isActiveAndEnabled) return false;
@@ -779,18 +803,14 @@ namespace RatHabitat
             return false;
         }
 
-        private bool IsPointerOverRatRosterScroll(Vector2 screenPoint)
-        {
-            if (ratRosterScroll == null || !ratRosterScroll.isActiveAndEnabled) return false;
-            RectTransform viewport = ratRosterScroll.viewport != null
-                ? ratRosterScroll.viewport
-                : ratRosterScroll.transform as RectTransform;
-            return viewport != null && RectTransformUtility.RectangleContainsScreenPoint(viewport, screenPoint, null);
-        }
-
         private bool IsRatRosterScrollMoving()
         {
             if (ratRosterScroll == null || !ratRosterScroll.isActiveAndEnabled) return false;
+            // Track the actual EventSystem drag lifetime. A finger commonly
+            // leaves the viewport edge while scrolling; testing only its
+            // current position allowed a live roster update to replace the
+            // ScrollRect under an active drag (often during pinkie care).
+            if (ratRosterDragRelay != null && ratRosterDragRelay.IsPointerSequenceActive) return true;
             if (Mathf.Abs(ratRosterScroll.velocity.y) > 1.5f) return true;
             if (Input.GetMouseButton(0) && IsPointerOverRatRosterScroll(Input.mousePosition)) return true;
             for (int index = 0; index < Input.touchCount; index++)
@@ -1085,7 +1105,7 @@ namespace RatHabitat
                 // can arrive while a finger/mouse is dragging the list. Do
                 // not destroy the ScrollRect or its pointer target mid-gesture;
                 // reconcile the visible rows as soon as the gesture settles.
-                if (!immediateRefresh && IsRatRosterScrollMoving())
+                if (IsRatRosterScrollMoving())
                 {
                     rosterRefreshDeferred = true;
                     rosterRefreshDeferredForce |= force;
@@ -3496,6 +3516,7 @@ namespace RatHabitat
         private void RebuildContent()
         {
             ratRosterScroll = null;
+            ratRosterDragRelay = null;
             ratRosterContent = null;
             lastRosterSortSignature = null;
             lastRosterContentSignature = null;
@@ -5190,6 +5211,8 @@ namespace RatHabitat
             viewportImage.raycastTarget = true;
             viewport.gameObject.AddComponent<RectMask2D>();
             list.viewport = viewport;
+            ratRosterDragRelay = viewport.gameObject.AddComponent<MyRatsScrollDragRelay>();
+            ratRosterDragRelay.Configure(list);
 
             var listContent = CreateRect("My Rats Content", viewport);
             listContent.anchorMin = new Vector2(0f, 1f);

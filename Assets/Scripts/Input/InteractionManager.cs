@@ -32,9 +32,11 @@ namespace RatHabitat
         private int touchFingerId = -1;
         private bool touchStartedOnUi;
         private bool touchStartedOnRatProfile;
+        private bool touchStartedOnRatRoster;
         private Vector2 mousePressPosition;
         private bool mousePressStartedOnUi;
         private bool mousePressStartedOnRatProfile;
+        private bool mousePressStartedOnRatRoster;
         private bool mouseDragDetected;
         private bool pinchStartedOnUi;
         private bool pinchZooming;
@@ -151,11 +153,13 @@ namespace RatHabitat
             touchFingerId = -1;
             touchStartedOnUi = false;
             touchStartedOnRatProfile = false;
+            touchStartedOnRatRoster = false;
             pinchStartedOnUi = false;
             pinchZooming = false;
             lastPinchDistance = 0f;
             mousePressStartedOnUi = true;
             mousePressStartedOnRatProfile = false;
+            mousePressStartedOnRatRoster = false;
             mouseDragDetected = false;
             lastPointerFrame = -1;
             pointerReceived = false;
@@ -211,11 +215,13 @@ namespace RatHabitat
             touchFingerId = -1;
             touchStartedOnUi = false;
             touchStartedOnRatProfile = false;
+            touchStartedOnRatRoster = false;
             pinchStartedOnUi = false;
             pinchZooming = false;
             lastPinchDistance = 0f;
             mousePressStartedOnUi = true;
             mousePressStartedOnRatProfile = false;
+            mousePressStartedOnRatRoster = false;
             mouseDragDetected = false;
         }
 
@@ -233,6 +239,8 @@ namespace RatHabitat
                 Touch first = Input.GetTouch(0);
                 Touch second = Input.GetTouch(1);
                 touchFingerId = -1;
+                touchStartedOnRatProfile = false;
+                touchStartedOnRatRoster = false;
 
                 bool pinchBeganOnUi = (first.phase == TouchPhase.Began && IsPointerOverInteractiveUi(first.position, first.fingerId)) ||
                     (second.phase == TouchPhase.Began && IsPointerOverInteractiveUi(second.position, second.fingerId));
@@ -284,6 +292,7 @@ namespace RatHabitat
                     touchFingerId = touch.fingerId;
                     touchStart = touch.position;
                     touchStartedOnRatProfile = IsPointerOverRatProfile(touch.position);
+                    touchStartedOnRatRoster = IsPointerOverRatRoster(touch.position);
                     touchStartedOnUi = IsPointerOverInteractiveUi(touch.position, touch.fingerId);
                     if (touchStartedOnUi) pinchStartedOnUi = true;
                 }
@@ -302,6 +311,13 @@ namespace RatHabitat
                         // The profile ScrollRect owns this gesture. Never
                         // pass its release into the habitat swipe/raycast.
                         RecordNoWorldRay("rat profile scroll handled");
+                    }
+                    else if (touchStartedOnRatRoster)
+                    {
+                        // A roster swipe belongs to its own ScrollRect even
+                        // if pinkie presentation or a refresh changes what is
+                        // under the pointer before touch-up.
+                        RecordNoWorldRay("my rats roster scroll handled");
                     }
                     else if (touchStartedOnUi || overUi)
                     {
@@ -322,6 +338,7 @@ namespace RatHabitat
                     touchFingerId = -1;
                     touchStartedOnUi = false;
                     touchStartedOnRatProfile = false;
+                    touchStartedOnRatRoster = false;
                 }
                 else if (touch.phase == TouchPhase.Canceled && touch.fingerId == touchFingerId)
                 {
@@ -330,6 +347,7 @@ namespace RatHabitat
                     touchFingerId = -1;
                     touchStartedOnUi = false;
                     touchStartedOnRatProfile = false;
+                    touchStartedOnRatRoster = false;
                 }
             }
         }
@@ -348,6 +366,7 @@ namespace RatHabitat
                 RecordPointerReceived(pointerPosition);
                 mousePressPosition = pointerPosition;
                 mousePressStartedOnRatProfile = IsPointerOverRatProfile(pointerPosition);
+                mousePressStartedOnRatRoster = IsPointerOverRatRoster(pointerPosition);
                 mousePressStartedOnUi = IsPointerOverInteractiveUi(pointerPosition, -1);
                 mouseDragDetected = false;
                 return;
@@ -376,6 +395,10 @@ namespace RatHabitat
                 {
                     RecordNoWorldRay("rat profile scroll handled");
                 }
+                else if (mousePressStartedOnRatRoster)
+                {
+                    RecordNoWorldRay("my rats roster scroll handled");
+                }
                 else if (mousePressStartedOnUi || overUi)
                 {
                     RecordNoWorldRay("UI blocked");
@@ -394,6 +417,7 @@ namespace RatHabitat
 
                 mousePressStartedOnUi = false;
                 mousePressStartedOnRatProfile = false;
+                mousePressStartedOnRatRoster = false;
                 mouseDragDetected = false;
                 return;
             }
@@ -412,6 +436,12 @@ namespace RatHabitat
             return pageUi != null && pageUi.IsPointerOverRatProfileScroll(screenPosition);
         }
 
+        private bool IsPointerOverRatRoster(Vector2 screenPosition)
+        {
+            if (pageUi == null) pageUi = FindObjectOfType<VerticalSliceUI>();
+            return pageUi != null && pageUi.IsPointerOverRatRosterScroll(screenPosition);
+        }
+
         private bool TryInvokeHabitatSwipe(Vector2 delta)
         {
             // A page change is only a horizontal gesture. Vertical drags are
@@ -428,8 +458,15 @@ namespace RatHabitat
             return habitatSwipeHandler(direction);
         }
 
-        private static bool IsPointerOverInteractiveUi(Vector2 screenPoint, int pointerId)
+        private bool IsPointerOverInteractiveUi(Vector2 screenPoint, int pointerId)
         {
+            // The nested My Rats viewport remains UI-owned even if its
+            // GraphicRaycaster misses a touch on a thin child edge. This
+            // keeps the manual habitat/world path from consuming a roster
+            // gesture while preserving the EventSystem's normal UI routing.
+            if (pageUi == null) pageUi = FindObjectOfType<VerticalSliceUI>();
+            if (pageUi != null && pageUi.IsPointerOverRatRosterScroll(screenPoint)) return true;
+
             var eventSystem = EventSystem.current;
             if (eventSystem == null) return false;
 

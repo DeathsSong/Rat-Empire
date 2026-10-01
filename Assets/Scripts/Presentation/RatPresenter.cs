@@ -413,6 +413,7 @@ namespace RatHabitat
 
             int disabledUiComponents = 0;
             int disabledColliders = 0;
+            int disabledRaycasters = 0;
             int uiLayer = LayerMask.NameToLayer("UI");
             foreach (UnityEngine.UI.Graphic graphic in root.GetComponentsInChildren<UnityEngine.UI.Graphic>(true))
             {
@@ -439,6 +440,20 @@ namespace RatHabitat
                 {
                     trigger.enabled = false;
                     disabledUiComponents++;
+                }
+            }
+            // A runtime-created pinkie must never introduce another EventSystem
+            // raycaster. In particular, a PhysicsRaycaster on an imported or
+            // diagnostic child can sort ahead of the Canvas raycaster and
+            // intercept a roster gesture even though the pinkie is not UI.
+            foreach (UnityEngine.EventSystems.BaseRaycaster raycaster in
+                     root.GetComponentsInChildren<UnityEngine.EventSystems.BaseRaycaster>(true))
+            {
+                if (raycaster == null) continue;
+                if (raycaster.enabled)
+                {
+                    raycaster.enabled = false;
+                    disabledRaycasters++;
                 }
             }
             foreach (UnityEngine.Canvas canvas in root.GetComponentsInChildren<UnityEngine.Canvas>(true))
@@ -489,6 +504,7 @@ namespace RatHabitat
                     " name=" + rat.name +
                     " uiDisabled=" + disabledUiComponents +
                     " helperCollidersDisabled=" + disabledColliders +
+                    " raycastersDisabled=" + disabledRaycasters +
                     " selectionColliders=" + root.GetComponentsInChildren<RatSelectionCollider>(true).Length +
                     " parent=" + (root.transform.parent == null ? "<none>" : root.transform.parent.name));
             }
@@ -508,6 +524,7 @@ namespace RatHabitat
             int raycastTargets = 0;
             int canvases = 0;
             int eventTriggers = 0;
+            int raycasters = 0;
             int enabledColliders = 0;
             foreach (RatData rat in liveRats.Values)
             {
@@ -521,12 +538,16 @@ namespace RatHabitat
                     if (graphic != null && graphic.raycastTarget) raycastTargets++;
                 canvases += root.GetComponentsInChildren<UnityEngine.Canvas>(true).Length;
                 eventTriggers += root.GetComponentsInChildren<UnityEngine.EventSystems.EventTrigger>(true).Length;
+                foreach (UnityEngine.EventSystems.BaseRaycaster raycaster in
+                         root.GetComponentsInChildren<UnityEngine.EventSystems.BaseRaycaster>(true))
+                    if (raycaster != null && raycaster.isActiveAndEnabled) raycasters++;
                 foreach (Collider collider in root.GetComponentsInChildren<Collider>(true))
                     if (collider != null && collider.enabled) enabledColliders++;
             }
             return "count=" + activePinkies + " graphics=" + graphics +
                 " raycastTargets=" + raycastTargets + " canvases=" + canvases +
-                " eventTriggers=" + eventTriggers + " enabledColliders=" + enabledColliders;
+                " eventTriggers=" + eventTriggers + " activeRaycasters=" + raycasters +
+                " enabledColliders=" + enabledColliders;
 #else
             return string.Empty;
 #endif
