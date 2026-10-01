@@ -55,6 +55,7 @@ namespace RatHabitat
                 save.storeInventoryInitialized = true;
                 save.storeNextRestockGameTime = currentGameTime + GameConfig.StoreRestockIntervalGameMs;
                 RatNameSystem.EnsureUniqueNames(save, currentGameTime);
+                RecordListingNameUsage(save, currentGameTime);
                 return;
             }
 
@@ -88,6 +89,7 @@ namespace RatHabitat
             save.storeInventoryInitialized = true;
             save.storeNextRestockGameTime = gameTime + GameConfig.StoreRestockIntervalGameMs;
             RatNameSystem.EnsureUniqueNames(save, gameTime);
+            RecordListingNameUsage(save, gameTime);
         }
 
         /// <summary>
@@ -418,16 +420,27 @@ namespace RatHabitat
             string femaleFamily = random.NextDouble() < GameConfig.StoreSharedMarkingFamilyChance
                 ? maleFamily
                 : PickMarketMarkingFamily(random);
+            long namingGameTime = save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs;
 
             string maleId = "store_adult_male_" + cycle;
-            string maleName = RatNameSystem.GenerateAvailableName(save, maleId, RatSex.Male, save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
+            string maleName = RatNameSystem.GenerateAvailableName(
+                save, maleId, RatSex.Male, namingGameTime, seed);
             save.storeRatListings.Add(CreateListing(
                 maleId, RatSex.Male, maleName, maleFamily, random, sharedBaseline, qualityCap));
 
             string femaleId = "store_adult_female_" + cycle;
-            string femaleName = RatNameSystem.GenerateAvailableName(save, femaleId, RatSex.Female, save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
+            string femaleName = RatNameSystem.GenerateAvailableName(
+                save, femaleId, RatSex.Female, namingGameTime, seed);
             save.storeRatListings.Add(CreateListing(
                 femaleId, RatSex.Female, femaleName, femaleFamily, random, sharedBaseline, qualityCap));
+        }
+
+        private static void RecordListingNameUsage(ColonySaveData save, long gameTime)
+        {
+            if (save == null || save.storeRatListings == null) return;
+            foreach (StoreRatListingData listing in save.storeRatListings)
+                if (listing != null)
+                    RatNameSystem.RecordUsage(save, listing.name, listing.sex, listing.id, gameTime);
         }
 
         private static RatData CreateGeneratedAdultRat(

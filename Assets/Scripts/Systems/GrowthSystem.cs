@@ -23,13 +23,17 @@ namespace RatHabitat
         private static int lastSimulationStepCount;
         private static int lastCompressedVisualActionCount;
         private static long totalSimulationSteps;
+        private static int behaviorParticipantCount = 1;
 
         // A high-speed frame can represent many in-game seconds. Subdivide
         // behavior updates into bounded chunks so state transitions remain
         // ordered without replaying every skipped render frame. Movement has a
         // separate per-rat visual cap in RatHabitatBehavior.
         public const float MaximumBehaviorStepSeconds = 1f;
-        public const int MaximumBehaviorStepsPerFrame = 24;
+        // Bound catch-up work across the entire colony, not independently for
+        // every rat. Every rat still receives a behavior update each rendered
+        // frame; only excess intermediate decision steps are compressed.
+        public const int MaximumTotalBehaviorStepsPerFrame = 240;
         public const float MaximumVisualMovementUnitsPerFrame = 1.25f;
         public const float MaximumFastRouteMovementUnitsPerFrame = 8f;
         public const float MaximumAnimationPlaybackMultiplier = 12f;
@@ -54,6 +58,11 @@ namespace RatHabitat
         public static int LastSimulationStepCount { get { return lastSimulationStepCount; } }
         public static int LastCompressedVisualActionCount { get { return lastCompressedVisualActionCount; } }
         public static long TotalSimulationSteps { get { return totalSimulationSteps; } }
+
+        public static void SetBehaviorParticipantCount(int count)
+        {
+            behaviorParticipantCount = Mathf.Max(1, count);
+        }
 
         public static void SetRuntimeSpeed(float speed)
         {
@@ -97,9 +106,15 @@ namespace RatHabitat
             EnsureDiagnosticsFrame();
             if (simulationDeltaSeconds <= 0f) return 0;
 
-            int requested = Mathf.Max(1, Mathf.CeilToInt(
-                simulationDeltaSeconds / MaximumBehaviorStepSeconds));
-            int steps = Mathf.Clamp(requested, 1, MaximumBehaviorStepsPerFrame);
+            float requestedFloat = Mathf.Ceil(simulationDeltaSeconds / MaximumBehaviorStepSeconds);
+            int requested = requestedFloat >= int.MaxValue
+                ? int.MaxValue
+                : Mathf.Max(1, (int)requestedFloat);
+            // Keep at least one update per live rat. When the colony is smaller
+            // than the total budget, divide it evenly so iteration order cannot
+            // starve later rats of catch-up work.
+            int perRatBudget = Mathf.Max(1, MaximumTotalBehaviorStepsPerFrame / behaviorParticipantCount);
+            int steps = Mathf.Min(requested, perRatBudget);
             lastSimulationStepCount += steps;
             totalSimulationSteps += steps;
             if (requested > steps) lastCompressedVisualActionCount += requested - steps;

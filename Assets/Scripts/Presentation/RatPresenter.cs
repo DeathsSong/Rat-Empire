@@ -41,6 +41,8 @@ namespace RatHabitat
         private const float PinkieGroundingRefreshIntervalSeconds = 0.35f;
         private float presentationCullingTimer;
         private const float PresentationCullingIntervalSeconds = 0.20f;
+        private float ageScaleRefreshTimer;
+        private const float AgeScaleRefreshIntervalSeconds = 0.10f;
         // A malformed saved rat or an optional visual asset must not abort the
         // entire presentation pass. Keep the warning once per stable ID so a
         // late-game save cannot flood the WebGL console every frame.
@@ -218,6 +220,7 @@ namespace RatHabitat
             }
 
             RemoveMissingRats(liveIds);
+            GrowthSystem.SetBehaviorParticipantCount(behaviors.Count);
             RestoreSavedNursingInteractions(save);
         }
 
@@ -250,6 +253,9 @@ namespace RatHabitat
             pinkieGroundingRefreshTimer -= Time.unscaledDeltaTime;
             bool refreshPinkieGrounding = pinkieGroundingRefreshTimer <= 0f;
             if (refreshPinkieGrounding) pinkieGroundingRefreshTimer = PinkieGroundingRefreshIntervalSeconds;
+            ageScaleRefreshTimer -= Time.unscaledDeltaTime;
+            bool refreshAgeScale = ageScaleRefreshTimer <= 0f;
+            if (refreshAgeScale) ageScaleRefreshTimer = AgeScaleRefreshIntervalSeconds;
             presentationCullingTimer -= Time.unscaledDeltaTime;
             bool refreshPresentationCulling = presentationCullingTimer <= 0f;
             if (refreshPresentationCulling) presentationCullingTimer = PresentationCullingIntervalSeconds;
@@ -272,7 +278,7 @@ namespace RatHabitat
 
                 RatData rat;
                 GameObject currentVisual;
-                if (liveRats.TryGetValue(item.Key, out rat) &&
+                if (refreshAgeScale && liveRats.TryGetValue(item.Key, out rat) &&
                     controller.TryGetCurrentVisual(out currentVisual))
                 {
                     // Age changes every simulation tick, not only when a
@@ -793,6 +799,7 @@ namespace RatHabitat
             ratRoots.Clear();
             visualControllers.Clear();
             behaviors.Clear();
+            GrowthSystem.SetBehaviorParticipantCount(0);
             liveRats.Clear();
             pinkiePoseVisuals.Clear();
             pinkieNestAnchors.Clear();

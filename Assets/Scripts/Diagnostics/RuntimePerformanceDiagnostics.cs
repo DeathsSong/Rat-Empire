@@ -10,15 +10,16 @@ using Unity.Profiling;
 
 namespace RatHabitat
 {
+    [Flags]
     public enum PerformanceIsolationMode
     {
-        Normal,
-        RatBehavior,
-        RatAnimation,
-        RatRendering,
-        RatShadows,
-        AutomaticUiRefresh,
-        ColonyMaintenance,
+        Normal = 0,
+        RatBehavior = 1 << 0,
+        RatAnimation = 1 << 1,
+        RatRendering = 1 << 2,
+        RatShadows = 1 << 3,
+        AutomaticUiRefresh = 1 << 4,
+        ColonyMaintenance = 1 << 5,
     }
 
     public enum PerformanceProbeArea
@@ -59,6 +60,7 @@ namespace RatHabitat
         public float WorstFrameMs;
         public float CpuMainThreadMs;
         public float GpuMs;
+        public float UnattributedFrameGapMs;
         public long GcAllocatedBytes;
         public int Gc0Collections;
         public int Gc1Collections;
@@ -83,6 +85,7 @@ namespace RatHabitat
     public struct PerformanceSpikeRecord
     {
         public PerformanceLogSeverity Severity;
+        public bool IsUnattributedFrameGap;
         public PerformanceLogSample Context;
     }
 #endif
@@ -168,6 +171,9 @@ namespace RatHabitat
         public static void RecordSample(PerformanceLogSample sample)
         {
             if (!captureEnabled || SampleRing.Length == 0) return;
+            sample.UnattributedFrameGapMs = sample.GpuMs < 0f && sample.CpuMainThreadMs >= 0f
+                ? Mathf.Max(0f, sample.AverageFrameMs - sample.CpuMainThreadMs)
+                : -1f;
             sampleWriteIndex = (sampleWriteIndex + 1) % SampleRing.Length;
             SampleRing[sampleWriteIndex] = sample;
             if (sampleCount < SampleRing.Length) sampleCount++;
@@ -216,6 +222,8 @@ namespace RatHabitat
             SpikeRing[spikeWriteIndex] = new PerformanceSpikeRecord
             {
                 Severity = severity,
+                IsUnattributedFrameGap = gpuMs < 0f && cpuMs >= 0f &&
+                    frameMs - cpuMs >= GameConfig.PerformanceUnattributedFrameGapThresholdMs,
                 Context = BuildFrameContext(frameMs, gameTimeMs, speed, cpuMs, gpuMs,
                     gcAllocatedBytes, gc0, gc1, gc2, activeRats, pinkies, animators, renderers,
                     uiGraphics, canvases, simulationSteps, maintenanceMs, uiRefreshMs, animationMs, panelName),
@@ -236,6 +244,9 @@ namespace RatHabitat
                 WorstFrameMs = frameMs,
                 CpuMainThreadMs = cpuMs,
                 GpuMs = gpuMs,
+                UnattributedFrameGapMs = gpuMs < 0f && cpuMs >= 0f
+                    ? Mathf.Max(0f, frameMs - cpuMs)
+                    : -1f,
                 GcAllocatedBytes = allocatedBytes,
                 Gc0Collections = gc0,
                 Gc1Collections = gc1,
@@ -299,6 +310,7 @@ namespace RatHabitat
                 .Append(") • animators ").Append(latest.AnimatorCount).Append(" • renderers ").Append(latest.RendererCount)
                 .Append(" • UI ").Append(latest.UiGraphicCount).Append(" graphics/").Append(latest.CanvasCount).Append(" canvases")
                 .Append("\nCPU ").Append(FormatMetric(latest.CpuMainThreadMs)).Append(" • GPU ").Append(FormatMetric(latest.GpuMs))
+                .Append(" • unattributed frame remainder ").Append(FormatMetric(latest.UnattributedFrameGapMs))
                 .Append(" • GC ").Append(latest.GcAllocatedBytes).Append(" B in sample; collections ")
                 .Append(latest.Gc0Collections).Append('/').Append(latest.Gc1Collections).Append('/').Append(latest.Gc2Collections)
                 .Append(" • steps ").Append(latest.SimulationSteps)
@@ -335,6 +347,7 @@ namespace RatHabitat
             for (int index = first; index < spikeCount; index++)
             {
                 PerformanceSpikeRecord spike = SpikeAt(index);
+                if (spike.IsUnattributedFrameGap) ExportBuilder.Append("UNATTRIBUTED FRAME GAP • ");
                 ExportBuilder.Append(spike.Severity == PerformanceLogSeverity.Critical ? "CRITICAL" : "LAG")
                     .Append(" • ");
                 AppendCompactSample(ExportBuilder, spike.Context);
@@ -355,7 +368,7 @@ namespace RatHabitat
             }
             else
             {
-                ExportBuilder.AppendLine("record,severity,utc,game_day_time,speed,fps,avg_frame_ms,worst_frame_ms,cpu_main_ms,gpu_ms,gc_alloc_bytes,gc0,gc1,gc2,rats,pinkies,animators,renderers,ui_graphics,canvases,simulation_steps,maintenance_ms,ui_refresh_ms,rat_ai_movement_ms,animation_ms,grounding_bounds_ms,presentation_ms,input_ms,panel");
+                ExportBuilder.AppendLine("record,severity,utc,game_day_time,speed,fps,avg_frame_ms,worst_frame_ms,cpu_main_ms,gpu_ms,unattributed_frame_gap_ms,gc_alloc_bytes,gc0,gc1,gc2,rats,pinkies,animators,renderers,ui_graphics,canvases,simulation_steps,maintenance_ms,ui_refresh_ms,rat_ai_movement_ms,animation_ms,grounding_bounds_ms,presentation_ms,input_ms,panel");
             }
 
             for (int index = 0; index < sampleCount; index++)
@@ -368,9 +381,11 @@ namespace RatHabitat
             for (int index = 0; index < spikeCount; index++)
             {
                 PerformanceSpikeRecord spike = SpikeAt(index);
-                if (csv) AppendCsvRecord(ExportBuilder, "spike", spike.Severity.ToString(), spike.Context);
+                if (csv) AppendCsvRecord(ExportBuilder, "spike",
+                    spike.IsUnattributedFrameGap ? spike.Severity + "_FRAME_GAP" : spike.Severity.ToString(), spike.Context);
                 else
                 {
+                    if (spike.IsUnattributedFrameGap) ExportBuilder.Append("UNATTRIBUTED FRAME GAP • ");
                     ExportBuilder.Append(spike.Severity == PerformanceLogSeverity.Critical ? "CRITICAL • " : "LAG • ");
                     AppendCompactSample(ExportBuilder, spike.Context).Append('\n');
                 }
@@ -456,6 +471,7 @@ namespace RatHabitat
                 .Append(" • frame ").Append(sample.AverageFrameMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("/")
                 .Append(sample.WorstFrameMs.ToString("0.00", CultureInfo.InvariantCulture)).Append(" ms")
                 .Append(" • CPU/GPU ").Append(FormatMetric(sample.CpuMainThreadMs)).Append('/').Append(FormatMetric(sample.GpuMs))
+                .Append(" • frame remainder ").Append(FormatMetric(sample.UnattributedFrameGapMs))
                 .Append(" • GC ").Append(sample.GcAllocatedBytes).Append(" B, ")
                 .Append(sample.Gc0Collections).Append('/').Append(sample.Gc1Collections).Append('/').Append(sample.Gc2Collections)
                 .Append(" • rats/pinkies ").Append(sample.ActiveRatCount).Append('/').Append(sample.PinkieCount)
@@ -481,6 +497,7 @@ namespace RatHabitat
                 .Append(sample.WorstFrameMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.CpuMainThreadMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.GpuMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.UnattributedFrameGapMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.GcAllocatedBytes).Append(',').Append(sample.Gc0Collections).Append(',')
                 .Append(sample.Gc1Collections).Append(',').Append(sample.Gc2Collections).Append(',')
                 .Append(sample.ActiveRatCount).Append(',').Append(sample.PinkieCount).Append(',')
@@ -513,9 +530,21 @@ namespace RatHabitat
             isolationMode = mode;
         }
 
+        public static void ToggleIsolationMode(PerformanceIsolationMode mode)
+        {
+            if (mode == PerformanceIsolationMode.Normal)
+            {
+                isolationMode = PerformanceIsolationMode.Normal;
+                return;
+            }
+            isolationMode ^= mode;
+        }
+
         public static bool IsIsolationActive(PerformanceIsolationMode mode)
         {
-            return isolationMode == mode;
+            if (mode == PerformanceIsolationMode.Normal)
+                return isolationMode == PerformanceIsolationMode.Normal;
+            return (isolationMode & mode) == mode;
         }
 
         public static string ConsumeSampleSummary()
@@ -592,6 +621,7 @@ namespace RatHabitat
         public static void SetCaptureEnabled(bool enabled) { }
         public static void SetHudVisible(bool visible) { }
         public static void SetIsolationMode(PerformanceIsolationMode mode) { }
+        public static void ToggleIsolationMode(PerformanceIsolationMode mode) { }
         public static bool IsIsolationActive(PerformanceIsolationMode mode) { return false; }
         public static string ConsumeSampleSummary() { return ""; }
         public static double TicksToMilliseconds(long ticks) { return 0d; }
@@ -878,10 +908,14 @@ namespace RatHabitat
                     if (rat.stage == RatStage.Pinkie) pinkieCount++;
                 }
             }
-            animatorCount = UnityEngine.Object.FindObjectsOfType<Animator>(true).Length;
-            rendererCount = UnityEngine.Object.FindObjectsOfType<Renderer>(true).Length;
-            uiGraphicCount = UnityEngine.Object.FindObjectsOfType<Graphic>(true).Length;
-            canvasCount = UnityEngine.Object.FindObjectsOfType<Canvas>(true).Length;
+            // Diagnostics report objects participating in the active scene,
+            // not inactive portrait/preview prefabs retained by UI builders.
+            // This is sampled once per second and avoids inflating counts with
+            // hidden stage visuals that cannot contribute to the current frame.
+            animatorCount = UnityEngine.Object.FindObjectsOfType<Animator>().Length;
+            rendererCount = UnityEngine.Object.FindObjectsOfType<Renderer>().Length;
+            uiGraphicCount = UnityEngine.Object.FindObjectsOfType<Graphic>().Length;
+            canvasCount = UnityEngine.Object.FindObjectsOfType<Canvas>().Length;
         }
 
         private void RebuildReport()

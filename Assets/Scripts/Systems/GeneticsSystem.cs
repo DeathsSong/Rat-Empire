@@ -88,7 +88,8 @@ namespace RatHabitat
             public List<LocusPreviewData> loci = new List<LocusPreviewData>();
             public List<FurOutcomePreview> furOutcomes = new List<FurOutcomePreview>();
             public List<TraitRangePreview> traitRanges = new List<TraitRangePreview>();
-            public float mutationChance;
+            public float sLocusMutationChance;
+            public float bcdMutationChance;
         }
 
         private class WeightedGenotype
@@ -196,7 +197,7 @@ namespace RatHabitat
             long recordedAt,
             List<MutationRecordData> mutations)
         {
-            if (UnityEngine.Random.value >= GameConfig.MutationRate) return allele;
+            if (UnityEngine.Random.value >= MutationRateForLocus(locus)) return allele;
             string mutated = allele == GameConfig.DominantAllele(locus)
                 ? GameConfig.RecessiveAllele(locus)
                 : GameConfig.DominantAllele(locus);
@@ -209,6 +210,13 @@ namespace RatHabitat
                 recordedAt = recordedAt,
             });
             return mutated;
+        }
+
+        public static float MutationRateForLocus(string locus)
+        {
+            return string.Equals(locus, "S", StringComparison.Ordinal)
+                ? GameConfig.MarkingMutationRate
+                : GameConfig.MutationRate;
         }
 
         /// <summary>
@@ -692,7 +700,11 @@ namespace RatHabitat
 
         public static BreedingPreviewData BuildPreview(RatData parentA, RatData parentB)
         {
-            var preview = new BreedingPreviewData { mutationChance = GameConfig.MutationRate };
+            var preview = new BreedingPreviewData
+            {
+                sLocusMutationChance = GameConfig.MarkingMutationRate,
+                bcdMutationChance = GameConfig.MutationRate,
+            };
             if (parentA == null || parentB == null) return preview;
 
             if (parentA.genotype == null) parentA.genotype = new GenotypeData();

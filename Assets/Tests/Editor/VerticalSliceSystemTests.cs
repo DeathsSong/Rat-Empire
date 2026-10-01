@@ -5,6 +5,7 @@ using NUnit.Framework;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.EventSystems;
+using UnityEngine.TestTools;
 using UnityEngine.UI;
 using Object = UnityEngine.Object;
 
@@ -82,6 +83,79 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void RatBehaviorCatchUpUsesOneColonyWideBudgetAndKeepsOneUpdatePerRat()
+        {
+            try
+            {
+                GrowthSystem.SetBehaviorParticipantCount(20);
+                GrowthSystem.BeginBehaviorUpdate(0.01f); // establish this frame's diagnostic window
+                int beforeTwenty = GrowthSystem.LastSimulationStepCount;
+                for (int rat = 0; rat < 20; rat++)
+                    Assert.AreEqual(12, GrowthSystem.BeginBehaviorUpdate(120f));
+                Assert.AreEqual(GrowthSystem.MaximumTotalBehaviorStepsPerFrame,
+                    GrowthSystem.LastSimulationStepCount - beforeTwenty,
+                    "Twenty rats share the total catch-up budget instead of each replaying 24 steps.");
+
+                GrowthSystem.SetBehaviorParticipantCount(40);
+                int beforeForty = GrowthSystem.LastSimulationStepCount;
+                for (int rat = 0; rat < 40; rat++)
+                    Assert.AreEqual(6, GrowthSystem.BeginBehaviorUpdate(120f));
+                Assert.AreEqual(GrowthSystem.MaximumTotalBehaviorStepsPerFrame,
+                    GrowthSystem.LastSimulationStepCount - beforeForty);
+
+                GrowthSystem.SetBehaviorParticipantCount(20);
+                Assert.AreEqual(1, GrowthSystem.BeginBehaviorUpdate(0.5f),
+                    "Normal-speed rat updates remain one behavior step per rendered frame.");
+            }
+            finally
+            {
+                GrowthSystem.SetBehaviorParticipantCount(1);
+            }
+        }
+
+        [Test]
+        public void PerformanceIsolationSwitchesCanBeCombinedAndResetTogether()
+        {
+            PerformanceIsolationMode previous = RuntimePerformanceDiagnostics.IsolationMode;
+            try
+            {
+                RuntimePerformanceDiagnostics.SetIsolationMode(PerformanceIsolationMode.Normal);
+                RuntimePerformanceDiagnostics.ToggleIsolationMode(PerformanceIsolationMode.RatAnimation);
+                RuntimePerformanceDiagnostics.ToggleIsolationMode(PerformanceIsolationMode.AutomaticUiRefresh);
+                Assert.IsTrue(RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.RatAnimation));
+                Assert.IsTrue(RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.AutomaticUiRefresh));
+                Assert.IsFalse(RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.RatRendering));
+                RuntimePerformanceDiagnostics.ToggleIsolationMode(PerformanceIsolationMode.Normal);
+                Assert.AreEqual(PerformanceIsolationMode.Normal, RuntimePerformanceDiagnostics.IsolationMode);
+            }
+            finally
+            {
+                RuntimePerformanceDiagnostics.SetIsolationMode(previous);
+            }
+        }
+
+        [Test]
+        public void PerformanceLogSeparatesUnattributedFrameGapsFromGpuTiming()
+        {
+            bool wasCapturing = RuntimePerformanceDiagnostics.CaptureEnabled;
+            try
+            {
+                RuntimePerformanceDiagnostics.SetCaptureEnabled(true);
+                RuntimePerformanceDiagnostics.ClearLog();
+                RuntimePerformanceDiagnostics.ObserveFrame(180f, GameConfig.StartGameTimeMs, 1,
+                    8f, -1f, 0, 0, 0, 0, 20, 2, 20, 60, 200, 2, 240, 4f, 1f, 2f, "Habitat");
+                StringAssert.Contains("UNATTRIBUTED FRAME GAP", RuntimePerformanceDiagnostics.BuildRecentSpikesText(1));
+                StringAssert.Contains("unattributed_frame_gap_ms", RuntimePerformanceDiagnostics.BuildExportText(true));
+                StringAssert.Contains("CPU/GPU 8.00 ms/n/a", RuntimePerformanceDiagnostics.BuildRecentSpikesText(1));
+            }
+            finally
+            {
+                RuntimePerformanceDiagnostics.ClearLog();
+                RuntimePerformanceDiagnostics.SetCaptureEnabled(wasCapturing);
+            }
+        }
+
+        [Test]
         public void FavoriteStatusTogglesAndPersistsWithTheRatRecord()
         {
             ColonySaveData save = ColonyFactory.CreateNew(1000000L);
@@ -146,6 +220,114 @@ namespace RatHabitat.Tests
             Assert.AreEqual(0, visibleFavorites.Count);
             Assert.IsTrue(RatFavoriteSystem.IsVisibleInFavorites(first, false),
                 "Leaving Favorites must return ordinary roster rows even when there are no favorites.");
+        }
+
+        [Test]
+        public void MyRatsMixedGrowthStagesShareOneScrollableRosterContent()
+        {
+            bool previousIgnoreFailingMessages = LogAssert.ignoreFailingMessages;
+            var gameObject = new GameObject("My Rats Scroll Test Game");
+            var canvasObject = new GameObject("My Rats Scroll Test Canvas", typeof(RectTransform), typeof(Canvas), typeof(GraphicRaycaster));
+            try
+            {
+                // RatPortraitPreview is intentionally omitted in this focused
+                // UI-layout test; suppress only its development assertion
+                // about an absent preview texture.
+                LogAssert.ignoreFailingMessages = true;
+
+                gameObject.SetActive(false);
+                GameBootstrap game = gameObject.AddComponent<GameBootstrap>();
+                var save = new ColonySaveData
+                {
+                    clock = new ClockData { gameTimeMs = GameConfig.StartGameTimeMs, speed = 1f }
+                };
+                save.EnsureLists();
+                for (int index = 0; index < 12; index++)
+                {
+                    RatStage stage = index % 3 == 0 ? RatStage.Pinkie :
+                        index % 3 == 1 ? RatStage.YoungRat : RatStage.Adult;
+                    RatData rat = ColonyFactory.CreateRat(
+                        "roster-scroll-" + index,
+                        "Scroll Rat " + index,
+                        index % 2 == 0 ? RatSex.Female : RatSex.Male,
+                        GameConfig.StartGameTimeMs,
+                        0,
+                        GeneticsSystem.CreateFounder("B", "B", "C", "C", "D", "D", "s", "s"),
+                        new TraitData(10f + index, 20f + index, 30f + index),
+                        stage);
+                    save.rats.Add(rat);
+                }
+                typeof(GameBootstrap).GetProperty("Save").GetSetMethod(true).Invoke(game, new object[] { save });
+
+                Canvas canvas = canvasObject.GetComponent<Canvas>();
+                canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+                RectTransform canvasRect = canvasObject.GetComponent<RectTransform>();
+                canvasRect.sizeDelta = new Vector2(540f, 960f);
+                var pageObject = new GameObject("My Rats Test Page", typeof(RectTransform));
+                pageObject.transform.SetParent(canvasObject.transform, false);
+                RectTransform pageContent = pageObject.GetComponent<RectTransform>();
+                pageContent.anchorMin = new Vector2(0f, 1f);
+                pageContent.anchorMax = new Vector2(1f, 1f);
+                pageContent.pivot = new Vector2(0.5f, 1f);
+                pageContent.sizeDelta = new Vector2(0f, 960f);
+                var pageLayout = pageContent.gameObject.AddComponent<VerticalLayoutGroup>();
+                pageLayout.childControlWidth = true;
+                pageLayout.childControlHeight = true;
+                pageLayout.childForceExpandWidth = true;
+                pageLayout.childForceExpandHeight = false;
+                var pageFitter = pageContent.gameObject.AddComponent<ContentSizeFitter>();
+                pageFitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+                VerticalSliceUI ui = canvasObject.AddComponent<VerticalSliceUI>();
+                SetPrivateField(ui, "game", game);
+                SetPrivateField(ui, "content", pageContent);
+                var addRoster = typeof(VerticalSliceUI).GetMethod(
+                    "AddRatRoster",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Assert.IsNotNull(addRoster);
+                addRoster.Invoke(ui, new object[] { pageContent });
+
+                Canvas.ForceUpdateCanvases();
+                LayoutRebuilder.ForceRebuildLayoutImmediate(pageContent);
+                Canvas.ForceUpdateCanvases();
+
+                ScrollRect rosterScroll = pageContent.GetComponentInChildren<ScrollRect>(true);
+                Assert.IsNotNull(rosterScroll, "The roster must have its own ScrollRect.");
+                Assert.IsTrue(rosterScroll.vertical);
+                Assert.IsFalse(rosterScroll.horizontal);
+                Assert.IsNotNull(rosterScroll.content);
+                Assert.AreEqual(save.rats.Count, rosterScroll.content.childCount,
+                    "Pinkies, young rats, and adults must all create rows in the same content transform.");
+                Assert.IsNotNull(rosterScroll.viewport.GetComponent<RectMask2D>());
+                Assert.IsTrue(rosterScroll.viewport.GetComponent<Image>().raycastTarget,
+                    "The roster viewport must be a valid EventSystem hit surface.");
+                var finalizeLayout = typeof(VerticalSliceUI).GetMethod(
+                    "RebuildRatRosterLayout",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Assert.IsNotNull(finalizeLayout);
+                finalizeLayout.Invoke(ui, new object[] { 1f });
+                Assert.Greater(rosterScroll.content.rect.height, rosterScroll.viewport.rect.height,
+                    "Mixed-stage row layout must produce a scrollable content extent.");
+
+                var visibleMethod = typeof(VerticalSliceUI).GetMethod(
+                    "IsRosterRatVisible",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Assert.IsNotNull(visibleMethod);
+                foreach (RatData rat in save.rats)
+                    Assert.IsTrue((bool)visibleMethod.Invoke(ui, new object[] { rat }),
+                        rat.stage + " rats must not be excluded from the normal roster.");
+
+                rosterScroll.verticalNormalizedPosition = 0f;
+                Canvas.ForceUpdateCanvases();
+                Assert.Less(rosterScroll.verticalNormalizedPosition, 0.01f,
+                    "The populated mixed-stage list must reach its lower end when scrolled.");
+            }
+            finally
+            {
+                LogAssert.ignoreFailingMessages = previousIgnoreFailingMessages;
+                Object.DestroyImmediate(gameObject);
+                Object.DestroyImmediate(canvasObject);
+            }
         }
 
         [Test]
@@ -348,6 +530,95 @@ namespace RatHabitat.Tests
 
             Assert.That(doubleNames, Is.InRange(100, 150),
                 "New names should remain mostly single, with about 10-15% two-part names.");
+        }
+
+        [Test]
+        public void MarketNamesUseSexSpecificPoolsStayUniqueAndPersistThroughPurchase()
+        {
+            ColonySaveData save = ColonyFactory.CreateNew(4451231L);
+            Assert.AreEqual(2, save.storeRatListings.Count);
+            var livingNames = new HashSet<string>();
+            foreach (RatData rat in save.rats)
+                livingNames.Add(RatNameSystem.NormalizeForComparison(rat.name));
+
+            var listingNames = new HashSet<string>();
+            foreach (StoreRatListingData listing in save.storeRatListings)
+            {
+                string key = RatNameSystem.NormalizeForComparison(listing.name);
+                Assert.IsTrue(listingNames.Add(key), "Listings in one restock must not share a normalized name.");
+                Assert.IsFalse(livingNames.Contains(key), "Market names should avoid names already used by colony rats.");
+                string[] sexPool = listing.sex == RatSex.Female ? GameConfig.FemaleRatNames : GameConfig.MaleRatNames;
+                Assert.IsTrue(ContainsNormalizedName(sexPool, listing.name),
+                    listing.sex + " listing must draw from the matching built-in name pool.");
+            }
+
+            string maleName = StoreSystem.FindListing(save, "store_adult_male_0").name;
+            string femaleName = StoreSystem.FindListing(save, "store_adult_female_0").name;
+            ColonySaveData loaded = SaveSystem.FromJson(SaveSystem.ToJson(save));
+            Assert.AreEqual(maleName, StoreSystem.FindListing(loaded, "store_adult_male_0").name,
+                "Reloading must not regenerate a listing's persisted name.");
+            Assert.AreEqual(femaleName, StoreSystem.FindListing(loaded, "store_adult_female_0").name);
+            StoreSystem.EnsureStoreState(loaded);
+            Assert.AreEqual(maleName, StoreSystem.FindListing(loaded, "store_adult_male_0").name,
+                "Store refresh/repair must leave current listing names unchanged.");
+
+            StoreRatListingData purchasedListing = StoreSystem.FindListing(loaded, "store_adult_male_0");
+            RatData purchased = StoreSystem.CreatePurchasedRat(purchasedListing, loaded.clock.gameTimeMs);
+            Assert.AreEqual(maleName, purchased.name, "A purchased rat keeps its market listing name.");
+
+            var maleNamesAcrossColonies = new HashSet<string>();
+            var femaleNamesAcrossColonies = new HashSet<string>();
+            for (int index = 0; index < 16; index++)
+            {
+                ColonySaveData generated = ColonyFactory.CreateNew(7000000L + index * 7919L);
+                maleNamesAcrossColonies.Add(generated.storeRatListings[0].name);
+                femaleNamesAcrossColonies.Add(generated.storeRatListings[1].name);
+            }
+            Assert.Greater(maleNamesAcrossColonies.Count, 1,
+                "Seeded restocks should vary between colonies rather than repeating a fixed male name.");
+            Assert.Greater(femaleNamesAcrossColonies.Count, 1,
+                "Seeded restocks should vary between colonies rather than repeating a fixed female name.");
+        }
+
+        [Test]
+        public void MarketNameGenerationIncludesSexSpecificCustomNameLists()
+        {
+            string[] originalMaleNames = (string[])GameConfig.MaleRatNames.Clone();
+            string[] originalFemaleNames = (string[])GameConfig.FemaleRatNames.Clone();
+            try
+            {
+                Array.Clear(GameConfig.MaleRatNames, 0, GameConfig.MaleRatNames.Length);
+                Array.Clear(GameConfig.FemaleRatNames, 0, GameConfig.FemaleRatNames.Length);
+                var save = new ColonySaveData
+                {
+                    createdAt = 88990011L,
+                    storeInventoryInitialized = true,
+                    ratNameMigrationVersion = RatNameSystem.CurrentMigrationVersion,
+                    clock = new ClockData { gameTimeMs = GameConfig.StartGameTimeMs },
+                };
+                save.EnsureLists();
+                save.customMaleRatNames.Add("Custom Market Buck");
+                save.customFemaleRatNames.Add("Custom Market Doe");
+
+                StoreSystem.RestockNow(save, save.clock.gameTimeMs);
+
+                Assert.AreEqual("Custom Market Buck", StoreSystem.FindListing(save, "store_adult_male_1").name);
+                Assert.AreEqual("Custom Market Doe", StoreSystem.FindListing(save, "store_adult_female_1").name);
+            }
+            finally
+            {
+                Array.Copy(originalMaleNames, GameConfig.MaleRatNames, originalMaleNames.Length);
+                Array.Copy(originalFemaleNames, GameConfig.FemaleRatNames, originalFemaleNames.Length);
+            }
+        }
+
+        private static bool ContainsNormalizedName(string[] pool, string name)
+        {
+            if (pool == null) return false;
+            string key = RatNameSystem.NormalizeForComparison(name);
+            foreach (string candidate in pool)
+                if (RatNameSystem.NormalizeForComparison(candidate) == key) return true;
+            return false;
         }
 
         [Test]
@@ -1207,6 +1478,67 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void MarkingMutationRateIsSeparateDeterministicAndShownInBreedingPreview()
+        {
+            Assert.AreEqual(0.01f, GameConfig.MarkingMutationRate, 0.000001f);
+            Assert.AreEqual(0.0025f, GameConfig.MutationRate, 0.000001f);
+            Assert.AreEqual(GameConfig.MarkingMutationRate, GeneticsSystem.MutationRateForLocus("S"));
+            Assert.AreEqual(GameConfig.MutationRate, GeneticsSystem.MutationRateForLocus("B"));
+            Assert.AreEqual(GameConfig.MutationRate, GeneticsSystem.MutationRateForLocus("C"));
+            Assert.AreEqual(GameConfig.MutationRate, GeneticsSystem.MutationRateForLocus("D"));
+
+            GenotypeData solidGenotype = GeneticsSystem.CreateFounder(
+                "B", "B", "C", "C", "D", "D", "s", "s");
+            RatData parentA = ColonyFactory.CreateRat(
+                "mutation-preview-a", "Parent A", RatSex.Female, 1000000L, 1,
+                solidGenotype.Clone(), new TraitData(10f, 10f, 10f), RatStage.Adult);
+            RatData parentB = ColonyFactory.CreateRat(
+                "mutation-preview-b", "Parent B", RatSex.Male, 1000000L, 1,
+                solidGenotype.Clone(), new TraitData(10f, 10f, 10f), RatStage.Adult);
+            GeneticsSystem.BreedingPreviewData preview = GeneticsSystem.BuildPreview(parentA, parentB);
+            Assert.AreEqual(GameConfig.MarkingMutationRate, preview.sLocusMutationChance);
+            Assert.AreEqual(GameConfig.MutationRate, preview.bcdMutationChance);
+
+            UnityEngine.Random.State previousRandomState = UnityEngine.Random.state;
+            try
+            {
+                int[] firstRun = CountSeededMutationRecords(solidGenotype, 12000, 481516);
+                int[] repeatedRun = CountSeededMutationRecords(solidGenotype, 12000, 481516);
+                CollectionAssert.AreEqual(firstRun, repeatedRun,
+                    "The same random seed must reproduce the same inherited mutations.");
+
+                // Each B/C/D locus has two inherited alleles at 0.25%; S has
+                // two at 1%. These deterministic bounds distinguish the rates
+                // without relying on an exact count from a random distribution.
+                Assert.That(firstRun[0], Is.InRange(35, 85), "B-locus mutation count");
+                Assert.That(firstRun[1], Is.InRange(35, 85), "C-locus mutation count");
+                Assert.That(firstRun[2], Is.InRange(35, 85), "D-locus mutation count");
+                Assert.That(firstRun[3], Is.InRange(190, 290), "S-locus mutation count");
+            }
+            finally
+            {
+                UnityEngine.Random.state = previousRandomState;
+            }
+        }
+
+        private static int[] CountSeededMutationRecords(GenotypeData parents, int offspringCount, int seed)
+        {
+            var counts = new int[4];
+            UnityEngine.Random.InitState(seed);
+            for (int index = 0; index < offspringCount; index++)
+            {
+                GenotypeData offspring = GeneticsSystem.InheritGenotype(parents, parents, index + 1L);
+                foreach (MutationRecordData mutation in offspring.mutations)
+                {
+                    if (mutation == null) continue;
+                    int locusIndex = Array.IndexOf(GameConfig.Loci, mutation.locus);
+                    if (locusIndex >= 0) counts[locusIndex]++;
+                }
+            }
+            return counts;
+        }
+
+        [Test]
         public void BreedingCreatesPinkiesWithHiddenFurAndLineage()
         {
             // The new-game founders are intentionally randomized and may be
@@ -1840,6 +2172,16 @@ namespace RatHabitat.Tests
             rat.baseFertilityInitialized = true;
             rat.stage = GrowthSystem.StageForAge(ageDays, rat.sex, breedingEndAgeDays);
             return rat;
+        }
+
+        private static void SetPrivateField<T>(object target, string fieldName, T value)
+        {
+            Assert.IsNotNull(target);
+            var field = target.GetType().GetField(
+                fieldName,
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.IsNotNull(field, "Expected private field '" + fieldName + "'.");
+            field.SetValue(target, value);
         }
 
         private static void AssertDeveloperCoat(

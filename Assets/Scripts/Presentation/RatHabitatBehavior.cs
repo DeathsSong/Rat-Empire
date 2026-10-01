@@ -142,6 +142,7 @@ namespace RatHabitat
         public bool PairingApproachAtTarget { get { return pairingApproachActive && pairingApproachArrived; } }
         public bool PairingInteractionComplete { get { return pairingInteractionActive && pairingInteractionComplete; } }
         public bool BirthApproachAtNest { get { return birthApproachActive && birthApproachArrived; } }
+        public bool BirthApproachActive { get { return birthApproachActive; } }
         public bool NursingInteractionActive { get { return nursingInteractionActive; } }
         public float BaseWorldMovementSpeed { get { return movementSpeed; } }
         public float TargetWorldMovementSpeed

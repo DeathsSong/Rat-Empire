@@ -99,6 +99,9 @@ namespace RatHabitat
         private ScrollRect ratRosterScroll;
         private RectTransform ratRosterContent;
         private string lastRosterSortSignature;
+        private string lastRosterContentSignature;
+        private bool rosterRefreshDeferred;
+        private bool rosterRefreshDeferredForce;
         private ScrollRect storeRatListScroll;
         private ScrollRect familyTreeScroll;
         private ScrollRect ratProfileScroll;
@@ -187,6 +190,7 @@ namespace RatHabitat
         private readonly List<Action> liveTimedTextUpdates = new List<Action>();
         private const float LiveUiRefreshIntervalSeconds = 0.15f;
         private float liveUiRefreshTimer;
+        private int lastHeaderRefreshFrame = -1;
         private readonly Dictionary<MainPanel, Button> topNavigationButtons = new Dictionary<MainPanel, Button>();
         private readonly Dictionary<MainPanel, Image> topNavigationImages = new Dictionary<MainPanel, Image>();
         private readonly Dictionary<MainPanel, Text> topNavigationLabels = new Dictionary<MainPanel, Text>();
@@ -775,6 +779,35 @@ namespace RatHabitat
             return false;
         }
 
+        private bool IsPointerOverRatRosterScroll(Vector2 screenPoint)
+        {
+            if (ratRosterScroll == null || !ratRosterScroll.isActiveAndEnabled) return false;
+            RectTransform viewport = ratRosterScroll.viewport != null
+                ? ratRosterScroll.viewport
+                : ratRosterScroll.transform as RectTransform;
+            return viewport != null && RectTransformUtility.RectangleContainsScreenPoint(viewport, screenPoint, null);
+        }
+
+        private bool IsRatRosterScrollMoving()
+        {
+            if (ratRosterScroll == null || !ratRosterScroll.isActiveAndEnabled) return false;
+            if (Mathf.Abs(ratRosterScroll.velocity.y) > 1.5f) return true;
+            if (Input.GetMouseButton(0) && IsPointerOverRatRosterScroll(Input.mousePosition)) return true;
+            for (int index = 0; index < Input.touchCount; index++)
+            {
+                Touch touch = Input.GetTouch(index);
+                if (touch.phase != TouchPhase.Ended && touch.phase != TouchPhase.Canceled &&
+                    IsPointerOverRatRosterScroll(touch.position)) return true;
+            }
+            return false;
+        }
+
+        private void StopRatRosterScrollForUiAction()
+        {
+            if (activeMainPanel == MainPanel.MyRats && ratRosterScroll != null)
+                ratRosterScroll.StopMovement();
+        }
+
         private void CaptureRatProfileScrollPosition()
         {
             if (ratProfileScroll == null || !ratProfileScroll.isActiveAndEnabled) return;
@@ -1031,6 +1064,35 @@ namespace RatHabitat
                 return;
             }
 
+            // My Rats has its own ScrollRect inside the page ScrollRect. Keep
+            // that hierarchy stable across unrelated simulation/presentation
+            // changes (notably the frequent nursing/activity changes while a
+            // litter contains pinkies). Only a change to what the roster
+            // actually displays is allowed to rebuild its cards.
+            if (activeMainPanel == MainPanel.MyRats && ratRosterScroll != null)
+            {
+                string rosterSignature = BuildRosterContentSignature();
+                if (string.Equals(rosterSignature, lastRosterContentSignature, StringComparison.Ordinal))
+                {
+                    lastSignature = signature;
+                    rosterRefreshDeferred = false;
+                    rosterRefreshDeferredForce = false;
+                    RefreshTopNavigationState();
+                    return;
+                }
+
+                // Births, growth transitions, and other real roster changes
+                // can arrive while a finger/mouse is dragging the list. Do
+                // not destroy the ScrollRect or its pointer target mid-gesture;
+                // reconcile the visible rows as soon as the gesture settles.
+                if (!immediateRefresh && IsRatRosterScrollMoving())
+                {
+                    rosterRefreshDeferred = true;
+                    rosterRefreshDeferredForce |= force;
+                    return;
+                }
+            }
+
             // Do not destroy the profile ScrollRect while Unity is processing
             // a drag or its inertial tail. Defer the data refresh until the
             // gesture settles; otherwise a harmless clock/activity update can
@@ -1123,7 +1185,13 @@ namespace RatHabitat
             // viewport jump is requested by a selection or clock refresh.
             pageScroll.verticalNormalizedPosition = previousNormalized;
             if (mateListScroll != null) mateListScroll.verticalNormalizedPosition = previousMateNormalized;
-            if (ratRosterScroll != null) ratRosterScroll.verticalNormalizedPosition = previousRosterNormalized;
+            if (ratRosterContent != null)
+            {
+                RebuildRatRosterLayout(previousRosterNormalized);
+                lastRosterContentSignature = activeMainPanel == MainPanel.MyRats
+                    ? BuildRosterContentSignature()
+                    : null;
+            }
             if (storeRatListScroll != null) storeRatListScroll.verticalNormalizedPosition = previousStoreNormalized;
             if (ratProfileScroll != null && ratProfileScrollRatId == (game.SelectedRat == null ? string.Empty : game.SelectedRat.id))
                 ratProfileScroll.verticalNormalizedPosition = ratProfileScrollNormalized;
@@ -1203,6 +1271,15 @@ namespace RatHabitat
         public void RefreshHeader()
         {
             if (!ready || game == null) return;
+            // Several systems can request a header refresh during one frame
+            // (clock, birth, wallet, and page callbacks). Collapse those into
+            // one text/event refresh while still reasserting header input state.
+            if (lastHeaderRefreshFrame == Time.frameCount)
+            {
+                RefreshTopNavigationState();
+                return;
+            }
+            lastHeaderRefreshFrame = Time.frameCount;
             UpdateResponsiveLayoutIfNeeded();
             string clockLabel = game.ClockLabel;
             if (clockText != null && clockText.text != clockLabel) clockText.text = clockLabel;
@@ -3067,6 +3144,13 @@ namespace RatHabitat
                 }
                 Refresh(force);
             }
+            if (rosterRefreshDeferred && !IsRatRosterScrollMoving())
+            {
+                bool force = rosterRefreshDeferredForce;
+                rosterRefreshDeferred = false;
+                rosterRefreshDeferredForce = false;
+                Refresh(force);
+            }
             if (profileRefreshDeferred && !IsRatProfileScrollMoving())
                 Refresh(true);
             if (profileActivityHistoryDeferred && !IsRatProfileScrollMoving())
@@ -3414,6 +3498,9 @@ namespace RatHabitat
             ratRosterScroll = null;
             ratRosterContent = null;
             lastRosterSortSignature = null;
+            lastRosterContentSignature = null;
+            rosterRefreshDeferred = false;
+            rosterRefreshDeferredForce = false;
             ratProfileScroll = null;
             liveProfileRatId = null;
             liveProfileActivityText = null;
@@ -5135,11 +5222,13 @@ namespace RatHabitat
                 // participate in EventSystem or manual fallback hit testing.
                 emptyState.raycastTarget = false;
                 lastRosterSortSignature = BuildRosterSortSignature(roster);
+                lastRosterContentSignature = BuildRosterContentSignature();
                 return;
             }
 
             foreach (var rat in roster) AddRatRosterRow(listContent, rat);
             lastRosterSortSignature = BuildRosterSortSignature(roster);
+            lastRosterContentSignature = BuildRosterContentSignature();
         }
 
         private int CountColonyRats()
@@ -5506,6 +5595,69 @@ namespace RatHabitat
             return signature.ToString();
         }
 
+        private string BuildRosterContentSignature()
+        {
+            if (game == null || game.Save == null || game.Save.rats == null) return string.Empty;
+            var roster = new List<RatData>();
+            foreach (RatData rat in game.Save.rats)
+            {
+                if (rat != null && IsRosterRatVisible(rat)) roster.Add(rat);
+            }
+            roster.Sort(CompareRosterRats);
+
+            var signature = new System.Text.StringBuilder(128 + roster.Count * 72);
+            signature.Append(rosterFavoritesOnly).Append('|')
+                .Append(rosterSexFilter).Append('|')
+                .Append(rosterSortField).Append('|')
+                .Append(rosterSortAscending).Append('|')
+                .Append(expandedMyRatsId ?? string.Empty).Append('|')
+                .Append(game.MultipleSelectionMode).Append('|')
+                .Append(CountColonyRats()).Append('|')
+                .Append(roster.Count).Append('|')
+                .Append(game.SelectedRat == null ? string.Empty : game.SelectedRat.id).Append('|')
+                .Append(BuildRosterSortSignature(roster)).Append(';');
+
+            foreach (RatData rat in roster)
+            {
+                if (rat == null) continue;
+                PregnancyData pregnancy = FindPregnancyForFemale(rat);
+                signature.Append(rat.id ?? string.Empty).Append(':')
+                    .Append(ColonyFactory.DisplayName(rat)).Append(':')
+                    .Append(rat.sex).Append(':').Append(rat.stage).Append(':')
+                    .Append(rat.isFavorite).Append(':')
+                    .Append(rat.removalDisposition).Append(':')
+                    .Append(game.MultipleSelectionMode
+                        ? game.IsRatSelectedForGroup(rat.id)
+                        : game.SelectedRat != null && game.SelectedRat.id == rat.id)
+                    .Append(':').Append(pregnancy == null ? string.Empty : pregnancy.id)
+                    .Append(':').Append(pregnancy == null ? 0L : pregnancy.dueAt);
+
+                if (rat.phenotype != null)
+                {
+                    signature.Append(':').Append(rat.phenotype.furRevealed)
+                        .Append(':').Append(rat.phenotype.coatColorLabel ?? string.Empty)
+                        .Append(':').Append(rat.phenotype.markingsLabel ?? string.Empty);
+                }
+
+                // Expanded cards contain static genetic/trait/lineage details
+                // in addition to live age and activity labels. Include those
+                // values so an actual data change refreshes the card without
+                // treating ordinary clock ticks as a structural change.
+                if (expandedMyRatsId == rat.id)
+                {
+                    TraitData traits = rat.traits ?? new TraitData();
+                    signature.Append(':').Append(traits.size.ToString("R", System.Globalization.CultureInfo.InvariantCulture))
+                        .Append(':').Append(traits.health.ToString("R", System.Globalization.CultureInfo.InvariantCulture))
+                        .Append(':').Append(traits.fertility.ToString("R", System.Globalization.CultureInfo.InvariantCulture))
+                        .Append(':').Append(rat.generation).Append(':').Append(rat.enclosure)
+                        .Append(':').Append(KnownGeneSummary(rat)).Append(':')
+                        .Append(ParentSummary(rat)).Append(':').Append(LitterNameForRat(rat));
+                }
+                signature.Append(';');
+            }
+            return signature.ToString();
+        }
+
         private void RefreshRosterSortIfNeeded()
         {
             if (game == null || game.Save == null || activeMainPanel != MainPanel.MyRats ||
@@ -5523,6 +5675,13 @@ namespace RatHabitat
             roster.Sort(CompareRosterRats);
             string signature = BuildRosterSortSignature(roster);
             if (signature == lastRosterSortSignature) return;
+
+            if (IsRatRosterScrollMoving())
+            {
+                rosterRefreshDeferred = true;
+                rosterRefreshDeferredForce = true;
+                return;
+            }
 
             float previousNormalized = ratRosterScroll.verticalNormalizedPosition;
             // Keep the existing My Rats ScrollRect and viewport. Only the row
@@ -5550,8 +5709,38 @@ namespace RatHabitat
             }
 
             lastRosterSortSignature = signature;
+            RebuildRatRosterLayout(previousNormalized);
+            lastRosterContentSignature = BuildRosterContentSignature();
+        }
+
+        private void RebuildRatRosterLayout(float normalizedPosition)
+        {
+            if (ratRosterContent == null) return;
+
+            // The list has a fixed viewport nested in the page and variable
+            // row heights (expanded cards). Force the content fitter and its
+            // children before ScrollRect measures bounds; relying on the next
+            // canvas pass leaves stale/zero bounds on the birth frame.
             Canvas.ForceUpdateCanvases();
-            ratRosterScroll.verticalNormalizedPosition = previousNormalized;
+            LayoutRebuilder.ForceRebuildLayoutImmediate(ratRosterContent);
+            Canvas.ForceUpdateCanvases();
+            if (ratRosterScroll != null)
+            {
+                ratRosterScroll.StopMovement();
+                ratRosterScroll.verticalNormalizedPosition = Mathf.Clamp01(normalizedPosition);
+            }
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (ratRosterScroll != null && ratRosterContent.childCount >= 3 &&
+                ratRosterScroll.viewport != null &&
+                ratRosterContent.rect.height <= ratRosterScroll.viewport.rect.height + 1f)
+            {
+                Debug.LogWarning("[Rat UI My Rats] Roster content did not exceed its viewport after layout. rows=" +
+                    ratRosterContent.childCount + " contentHeight=" + ratRosterContent.rect.height.ToString("0.0") +
+                    " viewportHeight=" + ratRosterScroll.viewport.rect.height.ToString("0.0") +
+                    " content=" + ratRosterContent.name + " viewport=" + ratRosterScroll.viewport.name);
+            }
+#endif
         }
 
         private static float AgeValue(RatData rat)
@@ -6450,7 +6639,12 @@ namespace RatHabitat
             string markingSummary = hasSpotted && hasSolid ? "solid or white spotting" :
                 hasSpotted ? "white spotting" : hasSolid ? "solid coat" : "albino masking may remove spotting";
             AddText(parent, "Coat and markings: " + coatSummary + "; " + markingSummary + ".", 13, new Color(0.92f, 0.85f, 0.63f), TextAnchor.UpperLeft);
-            AddText(parent, "Ranges show possible min/max values; the expected marker is an average, not a guarantee. Mutation uncertainty: " + (preview.mutationChance * 100f).ToString("0.###") + "% per inherited allele.", 12, new Color(1f, 0.72f, 0.43f), TextAnchor.UpperLeft);
+            AddText(parent,
+                "Ranges show possible min/max values; the expected marker is an average, not a guarantee. " +
+                "Mutation odds per inherited allele: S-locus markings " +
+                (preview.sLocusMutationChance * 100f).ToString("0.##") + "%; B/C/D " +
+                (preview.bcdMutationChance * 100f).ToString("0.###") + "%.",
+                12, new Color(1f, 0.72f, 0.43f), TextAnchor.UpperLeft);
         }
 
         private void AddInheritanceRangeBar(Transform parent, GeneticsSystem.TraitRangePreview range)
@@ -6596,21 +6790,21 @@ namespace RatHabitat
             });
             performanceLogRefreshTimer = 0f;
             UpdatePerformanceLogDisplay();
-            AddText(developerToolsCard, "A/B one subsystem at a time • current: " + RuntimePerformanceDiagnostics.IsolationMode, 13, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
-            AddButton(developerToolsCard, "A/B baseline • all systems enabled", true,
+            AddText(developerToolsCard, "A/B switches combine independently • current: " + RuntimePerformanceDiagnostics.IsolationMode, 13, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
+            AddButton(developerToolsCard, "A/B baseline • restore all systems", true,
                 () => SetPerformanceIsolationMode(PerformanceIsolationMode.Normal));
-            AddButton(developerToolsCard, "A/B disable rat AI, movement and target choice", true,
-                () => SetPerformanceIsolationMode(PerformanceIsolationMode.RatBehavior));
-            AddButton(developerToolsCard, "A/B freeze rat and pinkie animations", true,
-                () => SetPerformanceIsolationMode(PerformanceIsolationMode.RatAnimation));
-            AddButton(developerToolsCard, "A/B hide rat renderers (simulation continues)", true,
-                () => SetPerformanceIsolationMode(PerformanceIsolationMode.RatRendering));
-            AddButton(developerToolsCard, "A/B disable rat shadows", true,
-                () => SetPerformanceIsolationMode(PerformanceIsolationMode.RatShadows));
-            AddButton(developerToolsCard, "A/B skip automatic page refreshes", true,
-                () => SetPerformanceIsolationMode(PerformanceIsolationMode.AutomaticUiRefresh));
-            AddButton(developerToolsCard, "A/B skip colony maintenance ticks (short test only)", true,
-                () => SetPerformanceIsolationMode(PerformanceIsolationMode.ColonyMaintenance));
+            AddButton(developerToolsCard, IsolationToggleLabel(PerformanceIsolationMode.RatBehavior, "rat AI/movement", "skipped", "running"), true,
+                () => TogglePerformanceIsolationMode(PerformanceIsolationMode.RatBehavior));
+            AddButton(developerToolsCard, IsolationToggleLabel(PerformanceIsolationMode.RatAnimation, "rat/pinkie animators", "frozen", "running"), true,
+                () => TogglePerformanceIsolationMode(PerformanceIsolationMode.RatAnimation));
+            AddButton(developerToolsCard, IsolationToggleLabel(PerformanceIsolationMode.RatRendering, "rat visuals", "hidden", "visible"), true,
+                () => TogglePerformanceIsolationMode(PerformanceIsolationMode.RatRendering));
+            AddButton(developerToolsCard, IsolationToggleLabel(PerformanceIsolationMode.RatShadows, "rat shadows", "off", "on"), true,
+                () => TogglePerformanceIsolationMode(PerformanceIsolationMode.RatShadows));
+            AddButton(developerToolsCard, IsolationToggleLabel(PerformanceIsolationMode.AutomaticUiRefresh, "automatic UI refresh", "skipped", "normal"), true,
+                () => TogglePerformanceIsolationMode(PerformanceIsolationMode.AutomaticUiRefresh));
+            AddButton(developerToolsCard, IsolationToggleLabel(PerformanceIsolationMode.ColonyMaintenance, "colony maintenance", "skipped", "normal"), true,
+                () => TogglePerformanceIsolationMode(PerformanceIsolationMode.ColonyMaintenance));
 #endif
             AddText(developerToolsCard, "Visual seam isolation", 17, Color.white, TextAnchor.UpperLeft);
             AddText(developerToolsCard, "Current mode: " + RatVisualDiagnostics.ModeLabel + ". These modes affect only live visuals and never change saved phenotype data.", 13, new Color(0.7f, 0.78f, 0.74f), TextAnchor.UpperLeft);
@@ -6716,6 +6910,19 @@ namespace RatHabitat
         {
             game.SetPerformanceIsolation(mode);
             RebuildDeveloperToolsContent();
+        }
+
+        private void TogglePerformanceIsolationMode(PerformanceIsolationMode mode)
+        {
+            game.TogglePerformanceIsolation(mode);
+            RebuildDeveloperToolsContent();
+        }
+
+        private static string IsolationToggleLabel(PerformanceIsolationMode mode, string label,
+            string enabledState, string disabledState)
+        {
+            return "A/B " + label + ": " +
+                (RuntimePerformanceDiagnostics.IsIsolationActive(mode) ? enabledState : disabledState) + " (tap to toggle)";
         }
 #endif
 
@@ -6954,6 +7161,7 @@ namespace RatHabitat
             iconRoot.anchorMax = new Vector2(0.5f, 0.5f);
             iconRoot.pivot = new Vector2(0.5f, 0.5f);
             iconRoot.sizeDelta = Vector2.one * size * 0.58f;
+            iconRoot.gameObject.AddComponent<CanvasRenderer>();
             var icon = iconRoot.gameObject.AddComponent<FavoriteStarGraphic>();
             icon.color = rat.isFavorite
                 ? new Color(1f, 0.82f, 0.38f, 1f)
@@ -7072,7 +7280,11 @@ namespace RatHabitat
                 if (!IsFallbackInteractable || lastInvokeFrame == Time.frameCount) return false;
                 if (owner != null && !owner.CanInvokeUiAction(pointerId)) return false;
                 lastInvokeFrame = Time.frameCount;
-                if (owner != null) owner.RecordUiAction(pointerId);
+                if (owner != null)
+                {
+                    owner.RecordUiAction(pointerId);
+                    owner.StopRatRosterScrollForUiAction();
+                }
                 if (action != null) action.Invoke();
                 return true;
             }

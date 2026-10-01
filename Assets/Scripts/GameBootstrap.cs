@@ -61,6 +61,11 @@ namespace RatHabitat
         private float habitatPageSettleUntil;
         private const float HabitatPageSettleSeconds = 0.48f;
         private float saveTimer;
+        // A failed nest route/presentation is retried on a short realtime
+        // cooldown. A mother already walking to the nest is polled cheaply for
+        // arrival, but must not trigger a full colony maintenance scan each frame.
+        private readonly Dictionary<string, float> birthRetryAfterRealtime = new Dictionary<string, float>();
+        private const float BirthRetryCooldownSeconds = 0.5f;
         // Expensive colony reconciliation is simulation-tick work, not
         // presentation-frame work. Six in-game hours is enough resolution for
         // smooth stat decline while avoiding a full rat/pregnancy/enclosure
@@ -1632,7 +1637,19 @@ namespace RatHabitat
             {
                 foreach (PregnancyData pregnancy in Save.pregnancies)
                 {
-                    if (pregnancy != null && pregnancy.status == "pending" && pregnancy.dueAt <= gameTime)
+                    if (pregnancy == null || pregnancy.status != "pending" || pregnancy.dueAt > gameTime ||
+                        !BirthRetryReady(pregnancy)) continue;
+
+                    // The due state itself is authoritative and still wakes
+                    // maintenance immediately. Once a route is active, only
+                    // arrival (or a missing route/visual) wakes the expensive
+                    // colony pass; travel progress is handled by the rat's
+                    // normal per-frame movement update.
+                    if (!pregnancy.birthApproachStarted) return true;
+                    RatData mother = BreedingSystem.FindRat(Save, pregnancy.motherId);
+                    if (mother == null || !EnclosureSystem.HasNest(mother.enclosure) || rats == null ||
+                        !rats.TryGetRatBehavior(mother.id, out RatHabitatBehavior birthBehavior) ||
+                        birthBehavior == null || !birthBehavior.BirthApproachActive || birthBehavior.BirthApproachAtNest)
                         return true;
                 }
             }
@@ -1645,6 +1662,21 @@ namespace RatHabitat
                 }
             }
             return false;
+        }
+
+        private bool BirthRetryReady(PregnancyData pregnancy)
+        {
+            float retryAt;
+            return pregnancy == null || string.IsNullOrEmpty(pregnancy.id) ||
+                !birthRetryAfterRealtime.TryGetValue(pregnancy.id, out retryAt) ||
+                Time.unscaledTime >= retryAt;
+        }
+
+        private bool MarkBirthBlockedAndScheduleRetry(PregnancyData pregnancy, string reason)
+        {
+            if (pregnancy != null && !string.IsNullOrEmpty(pregnancy.id))
+                birthRetryAfterRealtime[pregnancy.id] = Time.unscaledTime + BirthRetryCooldownSeconds;
+            return BreedingSystem.MarkBirthBlocked(pregnancy, GameTime, reason);
         }
 
         private void ScheduleNextNursingTick()
@@ -1952,6 +1984,16 @@ namespace RatHabitat
             RuntimePerformanceDiagnostics.SetIsolationMode(mode);
             if (rats != null) rats.ApplyPerformanceIsolationMode();
             Debug.Log("[Performance Diagnostics] Isolation mode: " + mode + ". This mode is transient and does not modify the save.");
+#endif
+        }
+
+        public void TogglePerformanceIsolation(PerformanceIsolationMode mode)
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            RuntimePerformanceDiagnostics.ToggleIsolationMode(mode);
+            if (rats != null) rats.ApplyPerformanceIsolationMode();
+            Debug.Log("[Performance Diagnostics] Isolation modes: " + RuntimePerformanceDiagnostics.IsolationMode +
+                ". This mode is transient and does not modify the save.");
 #endif
         }
 
@@ -3338,16 +3380,17 @@ namespace RatHabitat
             foreach (PregnancyData pregnancy in duePregnancies)
             {
                 if (pregnancy == null || string.IsNullOrEmpty(pregnancy.motherId)) continue;
+                if (!BirthRetryReady(pregnancy)) continue;
                 RatData mother = BreedingSystem.FindRat(Save, pregnancy.motherId);
                 if (mother == null)
                 {
-                    sequenceChanged |= BreedingSystem.MarkBirthBlocked(pregnancy, GameTime,
+                    sequenceChanged |= MarkBirthBlockedAndScheduleRetry(pregnancy,
                         "Mother record is unavailable; pregnancy retained for retry.");
                     continue;
                 }
                 if (!EnclosureSystem.HasNest(mother.enclosure))
                 {
-                    sequenceChanged |= BreedingSystem.MarkBirthBlocked(pregnancy, GameTime,
+                    sequenceChanged |= MarkBirthBlockedAndScheduleRetry(pregnancy,
                         "No valid nest is available in the mother's habitat; pregnancy retained.");
                     continue;
                 }
@@ -3355,12 +3398,12 @@ namespace RatHabitat
                 RatHabitatBehavior behavior;
                 if (!rats.TryGetRatBehavior(mother.id, out behavior) || behavior == null)
                 {
-                    sequenceChanged |= BreedingSystem.MarkBirthBlocked(pregnancy, GameTime,
+                    sequenceChanged |= MarkBirthBlockedAndScheduleRetry(pregnancy,
                         "Mother presentation is not ready; pregnancy retained for retry.");
                     continue;
                 }
 
-                if (!pregnancy.birthApproachStarted)
+                if (!pregnancy.birthApproachStarted || !behavior.BirthApproachActive)
                 {
                     // Mark the persisted approach only after the live
                     // behavior accepts the route. This prevents a stale
@@ -3369,30 +3412,21 @@ namespace RatHabitat
                     Vector3 caregiverTarget = EnclosureSystem.GetNestCaregiverPosition(mother.enclosure);
                     if (!behavior.BeginBirthApproach(caregiverTarget))
                     {
-                        sequenceChanged |= BreedingSystem.MarkBirthBlocked(pregnancy, GameTime,
+                        sequenceChanged |= MarkBirthBlockedAndScheduleRetry(pregnancy,
                             "Mother could not start a safe route to the nest; retrying.");
                         continue;
                     }
+                    birthRetryAfterRealtime.Remove(pregnancy.id);
                     pregnancy.birthApproachStarted = true;
                     pregnancy.birthApproachStartedAt = GameTime;
                     RatActivitySystem.SetCurrent(Save, mother, "birth-approach", "Going to give birth", GameTime);
                     sequenceChanged = true;
                 }
-
-                else if (!behavior.BirthApproachAtNest)
-                {
-                    Vector3 caregiverTarget = EnclosureSystem.GetNestCaregiverPosition(mother.enclosure);
-                    if (!behavior.BeginBirthApproach(caregiverTarget))
-                    {
-                        sequenceChanged |= BreedingSystem.MarkBirthBlocked(pregnancy, GameTime,
-                            "The nest route needs replanning; pregnancy retained for retry.");
-                        continue;
-                    }
-                }
                 if (!behavior.BirthApproachAtNest)
                 {
-                    sequenceChanged |= BreedingSystem.MarkBirthBlocked(pregnancy, GameTime,
-                        "Going to give birth — waiting for nest arrival.");
+                    // Do not replan or mark this as blocked on every unrelated
+                    // maintenance pass. The live route continues and arrival
+                    // will wake the next birth-resolution pass.
                     continue;
                 }
 
@@ -3400,11 +3434,11 @@ namespace RatHabitat
                 string reason;
                 if (!BreedingSystem.FinishPregnancy(Save, pregnancy.id, GameTime, out litter, out reason) || litter == null)
                 {
-                    if (!string.IsNullOrEmpty(reason))
-                        Debug.LogWarning("[Rat Habitat] Birth is waiting for a valid nest arrival for " +
-                            ColonyFactory.DisplayName(mother) + ": " + reason);
+                    sequenceChanged |= MarkBirthBlockedAndScheduleRetry(pregnancy,
+                        string.IsNullOrEmpty(reason) ? "Birth transaction did not complete; pregnancy retained." : reason);
                     continue;
                 }
+                birthRetryAfterRealtime.Remove(pregnancy.id);
 
                 // FinishPregnancy has now written the litter and recovery
                 // deadline. Transition the existing root into caregiving at

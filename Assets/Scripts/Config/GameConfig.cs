@@ -105,6 +105,10 @@ namespace RatHabitat
         public const int PerformanceLogSpikeCapacity = 256;
         public const float PerformanceLagSpikeThresholdMs = 100f;
         public const float PerformanceCriticalSpikeThresholdMs = 250f;
+        // WebGL often has no GPU timer. Keep the part of a slow frame that is
+        // not explained by the sampled CPU main-thread time explicitly marked
+        // as unattributed rather than calling it GPU time.
+        public const float PerformanceUnattributedFrameGapThresholdMs = 50f;
         public const int PerformanceLogRecentDisplayCount = 8;
         // Market founders are almost always solid; breeding is the primary
         // source of new marked lines.
@@ -156,7 +160,10 @@ namespace RatHabitat
         public const int SellCreditBase = 25;
         public const float SellCreditTraitMultiplier = 0.5f;
         public const float TraitVariation = 4f;
+        // B/C/D pigment mutations retain the original rate. S-locus marking
+        // mutations use their own per-inherited-allele rate in GeneticsSystem.
         public const float MutationRate = 0.0025f;
+        public const float MarkingMutationRate = 0.01f;
         // Visual scale endpoints are presentation-only. GrowthSystem uses
         // them as the endpoints of its age-based uniform curve; they do not
         // change the saved age, stage, phenotype, or biology rules above.
