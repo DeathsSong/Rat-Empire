@@ -44,6 +44,7 @@ namespace RatHabitat
         RatPresentationBuild,
         RatMaterialSetup,
         NursingUpdate,
+        SaveStorage,
         SaveExport,
         Count,
     }
@@ -106,6 +107,13 @@ namespace RatHabitat
         public int RatPresentationUpdates;
         public float SaveExportMs;
         public int SaveExportOperations;
+        public float SaveStorageMs;
+        public int SaveStorageOperations;
+        public long SerializedDataBytes;
+        public long LargestSerializedDataBytes;
+        public int SaveQueueRequests;
+        public int SaveQueueCoalescedRequests;
+        public string SaveSource;
         public float InputInteractionsMs;
         public string CurrentPanel;
     }
@@ -144,12 +152,17 @@ namespace RatHabitat
             "Rat Empire/Measured/Rat Presentation Build",
             "Rat Empire/Measured/Rat Material Setup",
             "Rat Empire/Measured/Nursing Update",
-            "Rat Empire/Measured/Save and Export",
+            "Rat Empire/Measured/Save Storage",
+            "Rat Empire/Measured/Log Export",
         };
         private static readonly long[] WindowTicks = new long[(int)PerformanceProbeArea.Count];
         private static readonly long[] MaxTicks = new long[(int)PerformanceProbeArea.Count];
         private static readonly int[] Calls = new int[(int)PerformanceProbeArea.Count];
         private static readonly StringBuilder SummaryBuilder = new StringBuilder(512);
+        private static readonly StringBuilder SaveSourceBuilder = new StringBuilder(256);
+        private static readonly string[] SaveSourceNames = new string[16];
+        private static readonly int[] SaveSourceCounts = new int[16];
+        private static int saveSourceOverflowCount;
         private static readonly PerformanceLogSample[] SampleRing = new PerformanceLogSample[GameConfig.PerformanceLogSampleCapacity];
         private static readonly PerformanceSpikeRecord[] SpikeRing = new PerformanceSpikeRecord[GameConfig.PerformanceLogSpikeCapacity];
         private static readonly StringBuilder ExportBuilder = new StringBuilder(32768);
@@ -183,6 +196,11 @@ namespace RatHabitat
         private static bool pendingPageWasHidden;
         private static bool pendingPageWasUnfocused;
         private static bool pendingLongTaskApiAvailable;
+        private static int saveQueueRequestsInWindow;
+        private static int saveQueueCoalescedInWindow;
+        private static long serializedBytesInWindow;
+        private static long largestSerializedDataBytesInWindow;
+        private static string lastSaveSourceInWindow = string.Empty;
 
         public static bool CaptureEnabled { get { return captureEnabled; } }
         public static bool HudVisible { get { return hudVisible; } }
@@ -194,6 +212,77 @@ namespace RatHabitat
         public static float SessionWorstFrameMs { get { return sessionWorstFrameMs; } }
         public static float SessionWorstSubsystemMs { get { return sessionWorstSubsystemMs; } }
         public static string SessionWorstSubsystem { get { return sessionWorstSubsystem; } }
+
+        /// <summary>
+        /// Returns one bounded display slice of a raw performance export.
+        /// Copy/download continue to use the complete raw string; this helper
+        /// exists so the legacy Unity Text mesh never receives a huge log.
+        /// </summary>
+        public static string GetManualExportChunk(string raw, int page, int chunkSize)
+        {
+            if (string.IsNullOrEmpty(raw)) return string.Empty;
+            int safeChunkSize = Math.Max(1, chunkSize);
+            int pageCount = Math.Max(1, (raw.Length + safeChunkSize - 1) / safeChunkSize);
+            int safePage = Math.Max(0, Math.Min(page, pageCount - 1));
+            int first = safePage * safeChunkSize;
+            return raw.Substring(first, Math.Min(safeChunkSize, raw.Length - first));
+        }
+
+        public static void RecordSaveQueueRequest(string source, bool coalesced)
+        {
+            if (!captureEnabled) return;
+            saveQueueRequestsInWindow++;
+            if (coalesced) saveQueueCoalescedInWindow++;
+            if (!string.IsNullOrEmpty(source)) lastSaveSourceInWindow = source;
+        }
+
+        public static void RecordSaveSerializedData(string source, int byteCount)
+        {
+            if (!captureEnabled) return;
+            long safeByteCount = Math.Max(0, byteCount);
+            serializedBytesInWindow += safeByteCount;
+            largestSerializedDataBytesInWindow = Math.Max(largestSerializedDataBytesInWindow, safeByteCount);
+            string safeSource = string.IsNullOrEmpty(source) ? "Unknown" : source;
+            lastSaveSourceInWindow = safeSource;
+            int emptySlot = -1;
+            for (int index = 0; index < SaveSourceNames.Length; index++)
+            {
+                if (SaveSourceNames[index] == safeSource)
+                {
+                    SaveSourceCounts[index]++;
+                    return;
+                }
+                if (SaveSourceNames[index] == null && emptySlot < 0) emptySlot = index;
+            }
+            if (emptySlot >= 0)
+            {
+                SaveSourceNames[emptySlot] = safeSource;
+                SaveSourceCounts[emptySlot] = 1;
+            }
+            else
+            {
+                saveSourceOverflowCount++;
+            }
+        }
+
+        private static string BuildSaveSourceSummary()
+        {
+            SaveSourceBuilder.Length = 0;
+            for (int index = 0; index < SaveSourceNames.Length; index++)
+            {
+                if (SaveSourceNames[index] == null || SaveSourceCounts[index] <= 0) continue;
+                if (SaveSourceBuilder.Length > 0) SaveSourceBuilder.Append("; ");
+                SaveSourceBuilder.Append(SaveSourceNames[index]).Append('×').Append(SaveSourceCounts[index]);
+            }
+            if (saveSourceOverflowCount > 0)
+            {
+                if (SaveSourceBuilder.Length > 0) SaveSourceBuilder.Append("; ");
+                SaveSourceBuilder.Append("other×").Append(saveSourceOverflowCount);
+            }
+            if (SaveSourceBuilder.Length == 0 && !string.IsNullOrEmpty(lastSaveSourceInWindow))
+                SaveSourceBuilder.Append(lastSaveSourceInWindow).Append(" (queued)");
+            return SaveSourceBuilder.ToString();
+        }
 
         public static long Begin(PerformanceProbeArea area)
         {
@@ -274,6 +363,15 @@ namespace RatHabitat
         public static void RecordSample(PerformanceLogSample sample)
         {
             if (!captureEnabled || SampleRing.Length == 0) return;
+            sample.SaveStorageMs = WindowMilliseconds(PerformanceProbeArea.SaveStorage);
+            sample.SaveStorageOperations = WindowCallCount(PerformanceProbeArea.SaveStorage);
+            sample.SaveExportMs = WindowMilliseconds(PerformanceProbeArea.SaveExport);
+            sample.SaveExportOperations = WindowCallCount(PerformanceProbeArea.SaveExport);
+            sample.SerializedDataBytes = serializedBytesInWindow;
+            sample.LargestSerializedDataBytes = largestSerializedDataBytesInWindow;
+            sample.SaveQueueRequests = saveQueueRequestsInWindow;
+            sample.SaveQueueCoalescedRequests = saveQueueCoalescedInWindow;
+            sample.SaveSource = BuildSaveSourceSummary();
             if (sample.CpuMainThreadMs <= 0f) sample.CpuMainThreadMs = -1f;
             AttachPendingBrowserTelemetry(ref sample, true);
             sample.UnattributedFrameGapMs = sample.GpuMs < 0f && sample.CpuMainThreadMs > 0f
@@ -291,7 +389,8 @@ namespace RatHabitat
             TrackWorstSubsystem("Grounding/bounds", sample.GroundingBoundsMs);
             TrackWorstSubsystem("Rat presentation/rendering", sample.RatPresentationMs);
             TrackWorstSubsystem("Browser frame gap (not GPU)", sample.BrowserWorstFrameGapMs);
-            TrackWorstSubsystem("Save/export", sample.SaveExportMs);
+            TrackWorstSubsystem("Save/storage", sample.SaveStorageMs);
+            TrackWorstSubsystem("Log export", sample.SaveExportMs);
             TrackWorstSubsystem("Input/interactions", sample.InputInteractionsMs);
         }
 
@@ -402,6 +501,13 @@ namespace RatHabitat
                     WindowCallCount(PerformanceProbeArea.PinkieUpdate),
                 SaveExportMs = WindowMilliseconds(PerformanceProbeArea.SaveExport),
                 SaveExportOperations = WindowCallCount(PerformanceProbeArea.SaveExport),
+                SaveStorageMs = WindowMilliseconds(PerformanceProbeArea.SaveStorage),
+                SaveStorageOperations = WindowCallCount(PerformanceProbeArea.SaveStorage),
+                SerializedDataBytes = serializedBytesInWindow,
+                LargestSerializedDataBytes = largestSerializedDataBytesInWindow,
+                SaveQueueRequests = saveQueueRequestsInWindow,
+                SaveQueueCoalescedRequests = saveQueueCoalescedInWindow,
+                SaveSource = BuildSaveSourceSummary(),
                 InputInteractionsMs = WindowMilliseconds(PerformanceProbeArea.InteractionUpdate),
                 CurrentPanel = panelName,
             };
@@ -469,7 +575,13 @@ namespace RatHabitat
                 .Append(latest.RatBehaviorUpdates).Append('/').Append(latest.RepeatedRatBehaviorUpdates)
                 .Append(" • sim probe calls ").Append(latest.SimulationProbeCalls)
                 .Append(" • sim ").Append(FormatMetric(latest.SimulationMs))
-                .Append(" • save/export ").Append(FormatMetric(latest.SaveExportMs)).Append(" x")
+                .Append(" • save ").Append(FormatMetric(latest.SaveStorageMs)).Append(" x")
+                .Append(latest.SaveStorageOperations).Append(" ops/JSON ").Append(latest.SerializedDataBytes)
+                .Append(" B total, max ").Append(latest.LargestSerializedDataBytes).Append(" B")
+                .Append(" • save source ").Append(string.IsNullOrEmpty(latest.SaveSource) ? "n/a" : latest.SaveSource)
+                .Append(" • save requests/coalesced ").Append(latest.SaveQueueRequests).Append('/')
+                .Append(latest.SaveQueueCoalescedRequests)
+                .Append(" • export ").Append(FormatMetric(latest.SaveExportMs)).Append(" x")
                 .Append(latest.SaveExportOperations)
                 .Append(" • page ").Append(latest.BrowserTelemetryAvailable
                     ? (latest.PageVisible ? "visible" : "hidden") + "/" + (latest.PageFocused ? "focused" : "blurred")
@@ -559,7 +671,7 @@ namespace RatHabitat
             }
             else
             {
-                ExportBuilder.AppendLine("record,severity,utc,game_day_time,speed,fps,avg_frame_ms,worst_frame_ms,cpu_main_ms,gpu_ms,unattributed_frame_gap_ms,browser_avg_frame_gap_ms,browser_worst_frame_gap_ms,browser_gap_within_unity_cpu_ms,browser_gap_outside_unity_cpu_ms,browser_frame_count,browser_telemetry_available,page_visible,page_focused,page_hidden_during_window,page_unfocused_during_window,long_task_api_available,long_task_count,long_task_total_ms,long_task_max_ms,gc_alloc_bytes,gc0,gc1,gc2,rats,pinkies,animators,renderers,ui_graphics,canvases,simulation_steps,simulation_probe_calls,rat_behavior_updates,repeated_rat_behavior_updates,simulation_ms,maintenance_ms,ui_refresh_ms,rat_ai_movement_ms,animation_ms,grounding_bounds_ms,presentation_ms,presentation_updates,save_export_ms,save_export_operations,input_ms,panel");
+                ExportBuilder.AppendLine("record,severity,utc,game_day_time,speed,fps,avg_frame_ms,worst_frame_ms,cpu_main_ms,gpu_ms,unattributed_frame_gap_ms,browser_avg_frame_gap_ms,browser_worst_frame_gap_ms,browser_gap_within_unity_cpu_ms,browser_gap_outside_unity_cpu_ms,browser_frame_count,browser_telemetry_available,page_visible,page_focused,page_hidden_during_window,page_unfocused_during_window,long_task_api_available,long_task_count,long_task_total_ms,long_task_max_ms,gc_alloc_bytes,gc0,gc1,gc2,rats,pinkies,animators,renderers,ui_graphics,canvases,simulation_steps,simulation_probe_calls,rat_behavior_updates,repeated_rat_behavior_updates,simulation_ms,maintenance_ms,ui_refresh_ms,rat_ai_movement_ms,animation_ms,grounding_bounds_ms,presentation_ms,presentation_updates,save_storage_ms,save_storage_operations,serialized_data_bytes_total,serialized_data_bytes_max,save_queue_requests,save_queue_coalesced_requests,save_source,save_export_ms,save_export_operations,input_ms,panel");
             }
 
             for (int index = 0; index < sampleCount; index++)
@@ -767,7 +879,14 @@ namespace RatHabitat
                 .Append(" • present/input ").Append(sample.RatPresentationMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
                 .Append(sample.InputInteractionsMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("ms")
                 .Append(" • present updates ").Append(sample.RatPresentationUpdates)
-                .Append(" • save/export ").Append(sample.SaveExportMs.ToString("0.00", CultureInfo.InvariantCulture))
+                .Append(" • save ").Append(sample.SaveStorageMs.ToString("0.00", CultureInfo.InvariantCulture))
+                .Append("ms (").Append(sample.SaveStorageOperations).Append(" ops, ")
+                .Append(sample.SerializedDataBytes).Append(" B total, max ")
+                .Append(sample.LargestSerializedDataBytes).Append(" B; source ")
+                .Append(string.IsNullOrEmpty(sample.SaveSource) ? "n/a" : sample.SaveSource)
+                .Append("; queued/coalesced ").Append(sample.SaveQueueRequests).Append('/')
+                .Append(sample.SaveQueueCoalescedRequests).Append(')')
+                .Append(" • export ").Append(sample.SaveExportMs.ToString("0.00", CultureInfo.InvariantCulture))
                 .Append("ms (").Append(sample.SaveExportOperations).Append(" ops)")
                 .Append(" • ").Append(sample.CurrentPanel ?? "None");
             return builder;
@@ -814,6 +933,13 @@ namespace RatHabitat
                 .Append(sample.GroundingBoundsMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.RatPresentationMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.RatPresentationUpdates).Append(',')
+                .Append(sample.SaveStorageMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.SaveStorageOperations).Append(',')
+                .Append(sample.SerializedDataBytes).Append(',')
+                .Append(sample.LargestSerializedDataBytes).Append(',')
+                .Append(sample.SaveQueueRequests).Append(',')
+                .Append(sample.SaveQueueCoalescedRequests).Append(',')
+                .Append('"').Append((sample.SaveSource ?? string.Empty).Replace("\"", "\"\"")).Append('"').Append(',')
                 .Append(sample.SaveExportMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.SaveExportOperations).Append(',')
                 .Append(sample.InputInteractionsMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
@@ -911,7 +1037,8 @@ namespace RatHabitat
                 case PerformanceProbeArea.RatPresentationBuild: return "Rat render/rebuild";
                 case PerformanceProbeArea.RatMaterialSetup: return "Coat/material";
                 case PerformanceProbeArea.NursingUpdate: return "Nursing";
-                case PerformanceProbeArea.SaveExport: return "Save/export";
+                case PerformanceProbeArea.SaveStorage: return "Save/storage";
+                case PerformanceProbeArea.SaveExport: return "Log export";
                 default: return "Unknown";
             }
         }
@@ -921,6 +1048,15 @@ namespace RatHabitat
             Array.Clear(WindowTicks, 0, WindowTicks.Length);
             Array.Clear(MaxTicks, 0, MaxTicks.Length);
             Array.Clear(Calls, 0, Calls.Length);
+            saveQueueRequestsInWindow = 0;
+            saveQueueCoalescedInWindow = 0;
+            serializedBytesInWindow = 0L;
+            largestSerializedDataBytesInWindow = 0L;
+            lastSaveSourceInWindow = string.Empty;
+            Array.Clear(SaveSourceNames, 0, SaveSourceNames.Length);
+            Array.Clear(SaveSourceCounts, 0, SaveSourceCounts.Length);
+            saveSourceOverflowCount = 0;
+            SaveSourceBuilder.Length = 0;
         }
 #else
         public static bool CaptureEnabled { get { return false; } }
@@ -930,9 +1066,12 @@ namespace RatHabitat
         public static int SpikeCount { get { return 0; } }
         public static string LastExportActionStatus { get { return "Performance capture is available in Development builds."; } }
         public static string ManualExportText { get { return string.Empty; } }
+        public static string GetManualExportChunk(string raw, int page, int chunkSize) { return string.Empty; }
         public static long Begin(PerformanceProbeArea area) { return 0L; }
         public static void End(PerformanceProbeArea area, long startedAt) { }
         public static int WindowCallCount(PerformanceProbeArea area) { return 0; }
+        public static void RecordSaveQueueRequest(string source, bool coalesced) { }
+        public static void RecordSaveSerializedData(string source, int byteCount) { }
         public static void RecordBrowserTelemetry(float averageFrameGapMs, float worstFrameGapMs,
             int frameCount, int longTaskCount, float longTaskTotalMs, float longTaskMaxMs,
             bool pageVisible, bool pageFocused, bool pageWasHidden, bool pageWasUnfocused,

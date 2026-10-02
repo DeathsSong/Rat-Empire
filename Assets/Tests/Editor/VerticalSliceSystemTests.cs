@@ -84,6 +84,150 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void RoutineSaveRequestsCoalesceWithoutWritingUntilTheQueueIsFlushed()
+        {
+            bool hadSaveKey = PlayerPrefs.HasKey("rat-habitat-save-v1");
+            string previousSaveKey = PlayerPrefs.GetString("rat-habitat-save-v1", string.Empty);
+            bool hadSaveFile = File.Exists(SaveSystem.SavePath);
+            string previousSaveFile = hadSaveFile ? File.ReadAllText(SaveSystem.SavePath) : string.Empty;
+            bool previousCapture = RuntimePerformanceDiagnostics.CaptureEnabled;
+            ColonySaveData colony = ColonyFactory.CreateNew(GameConfig.NowMs());
+            for (int index = 0; index < 18; index++)
+            {
+                RatData testRat = new RatData
+                {
+                    id = "save-queue-test-rat-" + index,
+                    name = "Queue Test " + index,
+                    sex = index % 2 == 0 ? RatSex.Female : RatSex.Male,
+                    stage = index < 4 ? RatStage.Pinkie : RatStage.Adult,
+                };
+                colony.rats.Add(testRat);
+                colony.ratIds.Add(testRat.id);
+            }
+            Assert.AreEqual(20, colony.rats.Count, "Exercise the routine-save queue with a colony-sized save.");
+            Assert.AreEqual(4, colony.rats.FindAll(rat => rat.stage == RatStage.Pinkie).Count);
+
+            try
+            {
+                SaveSystem.ClearPendingSaveQueueForTests();
+                RuntimePerformanceDiagnostics.SetCaptureEnabled(true);
+                RuntimePerformanceDiagnostics.ClearLog();
+                PlayerPrefs.SetString("rat-habitat-save-v1", "save-queue-test-sentinel");
+
+                for (int index = 0; index < 11; index++)
+                {
+                    colony.colonyCredits += 1;
+                    Assert.IsTrue(SaveSystem.QueueSave(colony, "routine-save-test"));
+                }
+
+                Assert.IsTrue(SaveSystem.HasPendingSave);
+                Assert.AreEqual(11, SaveSystem.PendingSaveRequestCount);
+                Assert.AreEqual(10, SaveSystem.PendingSaveCoalescedRequestCount);
+                Assert.AreEqual("save-queue-test-sentinel", PlayerPrefs.GetString("rat-habitat-save-v1"),
+                    "QueueSave must not synchronously touch the browser save key.");
+                Assert.AreEqual(hadSaveFile, File.Exists(SaveSystem.SavePath));
+                if (hadSaveFile)
+                    Assert.AreEqual(previousSaveFile, File.ReadAllText(SaveSystem.SavePath),
+                        "QueueSave must not synchronously write the desktop save file.");
+
+                RuntimePerformanceDiagnostics.RecordSample(new PerformanceLogSample
+                {
+                    UtcTicks = DateTime.UtcNow.Ticks,
+                    GameTimeMs = GameConfig.StartGameTimeMs,
+                    Speed = 1,
+                    Fps = 60,
+                    AverageFrameMs = 16.7f,
+                    WorstFrameMs = 20f,
+                    CurrentPanel = "My Rats",
+                });
+                StringAssert.Contains("11/10", RuntimePerformanceDiagnostics.BuildRecentSamplesText(1),
+                    "The log should report all routine requests and how many were coalesced.");
+            }
+            finally
+            {
+                SaveSystem.ClearPendingSaveQueueForTests();
+                RuntimePerformanceDiagnostics.ClearLog();
+                RuntimePerformanceDiagnostics.SetCaptureEnabled(previousCapture);
+                if (hadSaveKey) PlayerPrefs.SetString("rat-habitat-save-v1", previousSaveKey);
+                else PlayerPrefs.DeleteKey("rat-habitat-save-v1");
+            }
+        }
+
+        [Test]
+        public void ManualPerformanceLogChunksStayBelowLegacyTextMeshLimitAndCoverRawLog()
+        {
+            const int chunkSize = 850;
+            string raw = new string('x', chunkSize * 13 + 271);
+            var reconstructed = new System.Text.StringBuilder(raw.Length);
+            int pageCount = (raw.Length + chunkSize - 1) / chunkSize;
+
+            for (int page = 0; page < pageCount; page++)
+            {
+                string chunk = RuntimePerformanceDiagnostics.GetManualExportChunk(raw, page, chunkSize);
+                Assert.LessOrEqual(chunk.Length, chunkSize,
+                    "A selectable legacy Unity Text mesh must never receive the full export.");
+                reconstructed.Append(chunk);
+            }
+
+            Assert.AreEqual(raw, reconstructed.ToString(),
+                "Chunk navigation should expose every character from the full raw export.");
+            Assert.AreEqual(RuntimePerformanceDiagnostics.GetManualExportChunk(raw, -10, chunkSize),
+                RuntimePerformanceDiagnostics.GetManualExportChunk(raw, 0, chunkSize));
+            Assert.AreEqual(RuntimePerformanceDiagnostics.GetManualExportChunk(raw, pageCount + 10, chunkSize),
+                RuntimePerformanceDiagnostics.GetManualExportChunk(raw, pageCount - 1, chunkSize));
+        }
+
+        [Test]
+        public void CsvExportHeaderAndSampleRowsHaveMatchingColumnCounts()
+        {
+            bool previousCapture = RuntimePerformanceDiagnostics.CaptureEnabled;
+            try
+            {
+                RuntimePerformanceDiagnostics.SetCaptureEnabled(true);
+                RuntimePerformanceDiagnostics.ClearLog();
+                RuntimePerformanceDiagnostics.RecordSample(new PerformanceLogSample
+                {
+                    UtcTicks = DateTime.UtcNow.Ticks,
+                    GameTimeMs = GameConfig.StartGameTimeMs,
+                    Speed = 1,
+                    Fps = 60,
+                    AverageFrameMs = 16.7f,
+                    WorstFrameMs = 20f,
+                    SaveSource = "source, with comma",
+                    CurrentPanel = "panel, with comma",
+                });
+
+                string[] lines = RuntimePerformanceDiagnostics.BuildExportText(true)
+                    .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                Assert.GreaterOrEqual(lines.Length, 2);
+                Assert.AreEqual(CountCsvColumns(lines[0]), CountCsvColumns(lines[1]),
+                    "Save source and panel text must remain correctly quoted in CSV.");
+            }
+            finally
+            {
+                RuntimePerformanceDiagnostics.ClearLog();
+                RuntimePerformanceDiagnostics.SetCaptureEnabled(previousCapture);
+            }
+        }
+
+        private static int CountCsvColumns(string line)
+        {
+            int columns = 1;
+            bool quoted = false;
+            for (int index = 0; index < line.Length; index++)
+            {
+                char value = line[index];
+                if (value == '"')
+                {
+                    if (quoted && index + 1 < line.Length && line[index + 1] == '"') index++;
+                    else quoted = !quoted;
+                }
+                else if (value == ',' && !quoted) columns++;
+            }
+            return columns;
+        }
+
+        [Test]
         public void PerformanceControlsOnlyChangeDiagnosticsAndNeverTouchColonyOrLocalSave()
         {
             const string browserSaveKey = "rat-habitat-save-v1";
@@ -198,6 +342,33 @@ namespace RatHabitat.Tests
                 GrowthSystem.SetBehaviorParticipantCount(20);
                 Assert.AreEqual(1, GrowthSystem.BeginBehaviorUpdate(0.5f),
                     "Normal-speed rat updates remain one behavior step per rendered frame.");
+            }
+            finally
+            {
+                GrowthSystem.SetBehaviorParticipantCount(1);
+            }
+        }
+
+        [Test]
+        public void SimulationStepCounterCountsSubstepsWhileBehaviorCounterCountsRatUpdates()
+        {
+            try
+            {
+                GrowthSystem.SetBehaviorParticipantCount(2);
+                GrowthSystem.BeginBehaviorUpdate(0.01f); // begin a diagnostic frame
+                int stepsBefore = GrowthSystem.LastSimulationStepCount;
+                int updatesBefore = GrowthSystem.LastBehaviorUpdateCount;
+                int repeatsBefore = GrowthSystem.LastRepeatedBehaviorUpdateCount;
+
+                int returnedSteps = GrowthSystem.BeginBehaviorUpdate(2.1f, "counter-semantics-rat");
+
+                Assert.AreEqual(3, returnedSteps);
+                Assert.AreEqual(3, GrowthSystem.LastSimulationStepCount - stepsBefore,
+                    "Simulation steps are bounded substeps, not an alternate rat-call counter.");
+                Assert.AreEqual(1, GrowthSystem.LastBehaviorUpdateCount - updatesBefore,
+                    "Rat behavior updates count invocations.");
+                Assert.AreEqual(0, GrowthSystem.LastRepeatedBehaviorUpdateCount - repeatsBefore,
+                    "One participant update does not mean duplicate AI.");
             }
             finally
             {

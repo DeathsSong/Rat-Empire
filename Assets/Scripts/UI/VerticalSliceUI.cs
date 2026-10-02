@@ -152,8 +152,13 @@ namespace RatHabitat
         private Text performanceLogCountText;
         private Text performanceLogStatus;
         private InputField performanceLogManualCopyInput;
+        private Text performanceLogManualChunkLabel;
+        private Button performanceLogManualPreviousButton;
+        private Button performanceLogManualNextButton;
         private RectTransform performanceLogManualCopyContent;
         private RectTransform performanceLogManualCopyViewport;
+        private int performanceManualCopyPage;
+        private const int PerformanceManualCopyChunkSize = 850;
         private Button performanceCaptureButton;
         private Button performanceHudButton;
         private Button performanceIsolationBaselineButton;
@@ -3235,18 +3240,7 @@ namespace RatHabitat
                     "worst subsystem: " + RuntimePerformanceDiagnostics.SessionWorstSubsystem;
                 if (performanceLogCountText.text != counts) performanceLogCountText.text = counts;
             }
-            string manualText = RuntimePerformanceDiagnostics.ManualExportText;
-            if (string.IsNullOrEmpty(manualText))
-                manualText = "Copy or download a performance log to populate this field. If browser export is blocked, tap here, select all, and copy the text manually.";
-            if (performanceLogManualCopyInput != null && performanceLogManualCopyInput.text != manualText)
-            {
-                performanceLogManualCopyInput.SetTextWithoutNotify(manualText);
-                ResizePerformanceManualCopyField(manualText);
-                if (performanceLogManualCopyInput.textComponent != null)
-                    performanceLogManualCopyInput.textComponent.SetAllDirty();
-                if (performanceLogManualCopyInput.GetComponentInParent<ScrollRect>() != null)
-                    performanceLogManualCopyInput.GetComponentInParent<ScrollRect>().verticalNormalizedPosition = 1f;
-            }
+            UpdatePerformanceManualCopyPage();
         }
 
         private void SetPerformanceLogView(PerformanceLogView view)
@@ -3268,8 +3262,21 @@ namespace RatHabitat
 
         private void AddPerformanceManualCopyField()
         {
-            AddText(developerToolsCard, "Manual copy fallback (selectable and scrollable)", 14,
+            AddText(developerToolsCard, "Manual copy fallback (selectable, scrollable chunks)", 14,
                 new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft);
+            RectTransform pageControls = CreateRect("Performance Manual Copy Page Controls", developerToolsCard);
+            HorizontalLayoutGroup pageLayout = pageControls.gameObject.AddComponent<HorizontalLayoutGroup>();
+            pageLayout.spacing = 8f;
+            pageLayout.childControlWidth = true;
+            pageLayout.childControlHeight = true;
+            pageLayout.childForceExpandWidth = true;
+            pageLayout.childForceExpandHeight = false;
+            performanceLogManualPreviousButton = AddButtonTo(pageControls, "Previous chunk", false,
+                () => ChangePerformanceManualCopyPage(-1), new Color(0.14f, 0.29f, 0.29f), 40f);
+            performanceLogManualChunkLabel = AddTextTo(pageControls, "Chunk 1/1", 13,
+                new Color(0.78f, 0.86f, 0.82f), TextAnchor.MiddleCenter);
+            performanceLogManualNextButton = AddButtonTo(pageControls, "Next chunk", false,
+                () => ChangePerformanceManualCopyPage(1), new Color(0.14f, 0.29f, 0.29f), 40f);
             performanceLogManualCopyViewport = CreateRect("Performance Manual Copy Viewport", developerToolsCard);
             LayoutElement viewportLayout = performanceLogManualCopyViewport.gameObject.AddComponent<LayoutElement>();
             viewportLayout.preferredHeight = 150f;
@@ -3317,8 +3324,46 @@ namespace RatHabitat
             scroll.movementType = ScrollRect.MovementType.Clamped;
             scroll.inertia = true;
             scroll.scrollSensitivity = 24f;
-            AddPerformanceButton("Performance.SelectManualLog", "Select manual log text", true,
+            AddPerformanceButton("Performance.SelectManualLog", "Select current chunk", true,
                 SelectPerformanceManualLog);
+        }
+
+        private void UpdatePerformanceManualCopyPage()
+        {
+            if (performanceLogManualCopyInput == null) return;
+            string raw = RuntimePerformanceDiagnostics.ManualExportText;
+            if (string.IsNullOrEmpty(raw))
+                raw = "Copy or download a performance log to populate this field. Large logs are split into small selectable chunks to stay within WebGL Text mesh limits.";
+
+            int pageCount = Mathf.Max(1, (raw.Length + PerformanceManualCopyChunkSize - 1) / PerformanceManualCopyChunkSize);
+            performanceManualCopyPage = Mathf.Clamp(performanceManualCopyPage, 0, pageCount - 1);
+            string pageText = RuntimePerformanceDiagnostics.GetManualExportChunk(raw,
+                performanceManualCopyPage, PerformanceManualCopyChunkSize);
+            if (performanceLogManualCopyInput.text != pageText)
+            {
+                performanceLogManualCopyInput.SetTextWithoutNotify(pageText);
+                ResizePerformanceManualCopyField(pageText);
+                if (performanceLogManualCopyInput.textComponent != null)
+                    performanceLogManualCopyInput.textComponent.SetAllDirty();
+                if (performanceLogManualCopyInput.GetComponentInParent<ScrollRect>() != null)
+                    performanceLogManualCopyInput.GetComponentInParent<ScrollRect>().verticalNormalizedPosition = 1f;
+            }
+            if (performanceLogManualChunkLabel != null)
+            {
+                string label = "Chunk " + (performanceManualCopyPage + 1) + "/" + pageCount +
+                    " • " + raw.Length + " characters total";
+                if (performanceLogManualChunkLabel.text != label) performanceLogManualChunkLabel.text = label;
+            }
+            if (performanceLogManualPreviousButton != null)
+                performanceLogManualPreviousButton.interactable = performanceManualCopyPage > 0;
+            if (performanceLogManualNextButton != null)
+                performanceLogManualNextButton.interactable = performanceManualCopyPage + 1 < pageCount;
+        }
+
+        private void ChangePerformanceManualCopyPage(int delta)
+        {
+            performanceManualCopyPage = Math.Max(0, performanceManualCopyPage + delta);
+            UpdatePerformanceManualCopyPage();
         }
 
         private void SelectPerformanceManualLog()
@@ -3357,7 +3402,7 @@ namespace RatHabitat
                     column = 1;
                 }
             }
-            float height = Mathf.Clamp(lines * (fontSize + 5f) + 18f, 150f, 12000f);
+            float height = Mathf.Clamp(lines * (fontSize + 5f) + 18f, 150f, 1400f);
             layout.preferredHeight = height;
             layout.minHeight = height;
             if (performanceLogManualCopyContent != null)
@@ -5707,7 +5752,7 @@ namespace RatHabitat
             game.Save.myRatsSortAscending = rosterSortAscending;
             game.Save.myRatsSexFilter = rosterSexFilter.ToString();
             game.Save.myRatsFavoritesOnly = rosterFavoritesOnly;
-            SaveSystem.Save(game.Save);
+            SaveSystem.QueueSave(game.Save, "VerticalSliceUI.SetRosterSortState");
         }
 
         private string RosterSexFilterLabel()
@@ -5806,7 +5851,7 @@ namespace RatHabitat
             game.Save.myRatsSortField = "Name";
             game.Save.myRatsSortAscending = true;
             game.Save.myRatsFavoritesOnly = false;
-            if (changed) SaveSystem.Save(game.Save);
+            if (changed) SaveSystem.QueueSave(game.Save, "VerticalSliceUI.ResetMyRatsSortState");
         }
 
         private string RosterSortLabel()
@@ -7033,8 +7078,12 @@ namespace RatHabitat
             performanceLogCountText = null;
             performanceLogStatus = null;
             performanceLogManualCopyInput = null;
+            performanceLogManualChunkLabel = null;
+            performanceLogManualPreviousButton = null;
+            performanceLogManualNextButton = null;
             performanceLogManualCopyContent = null;
             performanceLogManualCopyViewport = null;
+            performanceManualCopyPage = 0;
             performanceCaptureButton = null;
             performanceHudButton = null;
             performanceIsolationBaselineButton = null;

@@ -1306,14 +1306,29 @@ namespace RatHabitat
             RatData mother = BreedingSystem.FindRat(Save, pregnancy.motherId);
             if (mother == null || mother.sex != RatSex.Female) return false;
 
-            // The state must be persisted before the player-facing event is
-            // emitted. A second save persists the one-time announcement guard
-            // together with the approved global event entry.
-            if (!SaveSystem.Save(Save)) return false;
+            // Persist the pregnancy and its one-time announcement guard in a
+            // single atomic snapshot instead of writing the same full colony
+            // twice in this synchronous transition.
+            bool previousAnnouncementState = pregnancy.pregnancyAnnouncementLogged;
+            string previousStatus = StatusMessage;
+            ColonyEventData previousNewestEvent = Save.eventLog != null && Save.eventLog.Count > 0
+                ? Save.eventLog[0]
+                : null;
+            string previousLiveMessage = liveEventMessage;
+            string previousLiveCategory = liveEventCategory;
+            long previousLiveExpiry = liveEventExpiresAt;
             pregnancy.pregnancyAnnouncementLogged = true;
             StatusMessage = ColonyFactory.DisplayName(mother) + " is pregnant!";
-            SaveSystem.Save(Save);
-            return true;
+            if (SaveSystem.Save(Save)) return true;
+            pregnancy.pregnancyAnnouncementLogged = previousAnnouncementState;
+            if (Save.eventLog != null && Save.eventLog.Count > 0 &&
+                !ReferenceEquals(Save.eventLog[0], previousNewestEvent))
+                Save.eventLog.RemoveAt(0);
+            statusMessage = previousStatus;
+            liveEventMessage = previousLiveMessage;
+            liveEventCategory = previousLiveCategory;
+            liveEventExpiresAt = previousLiveExpiry;
+            return false;
         }
 
         private void CancelPairingApproach(string reason)
@@ -1729,6 +1744,11 @@ namespace RatHabitat
             }
             if (Save == null) return;
 
+            // Service one coalesced colony save at a bounded cadence. The
+            // queued save stores the latest live Save reference, so multiple
+            // maintenance/activity changes collapse into one serialization.
+            SaveSystem.FlushPendingSaveIfDue();
+
             // The birth naming queue is part of the same authoritative modal
             // pause as the welcome dialog. Do not let the next rendered frame
             // unpause the clock while a newborn naming blocker is still open
@@ -1965,7 +1985,7 @@ namespace RatHabitat
                 births > 0 || birthSequenceChanged || completedSessionCount > 0 || alertAnnouncementStateChanged;
             if (stateNeedsSave)
             {
-                SaveSystem.Save(Save);
+                SaveSystem.QueueSave(Save, "GameBootstrap.UpdateCore/state-change");
                 saveTimer = 0f;
             }
 
@@ -1975,7 +1995,7 @@ namespace RatHabitat
             // operation. Important mutations above still save immediately.
             if (!stateNeedsSave && saveTimer >= AutosaveIntervalSeconds)
             {
-                SaveSystem.Save(Save);
+                SaveSystem.QueueSave(Save, "GameBootstrap.UpdateCore/autosave");
                 saveTimer = 0f;
             }
 
@@ -3517,10 +3537,6 @@ namespace RatHabitat
             }
             if (createdPups <= 0) return false;
 
-            // Persist the completed pregnancy, litter, and all created pinkies
-            // before exposing the player-facing event.
-            if (!SaveSystem.Save(Save)) return false;
-
             string pupWord = createdPups == 1 ? "pup" : "pups";
             string announcement = ColonyFactory.DisplayName(mother) + " has given birth to " +
                 createdPups + " " + pupWord + "!";
@@ -3529,10 +3545,10 @@ namespace RatHabitat
                 ? Save.eventLog[0]
                 : null;
             litter.birthAnnouncementLogged = true;
-            // Persist both the one-time guard and the approved event entry.
-            // If the browser write fails, roll back the in-memory guard and
-            // event so the next deadline pass can retry without losing or
-            // duplicating the announcement.
+            // FinishPregnancy already durably committed the litter, pinkies,
+            // and reproductive state. Persist this one-time announcement
+            // guard once; if that write fails, roll it back so maintenance can
+            // retry without duplicating the litter.
             if (SaveSystem.Save(Save)) return true;
             litter.birthAnnouncementLogged = false;
             if (emittedEvent != null && Save.eventLog != null)

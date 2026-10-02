@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text;
 using UnityEngine;
 
 namespace RatHabitat
@@ -24,6 +26,9 @@ namespace RatHabitat
         private const string BrowserCorruptBackupKey = "rat-habitat-save-v1-corrupt";
         private const string BrowserStorageVersionKey = "rat-habitat-save-v1-storage-version";
         private const int BrowserStorageVersion = 1;
+        private const float PendingSaveDebounceSeconds = 0.35f;
+        private const float MinimumQueuedSaveIntervalSeconds = 1.5f;
+        private const float BackupRefreshIntervalSeconds = 30f;
 
         // Browser lifecycle callbacks can arrive while a Unity callback is
         // already saving. Keep the managed side one-shot and re-entrant safe
@@ -36,6 +41,17 @@ namespace RatHabitat
         private static bool browserRemoveInProgress;
         private static bool browserFlushInProgress;
         private static bool browserLifecyclePollUnavailable;
+        private static ColonySaveData pendingSave;
+        private static bool pendingSaveDirty;
+        private static float pendingSaveDueAt;
+        private static float lastSaveWriteAt = float.NegativeInfinity;
+        private static int pendingSaveRequestCount;
+        private static int pendingSaveCoalescedRequestCount;
+        private static string pendingSaveFirstSource;
+        private static string pendingSaveLastSource;
+        private static string lastKnownValidBrowserSave;
+        private static float lastBrowserBackupWriteAt = float.NegativeInfinity;
+        private static float lastFileBackupWriteAt = float.NegativeInfinity;
 
 #if UNITY_WEBGL && !UNITY_EDITOR
         [DllImport("__Internal")]
@@ -80,9 +96,26 @@ namespace RatHabitat
         /// can be shown even when the player has not opened the log panel.
         /// </summary>
         public static string LastLoadMessage { get; private set; }
+        public static bool HasPendingSave { get { return pendingSaveDirty; } }
+        public static int PendingSaveRequestCount { get { return pendingSaveRequestCount; } }
+        public static int PendingSaveCoalescedRequestCount { get { return pendingSaveCoalescedRequestCount; } }
+
+#if UNITY_EDITOR
+        // Keeps editor tests from leaking a queued live-save reference into a
+        // later test. This intentionally drops only the transient queue; it
+        // never writes or deletes persistent save data.
+        public static void ClearPendingSaveQueueForTests()
+        {
+            ClearPendingSaveQueue();
+        }
+#endif
 
         public static ColonySaveData LoadOrCreate()
         {
+            ClearPendingSaveQueue();
+            lastKnownValidBrowserSave = null;
+            lastBrowserBackupWriteAt = float.NegativeInfinity;
+            lastFileBackupWriteAt = float.NegativeInfinity;
             LastLoadMessage = string.Empty;
             ColonySaveData save = null;
             string serialized = null;
@@ -110,12 +143,16 @@ namespace RatHabitat
                 if (!string.IsNullOrWhiteSpace(serialized))
                 {
                     save = TryParse(serialized);
+                    if (save != null && (source == "browser" || source == "file"))
+                        lastKnownValidBrowserSave = serialized;
                     if (save == null)
                     {
                         BackupCorruptSave(serialized, source);
-                        save = TryParse(ReadRecoveryBackup(source));
+                        string recoveryJson = ReadRecoveryBackup(source);
+                        save = TryParse(recoveryJson);
                         if (save != null)
                         {
+                            if (source == "browser") lastKnownValidBrowserSave = recoveryJson;
                             LastLoadMessage = "Save recovered from backup. Your colony was restored safely.";
                         }
                         else if (source == "browser")
@@ -125,7 +162,10 @@ namespace RatHabitat
                             string fileFallback = TryReadFileSave();
                             save = TryParse(fileFallback);
                             if (save != null)
+                            {
+                                lastKnownValidBrowserSave = fileFallback;
                                 LastLoadMessage = "Browser save recovered from the local backup file.";
+                            }
                         }
 
                         if (save == null)
@@ -214,25 +254,110 @@ namespace RatHabitat
             return save;
         }
 
-        public static bool Save(ColonySaveData save)
+        public static bool Save(ColonySaveData save, [CallerMemberName] string source = null)
         {
             if (save == null) return false;
             if (saveInProgress) return true;
 
-            long performanceSaveSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.SaveExport);
+            bool saved = PersistImmediately(save, source ?? "Save");
+            if (saved && pendingSaveDirty && ReferenceEquals(pendingSave, save))
+                ClearPendingSaveQueue();
+            return saved;
+        }
+
+        /// <summary>
+        /// Marks the live save dirty and coalesces repeated routine requests.
+        /// The first request establishes a deadline; later changes replace the
+        /// pending snapshot without postponing that deadline indefinitely.
+        /// </summary>
+        public static bool QueueSave(ColonySaveData save, [CallerMemberName] string source = null)
+        {
+            if (save == null) return false;
+            string safeSource = string.IsNullOrEmpty(source) ? "Unknown" : source;
+            bool coalesced = pendingSaveDirty;
+            if (!pendingSaveDirty)
+            {
+                pendingSaveDirty = true;
+                pendingSaveFirstSource = safeSource;
+                pendingSaveRequestCount = 0;
+                pendingSaveCoalescedRequestCount = 0;
+                float now = Time.realtimeSinceStartup;
+                pendingSaveDueAt = Mathf.Max(now + PendingSaveDebounceSeconds,
+                    lastSaveWriteAt + MinimumQueuedSaveIntervalSeconds);
+            }
+            else
+            {
+                pendingSaveCoalescedRequestCount++;
+            }
+            pendingSave = save;
+            pendingSaveLastSource = safeSource;
+            pendingSaveRequestCount++;
+            RuntimePerformanceDiagnostics.RecordSaveQueueRequest(safeSource, coalesced);
+            return true;
+        }
+
+        /// <summary>Flushes one queued save at most when its coalescing deadline is due.</summary>
+        public static bool FlushPendingSaveIfDue()
+        {
+            if (!pendingSaveDirty || Time.realtimeSinceStartup < pendingSaveDueAt) return false;
+            return FlushPendingSave();
+        }
+
+        /// <summary>Persists the newest queued state once, or leaves it queued to retry on failure.</summary>
+        public static bool FlushPendingSave()
+        {
+            if (!pendingSaveDirty || pendingSave == null) return false;
+            string source = BuildPendingSaveSource();
+            ColonySaveData save = pendingSave;
+            if (PersistImmediately(save, source))
+            {
+                ClearPendingSaveQueue();
+                return true;
+            }
+            pendingSaveDueAt = Time.realtimeSinceStartup + MinimumQueuedSaveIntervalSeconds;
+            return false;
+        }
+
+        private static string BuildPendingSaveSource()
+        {
+            if (pendingSaveRequestCount <= 1 || pendingSaveFirstSource == pendingSaveLastSource)
+                return pendingSaveLastSource ?? pendingSaveFirstSource ?? "Queued";
+            return (pendingSaveFirstSource ?? "Queued") + " → " +
+                (pendingSaveLastSource ?? "Queued") + " (" + pendingSaveCoalescedRequestCount + " coalesced)";
+        }
+
+        private static void ClearPendingSaveQueue()
+        {
+            pendingSave = null;
+            pendingSaveDirty = false;
+            pendingSaveDueAt = 0f;
+            pendingSaveRequestCount = 0;
+            pendingSaveCoalescedRequestCount = 0;
+            pendingSaveFirstSource = null;
+            pendingSaveLastSource = null;
+        }
+
+        private static bool PersistImmediately(ColonySaveData save, string source)
+        {
+            if (save == null) return false;
+            if (saveInProgress) return true;
+
+            long performanceSaveSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.SaveStorage);
             saveInProgress = true;
             try
             {
-                return SaveInternal(save);
+                bool saved = SaveInternal(save, source ?? "Save");
+                if (saved) lastSaveWriteAt = Time.realtimeSinceStartup;
+                return saved;
             }
             finally
             {
                 saveInProgress = false;
-                RuntimePerformanceDiagnostics.End(PerformanceProbeArea.SaveExport, performanceSaveSample);
+                RuntimePerformanceDiagnostics.End(PerformanceProbeArea.SaveStorage, performanceSaveSample);
             }
         }
 
-        private static bool SaveInternal(ColonySaveData save)
+        private static bool SaveInternal(ColonySaveData save, string source)
         {
             if (save == null) return false;
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
@@ -253,17 +378,24 @@ namespace RatHabitat
                 RatActivitySystem.EnsureSaveState(save, save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
                 save.schemaVersion = GameConfig.SaveVersion;
                 save.updatedAt = GameConfig.NowMs();
-                string json = JsonUtility.ToJson(save, true);
+                // Compact JSON materially reduces the synchronous WebGL string
+                // and localStorage payload while preserving the exact save data.
+                string json = JsonUtility.ToJson(save, false);
+                int serializedBytes = Encoding.UTF8.GetByteCount(json);
+                RuntimePerformanceDiagnostics.RecordSaveSerializedData(source, serializedBytes);
 
                 if (UsesBrowserStorage)
                 {
                     RegisterBrowserLifecycle();
-                    string previous = ReadBrowser(BrowserSaveKey);
-                    // Only replace the recovery backup with a valid previous
-                    // document. A corrupt current document must not destroy a
-                    // usable backup while recovery is being completed.
-                    if (TryParse(previous) != null)
-                        WriteBrowser(BrowserBackupKey, previous);
+                    float now = Time.realtimeSinceStartup;
+                    // The previous save was validated once at load or after a
+                    // successful write. Rotate that known-good snapshot only
+                    // periodically, instead of reading and deserializing the
+                    // entire old colony on every persistence operation.
+                    bool backupDue = now - lastBrowserBackupWriteAt >= BackupRefreshIntervalSeconds;
+                    if (backupDue && !string.IsNullOrEmpty(lastKnownValidBrowserSave) &&
+                        WriteBrowser(BrowserBackupKey, lastKnownValidBrowserSave))
+                        lastBrowserBackupWriteAt = now;
                     if (!WriteBrowser(BrowserSaveKey, json))
                     {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
@@ -271,20 +403,20 @@ namespace RatHabitat
 #endif
                         return false;
                     }
+                    lastKnownValidBrowserSave = json;
                     WriteBrowser(BrowserStorageVersionKey, BrowserStorageVersion.ToString());
-                    // localStorage writes are synchronous; this second call
-                    // makes the intended flush explicit for pagehide/unload.
-                    FlushBrowser(BrowserSaveKey);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
                     UnityEngine.Profiling.Profiler.EndSample();
 #endif
                     return true;
                 }
 
-                if (File.Exists(SavePath))
+                if (File.Exists(SavePath) &&
+                    Time.realtimeSinceStartup - lastFileBackupWriteAt >= BackupRefreshIntervalSeconds)
                 {
                     string backupPath = SavePath + ".bak";
                     File.Copy(SavePath, backupPath, true);
+                    lastFileBackupWriteAt = Time.realtimeSinceStartup;
                 }
                 File.WriteAllText(SavePath, json);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
@@ -304,6 +436,7 @@ namespace RatHabitat
 
         public static bool DeleteLocalSave()
         {
+            ClearPendingSaveQueue();
             try
             {
                 if (UsesBrowserStorage)
