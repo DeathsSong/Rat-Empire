@@ -1,15 +1,77 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using Random = System.Random;
 
 namespace RatHabitat
 {
+    public enum StoreSellFilter
+    {
+        All,
+        Males,
+        Females,
+        Favorites,
+    }
+
+    /// <summary>
+    /// Sell-tab filter selection is presentation state and always starts at
+    /// All when the Sell page is opened; it is deliberately not save data.
+    /// </summary>
+    public sealed class StoreSellFilterState
+    {
+        public StoreSellFilter Selected { get; private set; } = StoreSellFilter.All;
+
+        public void ResetForSellPanelOpen()
+        {
+            Selected = StoreSellFilter.All;
+        }
+
+        public void Select(StoreSellFilter filter)
+        {
+            switch (filter)
+            {
+                case StoreSellFilter.Males:
+                case StoreSellFilter.Females:
+                case StoreSellFilter.Favorites:
+                    Selected = filter;
+                    break;
+                default:
+                    Selected = StoreSellFilter.All;
+                    break;
+            }
+        }
+    }
+
     /// <summary>
     /// Persisted Rat Market inventory and purchase rules. Listings are data,
     /// not UI state, so rebuilding the Store panel never rerolls a rat.
     /// </summary>
     public static class StoreSystem
     {
+        /// <summary>
+        /// Returns only rats allowed by the authoritative sale rules, then
+        /// narrows that eligible set by the Sell-tab filter. UI filters never
+        /// grant sale eligibility; request/confirm paths recheck it as well.
+        /// </summary>
+        public static List<RatData> GetSellableRats(ColonySaveData save, long gameTime, StoreSellFilter filter)
+        {
+            var result = new List<RatData>();
+            if (save == null || save.rats == null) return result;
+
+            for (int index = 0; index < save.rats.Count; index++)
+            {
+                RatData rat = save.rats[index];
+                if (rat == null || !CanSellRat(save, rat, gameTime)) continue;
+
+                bool matches = filter == StoreSellFilter.All ||
+                    (filter == StoreSellFilter.Males && rat.sex == RatSex.Male) ||
+                    (filter == StoreSellFilter.Females && rat.sex == RatSex.Female) ||
+                    (filter == StoreSellFilter.Favorites && rat.isFavorite);
+                if (matches) result.Add(rat);
+            }
+            return result;
+        }
+
         public struct PurchasePriceBreakdown
         {
             public int basePrice;

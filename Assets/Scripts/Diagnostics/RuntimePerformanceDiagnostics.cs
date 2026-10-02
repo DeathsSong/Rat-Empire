@@ -134,12 +134,19 @@ namespace RatHabitat
         private static bool captureEnabled = true;
         private static bool hudVisible;
         private static PerformanceIsolationMode isolationMode;
+        private static long lastSampleUtcTicks;
+        private static string lastExportActionStatus = "No copy or download attempted.";
+        private static string manualExportText = string.Empty;
+        private static int exportActionSequence;
+        private static int pendingClipboardAction;
 
         public static bool CaptureEnabled { get { return captureEnabled; } }
         public static bool HudVisible { get { return hudVisible; } }
         public static PerformanceIsolationMode IsolationMode { get { return isolationMode; } }
         public static int SampleCount { get { return sampleCount; } }
         public static int SpikeCount { get { return spikeCount; } }
+        public static string LastExportActionStatus { get { return lastExportActionStatus; } }
+        public static string ManualExportText { get { return manualExportText; } }
         public static float SessionWorstFrameMs { get { return sessionWorstFrameMs; } }
         public static float SessionWorstSubsystemMs { get { return sessionWorstSubsystemMs; } }
         public static string SessionWorstSubsystem { get { return sessionWorstSubsystem; } }
@@ -177,6 +184,7 @@ namespace RatHabitat
             sampleWriteIndex = (sampleWriteIndex + 1) % SampleRing.Length;
             SampleRing[sampleWriteIndex] = sample;
             if (sampleCount < SampleRing.Length) sampleCount++;
+            lastSampleUtcTicks = sample.UtcTicks > 0L ? sample.UtcTicks : DateTime.UtcNow.Ticks;
             TrackWorstSubsystem("Simulation/maintenance", sample.SimulationMaintenanceMs);
             TrackWorstSubsystem("UI refresh", sample.UiRefreshMs);
             TrackWorstSubsystem("Rat AI/movement", sample.RatAiMovementMs);
@@ -291,12 +299,20 @@ namespace RatHabitat
             sessionWorstFrameMs = sessionWorstSubsystemMs = 0f;
             sessionWorstFrame = default(PerformanceLogSample);
             sessionWorstSubsystem = "n/a";
+            lastSampleUtcTicks = 0L;
+            manualExportText = string.Empty;
+            // Clearing is a log operation, not a capture toggle. Leave the
+            // recorder running so the next one-second sample starts a fresh
+            // diagnostics window immediately.
+            captureEnabled = true;
             ClearWindow();
         }
 
         public static string BuildLiveSummary()
         {
-            if (sampleCount == 0) return captureEnabled ? "Capture running • waiting for the first 1-second sample." : "Capture stopped.";
+            if (sampleCount == 0) return captureEnabled
+                ? "Capture ON — waiting for the next sample."
+                : "Capture OFF — no samples recorded.";
             PerformanceLogSample latest = SampleAt(sampleCount - 1);
             ExportBuilder.Length = 0;
             ExportBuilder.Append(captureEnabled ? "CAPTURE ON" : "CAPTURE OFF")
@@ -320,6 +336,31 @@ namespace RatHabitat
                 .Append(" • rats/pinkies ").Append(sessionWorstFrame.ActiveRatCount).Append('/').Append(sessionWorstFrame.PinkieCount)
                 .Append(" • worst subsystem ").Append(sessionWorstSubsystem).Append(" ")
                 .Append(sessionWorstSubsystemMs.ToString("0.00", CultureInfo.InvariantCulture)).Append(" ms/window");
+            return ExportBuilder.ToString();
+        }
+
+        public static string BuildStatusText()
+        {
+            ExportBuilder.Length = 0;
+            ExportBuilder.Append(captureEnabled ? "Capture ON" : "Capture OFF");
+            if (sampleCount == 0)
+            {
+                ExportBuilder.Append(captureEnabled
+                    ? " — waiting for the next sample."
+                    : " — no samples recorded.");
+                ExportBuilder.Append(" • 0 samples • 0 lag episodes • last sample waiting");
+            }
+            else
+            {
+                double elapsedSeconds = lastSampleUtcTicks <= 0L
+                    ? double.PositiveInfinity
+                    : Math.Max(0d, (DateTime.UtcNow.Ticks - lastSampleUtcTicks) / (double)TimeSpan.TicksPerSecond);
+                ExportBuilder.Append(" • ").Append(sampleCount).Append(" samples • ")
+                    .Append(spikeCount).Append(" lag episodes • last sample ");
+                if (double.IsInfinity(elapsedSeconds)) ExportBuilder.Append("time unavailable");
+                else ExportBuilder.Append(elapsedSeconds.ToString("0.0", CultureInfo.InvariantCulture)).Append("s ago");
+            }
+            ExportBuilder.Append("\nLast copy/download: ").Append(lastExportActionStatus);
             return ExportBuilder.ToString();
         }
 
@@ -402,39 +443,85 @@ namespace RatHabitat
             return ExportBuilder.ToString();
         }
 
-        public static bool TryCopyText(string text)
+        public static bool TryCopyText(string text, string callbackReceiver = null)
         {
             if (string.IsNullOrEmpty(text)) return false;
+            manualExportText = text;
+            int actionId = ++exportActionSequence;
 #if UNITY_WEBGL && !UNITY_EDITOR
-            try { return RatPerformanceCopyText(text) != 0; }
-            catch (Exception) { return false; }
+            try
+            {
+                int result = RatPerformanceCopyText(text, callbackReceiver ?? string.Empty,
+                    "OnPerformanceClipboardResult", actionId.ToString(CultureInfo.InvariantCulture));
+                if (result == 1)
+                {
+                    pendingClipboardAction = 0;
+                    lastExportActionStatus = "Copied to clipboard.";
+                    return true;
+                }
+                if (result == 2)
+                {
+                    pendingClipboardAction = actionId;
+                    lastExportActionStatus = "Clipboard permission pending; manual copy text is available below.";
+                    return true;
+                }
+                pendingClipboardAction = 0;
+                lastExportActionStatus = "Clipboard unavailable or blocked; use the manual copy text below.";
+                return false;
+            }
+            catch (Exception exception)
+            {
+                pendingClipboardAction = 0;
+                lastExportActionStatus = "Clipboard failed: " + exception.Message + "; use the manual copy text below.";
+                return false;
+            }
 #elif UNITY_EDITOR
             GUIUtility.systemCopyBuffer = text;
+            lastExportActionStatus = "Copied to clipboard (Editor).";
             return true;
 #else
+            lastExportActionStatus = "Clipboard unavailable; use the manual copy text below.";
             return false;
 #endif
+        }
+
+        public static void CompleteClipboardAction(int actionId, bool copied)
+        {
+            if (actionId <= 0 || actionId != pendingClipboardAction) return;
+            pendingClipboardAction = 0;
+            lastExportActionStatus = copied
+                ? "Copied to clipboard."
+                : "Clipboard blocked; select and copy the manual text below.";
         }
 
         public static bool TryDownloadLog(bool csv)
         {
+            string content = BuildExportText(csv);
+            manualExportText = content;
 #if UNITY_WEBGL && !UNITY_EDITOR
             try
             {
-                string content = BuildExportText(csv);
-                RatPerformanceDownloadText(csv ? "rat-empire-performance.csv" : "rat-empire-performance.txt",
-                    content, csv ? "text/csv;charset=utf-8" : "text/plain;charset=utf-8");
-                return true;
+                bool requested = RatPerformanceDownloadText(csv ? "rat-empire-performance.csv" : "rat-empire-performance.txt",
+                    content, csv ? "text/csv;charset=utf-8" : "text/plain;charset=utf-8") != 0;
+                lastExportActionStatus = requested
+                    ? "Browser download requested; if blocked, use the manual copy text below."
+                    : "Browser download failed; use the manual copy text below.";
+                return requested;
             }
-            catch (Exception) { return false; }
+            catch (Exception exception)
+            {
+                lastExportActionStatus = "Browser download failed: " + exception.Message + "; use the manual copy text below.";
+                return false;
+            }
 #else
+            lastExportActionStatus = "Browser download unavailable in this player; use the manual copy text below.";
             return false;
 #endif
         }
 
 #if UNITY_WEBGL && !UNITY_EDITOR
-        [DllImport("__Internal")] private static extern int RatPerformanceCopyText(string text);
-        [DllImport("__Internal")] private static extern void RatPerformanceDownloadText(string fileName, string content, string mimeType);
+        [DllImport("__Internal")] private static extern int RatPerformanceCopyText(string text, string callbackReceiver, string callbackMethod, string actionId);
+        [DllImport("__Internal")] private static extern int RatPerformanceDownloadText(string fileName, string content, string mimeType);
 #endif
 
         private static PerformanceLogSample SampleAt(int chronologicalIndex)
@@ -616,9 +703,23 @@ namespace RatHabitat
         public static bool CaptureEnabled { get { return false; } }
         public static bool HudVisible { get { return false; } }
         public static PerformanceIsolationMode IsolationMode { get { return PerformanceIsolationMode.Normal; } }
+        public static int SampleCount { get { return 0; } }
+        public static int SpikeCount { get { return 0; } }
+        public static string LastExportActionStatus { get { return "Performance capture is available in Development builds."; } }
+        public static string ManualExportText { get { return string.Empty; } }
         public static long Begin(PerformanceProbeArea area) { return 0L; }
         public static void End(PerformanceProbeArea area, long startedAt) { }
         public static void SetCaptureEnabled(bool enabled) { }
+        public static void ClearLog() { }
+        public static string BuildLiveSummary() { return "Performance capture is available in Development builds."; }
+        public static string BuildStatusText() { return "Performance capture is available in Development builds."; }
+        public static string BuildRecentSamplesText(int maximumCount) { return string.Empty; }
+        public static string BuildRecentSpikesText(int maximumCount) { return string.Empty; }
+        public static string BuildExportText(bool csv) { return string.Empty; }
+        public static string BuildCompactDiagnostics() { return string.Empty; }
+        public static bool TryCopyText(string text, string callbackReceiver = null) { return false; }
+        public static void CompleteClipboardAction(int actionId, bool copied) { }
+        public static bool TryDownloadLog(bool csv) { return false; }
         public static void SetHudVisible(bool visible) { }
         public static void SetIsolationMode(PerformanceIsolationMode mode) { }
         public static void ToggleIsolationMode(PerformanceIsolationMode mode) { }

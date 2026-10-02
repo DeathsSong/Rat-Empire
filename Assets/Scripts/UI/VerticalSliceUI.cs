@@ -151,6 +151,15 @@ namespace RatHabitat
         private Text performanceLogDisplay;
         private Text performanceLogCountText;
         private Text performanceLogStatus;
+        private InputField performanceLogManualCopyInput;
+        private RectTransform performanceLogManualCopyContent;
+        private RectTransform performanceLogManualCopyViewport;
+        private Button performanceCaptureButton;
+        private Button performanceHudButton;
+        private Button performanceIsolationBaselineButton;
+        private Text performanceIsolationStatusText;
+        private readonly Dictionary<PerformanceLogView, Button> performanceLogViewButtons = new Dictionary<PerformanceLogView, Button>();
+        private readonly Dictionary<PerformanceIsolationMode, Button> performanceIsolationButtons = new Dictionary<PerformanceIsolationMode, Button>();
         private float performanceLogRefreshTimer;
 #endif
         private bool ratAnimationShowcaseOpen;
@@ -164,6 +173,7 @@ namespace RatHabitat
             Euthanize,
         }
         private StoreCategory storeCategory = StoreCategory.Buy;
+        private readonly StoreSellFilterState storeSellFilterState = new StoreSellFilterState();
         private DirectUiClickRelay fallbackMouseRelay;
         private DirectUiClickRelay fallbackTouchRelay;
         private Vector2 fallbackMouseDownPosition;
@@ -1179,7 +1189,11 @@ namespace RatHabitat
                 // profile-preservation path without unexpectedly carrying the
                 // navigation transition into another rebuild.
                 profileNavigationPreserveState = false;
-                if (developerToolsOpen) RebuildDeveloperToolsContent();
+                // Live clock/status changes must not replace Developer Tools
+                // controls while a pointer sequence is in flight. The
+                // diagnostics sampler runs independently; only structural,
+                // explicit refreshes rebuild this page.
+                if (developerToolsOpen && force) RebuildDeveloperToolsContent();
                 if (ratAnimationShowcaseOpen) RefreshAnimationShowcasePanel();
             }
             catch (Exception exception)
@@ -2829,6 +2843,8 @@ namespace RatHabitat
                 game.ClearSelectionForNavigation();
 
             activeMainPanel = samePanel ? MainPanel.None : panel;
+            if (panel == MainPanel.Store && !samePanel)
+                storeSellFilterState.ResetForSellPanelOpen();
             // Apply the new input ownership before rebuilding the page. This
             // removes the previous page blocker and clears its pointer state
             // in the same transition that changes the authoritative tab, so
@@ -3188,7 +3204,7 @@ namespace RatHabitat
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
         private void UpdatePerformanceLogDisplay()
         {
-            if (!developerToolsOpen || performanceLogDisplay == null) return;
+            if (!developerToolsOpen) return;
             performanceLogRefreshTimer -= Time.unscaledDeltaTime;
             if (performanceLogRefreshTimer > 0f) return;
             performanceLogRefreshTimer = GameConfig.PerformanceLogSampleIntervalSeconds;
@@ -3207,6 +3223,11 @@ namespace RatHabitat
             }
             if (performanceLogDisplay != null && performanceLogDisplay.text != value)
                 performanceLogDisplay.text = value;
+            if (performanceLogStatus != null)
+            {
+                string status = RuntimePerformanceDiagnostics.BuildStatusText();
+                if (performanceLogStatus.text != status) performanceLogStatus.text = status;
+            }
             if (performanceLogCountText != null)
             {
                 string counts = RuntimePerformanceDiagnostics.SampleCount + " samples • " +
@@ -3214,13 +3235,194 @@ namespace RatHabitat
                     "worst subsystem: " + RuntimePerformanceDiagnostics.SessionWorstSubsystem;
                 if (performanceLogCountText.text != counts) performanceLogCountText.text = counts;
             }
+            string manualText = RuntimePerformanceDiagnostics.ManualExportText;
+            if (string.IsNullOrEmpty(manualText))
+                manualText = "Copy or download a performance log to populate this field. If browser export is blocked, tap here, select all, and copy the text manually.";
+            if (performanceLogManualCopyInput != null && performanceLogManualCopyInput.text != manualText)
+            {
+                performanceLogManualCopyInput.SetTextWithoutNotify(manualText);
+                ResizePerformanceManualCopyField(manualText);
+                if (performanceLogManualCopyInput.textComponent != null)
+                    performanceLogManualCopyInput.textComponent.SetAllDirty();
+                if (performanceLogManualCopyInput.GetComponentInParent<ScrollRect>() != null)
+                    performanceLogManualCopyInput.GetComponentInParent<ScrollRect>().verticalNormalizedPosition = 1f;
+            }
         }
 
         private void SetPerformanceLogView(PerformanceLogView view)
         {
             performanceLogView = view;
             performanceLogRefreshTimer = 0f;
-            RebuildDeveloperToolsContent();
+            UpdatePerformanceLogViewButtons();
+            UpdatePerformanceLogDisplay();
+        }
+
+        private Button AddPerformanceButton(string stableName, string label, bool enabled,
+            UnityEngine.Events.UnityAction action)
+        {
+            Button button = AddButtonTo(developerToolsCard, label, enabled, action,
+                new Color(0.14f, 0.29f, 0.29f), 46f);
+            button.gameObject.name = stableName;
+            return button;
+        }
+
+        private void AddPerformanceManualCopyField()
+        {
+            AddText(developerToolsCard, "Manual copy fallback (selectable and scrollable)", 14,
+                new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft);
+            performanceLogManualCopyViewport = CreateRect("Performance Manual Copy Viewport", developerToolsCard);
+            LayoutElement viewportLayout = performanceLogManualCopyViewport.gameObject.AddComponent<LayoutElement>();
+            viewportLayout.preferredHeight = 150f;
+            viewportLayout.minHeight = 110f;
+            var viewportImage = performanceLogManualCopyViewport.gameObject.AddComponent<Image>();
+            viewportImage.color = new Color(0.055f, 0.10f, 0.11f, 1f);
+            viewportImage.raycastTarget = true;
+            performanceLogManualCopyViewport.gameObject.AddComponent<RectMask2D>();
+
+            performanceLogManualCopyContent = CreateRect("Performance Manual Copy Content", performanceLogManualCopyViewport);
+            performanceLogManualCopyContent.anchorMin = new Vector2(0f, 1f);
+            performanceLogManualCopyContent.anchorMax = new Vector2(1f, 1f);
+            performanceLogManualCopyContent.pivot = new Vector2(0.5f, 1f);
+            performanceLogManualCopyContent.anchoredPosition = Vector2.zero;
+            performanceLogManualCopyContent.sizeDelta = new Vector2(0f, 150f);
+            var contentLayout = performanceLogManualCopyContent.gameObject.AddComponent<VerticalLayoutGroup>();
+            contentLayout.childControlWidth = true;
+            contentLayout.childControlHeight = true;
+            contentLayout.childForceExpandWidth = true;
+            contentLayout.childForceExpandHeight = false;
+            contentLayout.padding = new RectOffset(8, 8, 6, 6);
+            var contentFitter = performanceLogManualCopyContent.gameObject.AddComponent<ContentSizeFitter>();
+            contentFitter.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
+            contentFitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+            performanceLogManualCopyInput = AddInputFieldTo(performanceLogManualCopyContent,
+                "Copy or download a log to populate this field. If browser export is blocked, select all and copy the text manually.",
+                150f, true);
+            performanceLogManualCopyInput.gameObject.name = "Performance Manual Copy Text";
+            performanceLogManualCopyInput.readOnly = true;
+            performanceLogManualCopyInput.characterLimit = 0;
+            if (performanceLogManualCopyInput.textComponent != null)
+            {
+                performanceLogManualCopyInput.textComponent.alignment = TextAnchor.UpperLeft;
+                performanceLogManualCopyInput.textComponent.horizontalOverflow = HorizontalWrapMode.Wrap;
+                performanceLogManualCopyInput.textComponent.verticalOverflow = VerticalWrapMode.Overflow;
+                performanceLogManualCopyInput.textComponent.raycastTarget = false;
+            }
+
+            ScrollRect scroll = performanceLogManualCopyViewport.gameObject.AddComponent<ScrollRect>();
+            scroll.content = performanceLogManualCopyContent;
+            scroll.viewport = performanceLogManualCopyViewport;
+            scroll.horizontal = false;
+            scroll.vertical = true;
+            scroll.movementType = ScrollRect.MovementType.Clamped;
+            scroll.inertia = true;
+            scroll.scrollSensitivity = 24f;
+            AddPerformanceButton("Performance.SelectManualLog", "Select manual log text", true,
+                SelectPerformanceManualLog);
+        }
+
+        private void SelectPerformanceManualLog()
+        {
+            if (performanceLogManualCopyInput == null) return;
+            performanceLogManualCopyInput.Select();
+            performanceLogManualCopyInput.ActivateInputField();
+            performanceLogManualCopyInput.selectionAnchorPosition = 0;
+            performanceLogManualCopyInput.selectionFocusPosition = performanceLogManualCopyInput.text.Length;
+        }
+
+        private void ResizePerformanceManualCopyField(string value)
+        {
+            if (performanceLogManualCopyInput == null) return;
+            LayoutElement layout = performanceLogManualCopyInput.GetComponent<LayoutElement>();
+            if (layout == null) return;
+            float width = performanceLogManualCopyViewport == null
+                ? 360f
+                : Mathf.Max(240f, performanceLogManualCopyViewport.rect.width - 20f);
+            float fontSize = performanceLogManualCopyInput.textComponent == null
+                ? 14f
+                : performanceLogManualCopyInput.textComponent.fontSize;
+            int charsPerLine = Mathf.Max(24, Mathf.FloorToInt(width / Mathf.Max(5f, fontSize * 0.54f)));
+            int lines = 1;
+            int column = 0;
+            for (int i = 0; i < value.Length; i++)
+            {
+                if (value[i] == '\n')
+                {
+                    lines++;
+                    column = 0;
+                }
+                else if (++column > charsPerLine)
+                {
+                    lines++;
+                    column = 1;
+                }
+            }
+            float height = Mathf.Clamp(lines * (fontSize + 5f) + 18f, 150f, 12000f);
+            layout.preferredHeight = height;
+            layout.minHeight = height;
+            if (performanceLogManualCopyContent != null)
+                performanceLogManualCopyContent.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, height + 12f);
+        }
+
+        private void UpdatePerformanceControlLabels()
+        {
+            SetButtonText(performanceHudButton,
+                RuntimePerformanceDiagnostics.HudVisible ? "Hide live Performance HUD" : "Show live Performance HUD");
+            SetButtonText(performanceCaptureButton,
+                RuntimePerformanceDiagnostics.CaptureEnabled ? "Stop Performance Log capture" : "Start Performance Log capture");
+            UpdatePerformanceLogViewButtons();
+            foreach (KeyValuePair<PerformanceIsolationMode, Button> entry in performanceIsolationButtons)
+            {
+                string label;
+                switch (entry.Key)
+                {
+                    case PerformanceIsolationMode.RatBehavior: label = "rat AI/movement|skipped|running"; break;
+                    case PerformanceIsolationMode.RatAnimation: label = "rat/pinkie animators|frozen|running"; break;
+                    case PerformanceIsolationMode.RatRendering: label = "rat visuals|hidden|visible"; break;
+                    case PerformanceIsolationMode.RatShadows: label = "rat shadows|off|on"; break;
+                    case PerformanceIsolationMode.AutomaticUiRefresh: label = "automatic UI refresh|skipped|normal"; break;
+                    default: label = "colony maintenance|skipped|normal"; break;
+                }
+                string[] parts = label.Split('|');
+                SetButtonText(entry.Value, IsolationToggleLabel(entry.Key, parts[0], parts[1], parts[2]));
+            }
+            if (performanceIsolationStatusText != null)
+                performanceIsolationStatusText.text = "A/B switches combine independently • current: " + RuntimePerformanceDiagnostics.IsolationMode;
+        }
+
+        private void UpdatePerformanceLogViewButtons()
+        {
+            foreach (KeyValuePair<PerformanceLogView, Button> entry in performanceLogViewButtons)
+            {
+                string label;
+                switch (entry.Key)
+                {
+                    case PerformanceLogView.RecentSamples: label = "Show recent samples"; break;
+                    case PerformanceLogView.SpikesOnly: label = "Show lag spikes only"; break;
+                    default: label = "Show live summary"; break;
+                }
+                SetButtonText(entry.Value, (entry.Key == performanceLogView ? "✓ " : string.Empty) + label);
+            }
+        }
+
+        private static void SetButtonText(Button button, string value)
+        {
+            if (button == null) return;
+            Text label = button.GetComponentInChildren<Text>(true);
+            if (label != null && label.text != value) label.text = value;
+        }
+
+        public void OnPerformanceClipboardResult(string result)
+        {
+            if (string.IsNullOrEmpty(result)) return;
+            int separator = result.IndexOf(':');
+            if (separator <= 0) return;
+            int actionId;
+            if (!int.TryParse(result.Substring(0, separator), out actionId)) return;
+            RuntimePerformanceDiagnostics.CompleteClipboardAction(actionId,
+                string.Equals(result.Substring(separator + 1), "copied", StringComparison.OrdinalIgnoreCase));
+            performanceLogRefreshTimer = 0f;
+            UpdatePerformanceLogDisplay();
         }
 #endif
 
@@ -3744,6 +3946,8 @@ namespace RatHabitat
 
         private void SetStoreCategory(StoreCategory category)
         {
+            if (category == StoreCategory.Sell && storeCategory != StoreCategory.Sell)
+                storeSellFilterState.ResetForSellPanelOpen();
             storeCategory = category;
             // Store categories are page-level controls. Always bring the
             // category bar back into view before rebuilding so a Sell list
@@ -3760,6 +3964,7 @@ namespace RatHabitat
         private void OpenStoreForRatManagement(string ratId, bool euthanize)
         {
             storeCategory = euthanize ? StoreCategory.Euthanize : StoreCategory.Sell;
+            if (!euthanize) storeSellFilterState.ResetForSellPanelOpen();
             activeMainPanel = MainPanel.Store;
             if (game != null) game.SelectRatFromRoster(ratId);
             if (game != null)
@@ -3775,7 +3980,71 @@ namespace RatHabitat
         {
             AddText(parent, "Sell rats for dollars. Historical parent, litter, and offspring records are kept.", 14,
                 new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
-            AddStoreManagedRatRows(parent, false);
+            AddStoreSellFilters(parent);
+            List<RatData> sellableRats = StoreSystem.GetSellableRats(
+                game.Save, game.GameTime, storeSellFilterState.Selected);
+            string countSummary = storeSellFilterState.Selected == StoreSellFilter.Favorites
+                ? sellableRats.Count + (sellableRats.Count == 1
+                    ? " favorite rat is eligible for sale."
+                    : " favorite rats are eligible for sale.")
+                : sellableRats.Count + " eligible " +
+                    (storeSellFilterState.Selected == StoreSellFilter.All
+                        ? string.Empty
+                        : StoreSellFilterLabel(storeSellFilterState.Selected) + " ") +
+                    (sellableRats.Count == 1 ? "rat shown." : "rats shown.");
+            AddText(parent, countSummary, 12,
+                new Color(0.68f, 0.84f, 0.78f), TextAnchor.UpperLeft);
+            AddStoreManagedRatRows(parent, false, sellableRats);
+        }
+
+        private void AddStoreSellFilters(RectTransform parent)
+        {
+            var row = CreateRect("Sell Rat Filters", parent);
+            var layout = row.gameObject.AddComponent<HorizontalLayoutGroup>();
+            layout.spacing = 5f;
+            layout.childControlWidth = true;
+            layout.childControlHeight = true;
+            layout.childForceExpandWidth = true;
+            layout.childForceExpandHeight = false;
+
+            AddStoreSellFilterButton(row, "All", StoreSellFilter.All);
+            AddStoreSellFilterButton(row, "Males", StoreSellFilter.Males);
+            AddStoreSellFilterButton(row, "Females", StoreSellFilter.Females);
+            AddStoreSellFilterButton(row, "Favorites", StoreSellFilter.Favorites);
+        }
+
+        private void AddStoreSellFilterButton(Transform parent, string label, StoreSellFilter filter)
+        {
+            bool selected = storeSellFilterState.Selected == filter;
+            AddButtonTo(parent, label, true, () => SetStoreSellFilter(filter),
+                selected ? new Color(0.28f, 0.53f, 0.36f) : new Color(0.14f, 0.29f, 0.29f), 40f);
+        }
+
+        private static string StoreSellFilterLabel(StoreSellFilter filter)
+        {
+            if (filter == StoreSellFilter.Males) return "male";
+            if (filter == StoreSellFilter.Females) return "female";
+            return string.Empty;
+        }
+
+        private void SetStoreSellFilter(StoreSellFilter filter)
+        {
+            if (activeMainPanel != MainPanel.Store || storeCategory != StoreCategory.Sell ||
+                storeSellFilterState.Selected == filter) return;
+
+            storeSellFilterState.Select(filter);
+            if (pageScroll != null)
+            {
+                pageScroll.StopMovement();
+                pageScroll.verticalNormalizedPosition = 1f;
+            }
+            if (storeRatListScroll != null)
+            {
+                storeRatListScroll.StopMovement();
+                storeRatListScroll.verticalNormalizedPosition = 1f;
+            }
+            lastSignature = string.Empty;
+            Refresh(true);
         }
 
         private void AddStoreEuthanasiaPanel(RectTransform parent)
@@ -3792,7 +4061,8 @@ namespace RatHabitat
             AddStoreManagedRatRows(parent, true);
         }
 
-        private void AddStoreManagedRatRows(RectTransform parent, bool euthanize)
+        private void AddStoreManagedRatRows(RectTransform parent, bool euthanize,
+            IList<RatData> filteredSellableRats = null)
         {
             var listRoot = CreateRect("Store Rat List", parent);
             var listImage = listRoot.gameObject.AddComponent<Image>();
@@ -3839,12 +4109,26 @@ namespace RatHabitat
             contentFitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
             list.content = listContent;
 
-            if (game.Save.rats == null || game.Save.rats.Count == 0)
+            IList<RatData> displayRats = euthanize
+                ? game.Save.rats
+                : filteredSellableRats ?? StoreSystem.GetSellableRats(
+                    game.Save, game.GameTime, storeSellFilterState.Selected);
+            if (displayRats == null || displayRats.Count == 0)
             {
-                AddTextTo(listContent, "No active colony rats.", 14, new Color(1f, 0.72f, 0.42f), TextAnchor.UpperLeft);
+                string emptyMessage = euthanize
+                    ? "No active colony rats."
+                    : storeSellFilterState.Selected == StoreSellFilter.Favorites
+                        ? "No favorite rats are currently eligible for sale."
+                        : storeSellFilterState.Selected == StoreSellFilter.Males
+                            ? "No eligible male rats are currently available for sale."
+                            : storeSellFilterState.Selected == StoreSellFilter.Females
+                                ? "No eligible female rats are currently available for sale."
+                                : "No rats are currently eligible for sale.";
+                AddTextTo(listContent, emptyMessage, 14,
+                    new Color(1f, 0.72f, 0.42f), TextAnchor.UpperLeft);
                 return;
             }
-            foreach (var rat in game.Save.rats)
+            foreach (var rat in displayRats)
             {
                 if (rat == null) continue;
                 string ratId = rat.id;
@@ -6734,8 +7018,27 @@ namespace RatHabitat
             if (developerToolsCard == null || game == null) return;
             for (int i = developerToolsCard.childCount - 1; i >= 0; i--)
             {
-                Destroy(developerToolsCard.GetChild(i).gameObject);
+                GameObject oldControl = developerToolsCard.GetChild(i).gameObject;
+                // Destroy is deferred to the end of the frame. Deactivate the
+                // old hierarchy first so a second pointer-up/manual fallback
+                // cannot hit stale controls while their replacements exist.
+                oldControl.SetActive(false);
+                Destroy(oldControl);
             }
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            performanceLogDisplay = null;
+            performanceLogCountText = null;
+            performanceLogStatus = null;
+            performanceLogManualCopyInput = null;
+            performanceLogManualCopyContent = null;
+            performanceLogManualCopyViewport = null;
+            performanceCaptureButton = null;
+            performanceHudButton = null;
+            performanceIsolationBaselineButton = null;
+            performanceIsolationStatusText = null;
+            performanceLogViewButtons.Clear();
+            performanceIsolationButtons.Clear();
+#endif
 
             AddText(developerToolsCard, "Developer Tools", 22, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
             AddText(developerToolsCard, "Developer-only controls. Test rats use real saved genotype and phenotype data; regular growth and inheritance rules are unchanged.", 13, new Color(0.7f, 0.78f, 0.74f), TextAnchor.UpperLeft);
@@ -6744,21 +7047,23 @@ namespace RatHabitat
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             AddText(developerToolsCard, "Runtime Performance Investigation", 17, Color.white, TextAnchor.UpperLeft);
             AddText(developerToolsCard,
-                "Capture uses Unity frame timings/GC counters plus measured subsystem profiler samples. A/B modes are temporary and do not edit the save.",
+                "Diagnostics are in-memory only. They never create, clear, or save a colony. Capture continues while Developer Tools is closed.",
                 12, new Color(0.7f, 0.78f, 0.74f), TextAnchor.UpperLeft);
-            AddButton(developerToolsCard,
+            performanceHudButton = AddPerformanceButton("Performance.HudToggle",
                 RuntimePerformanceDiagnostics.HudVisible ? "Hide live Performance HUD" : "Show live Performance HUD",
                 true, () =>
                 {
                     game.SetPerformanceHudVisible(!RuntimePerformanceDiagnostics.HudVisible);
-                    RebuildDeveloperToolsContent();
+                    UpdatePerformanceControlLabels();
                 });
-            AddButton(developerToolsCard,
+            performanceCaptureButton = AddPerformanceButton("Performance.CaptureToggle",
                 RuntimePerformanceDiagnostics.CaptureEnabled ? "Stop Performance Log capture" : "Start Performance Log capture",
                 true, () =>
                 {
                     game.SetPerformanceCaptureEnabled(!RuntimePerformanceDiagnostics.CaptureEnabled);
-                    RebuildDeveloperToolsContent();
+                    performanceLogRefreshTimer = 0f;
+                    UpdatePerformanceControlLabels();
+                    UpdatePerformanceLogDisplay();
                 });
             AddText(developerToolsCard, "Performance Log", 17, Color.white, TextAnchor.UpperLeft);
             AddText(developerToolsCard,
@@ -6766,20 +7071,20 @@ namespace RatHabitat
                 " samples • lag episodes above " + GameConfig.PerformanceLagSpikeThresholdMs +
                 " ms; critical above " + GameConfig.PerformanceCriticalSpikeThresholdMs + " ms.",
                 12, new Color(0.7f, 0.78f, 0.74f), TextAnchor.UpperLeft);
-            AddButton(developerToolsCard, "Clear Performance Log", true, () =>
+            AddPerformanceButton("Performance.ClearLog", "Clear Performance Log", true, () =>
             {
                 RuntimePerformanceDiagnostics.ClearLog();
-                if (performanceLogStatus != null) performanceLogStatus.text = "Performance log cleared.";
                 performanceLogRefreshTimer = 0f;
+                UpdatePerformanceControlLabels();
                 UpdatePerformanceLogDisplay();
             });
-            AddButton(developerToolsCard,
+            performanceLogViewButtons[PerformanceLogView.LiveSummary] = AddPerformanceButton("Performance.View.LiveSummary",
                 (performanceLogView == PerformanceLogView.LiveSummary ? "✓ " : string.Empty) + "Show live summary",
                 true, () => SetPerformanceLogView(PerformanceLogView.LiveSummary));
-            AddButton(developerToolsCard,
+            performanceLogViewButtons[PerformanceLogView.RecentSamples] = AddPerformanceButton("Performance.View.RecentSamples",
                 (performanceLogView == PerformanceLogView.RecentSamples ? "✓ " : string.Empty) + "Show recent samples",
                 true, () => SetPerformanceLogView(PerformanceLogView.RecentSamples));
-            AddButton(developerToolsCard,
+            performanceLogViewButtons[PerformanceLogView.SpikesOnly] = AddPerformanceButton("Performance.View.SpikesOnly",
                 (performanceLogView == PerformanceLogView.SpikesOnly ? "✓ " : string.Empty) + "Show lag spikes only",
                 true, () => SetPerformanceLogView(PerformanceLogView.SpikesOnly));
             performanceLogDisplay = AddText(developerToolsCard, "Capture running • waiting for the first sample.",
@@ -6789,44 +7094,47 @@ namespace RatHabitat
                 RuntimePerformanceDiagnostics.SampleCount + " samples • " + RuntimePerformanceDiagnostics.SpikeCount + " lag episodes",
                 11, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
             performanceLogCountText.gameObject.name = "Performance Log Counts";
-            performanceLogStatus = AddText(developerToolsCard, string.Empty, 11,
+            performanceLogStatus = AddText(developerToolsCard, RuntimePerformanceDiagnostics.BuildStatusText(), 11,
                 new Color(0.7f, 0.78f, 0.74f), TextAnchor.UpperLeft);
             performanceLogStatus.gameObject.name = "Performance Log Action Status";
-            AddButton(developerToolsCard, "Copy performance log (.txt)", true, () =>
+            AddPerformanceButton("Performance.CopyLog", "Copy performance log (.txt)", true, () =>
             {
-                bool copied = RuntimePerformanceDiagnostics.TryCopyText(RuntimePerformanceDiagnostics.BuildExportText(false));
-                if (performanceLogStatus != null) performanceLogStatus.text = copied ? "Performance log copied to clipboard." : "Clipboard copy is unavailable in this player.";
+                RuntimePerformanceDiagnostics.TryCopyText(RuntimePerformanceDiagnostics.BuildExportText(false), gameObject.name);
+                performanceLogRefreshTimer = 0f;
+                UpdatePerformanceLogDisplay();
             });
-            bool webGlDownloadAvailable = false;
-#if UNITY_WEBGL && !UNITY_EDITOR
-            webGlDownloadAvailable = true;
-#endif
-            AddButton(developerToolsCard, "Download performance log (.csv)", webGlDownloadAvailable, () =>
+            AddPerformanceButton("Performance.DownloadLog", "Download performance log (.csv)", true, () =>
             {
-                bool downloaded = RuntimePerformanceDiagnostics.TryDownloadLog(true);
-                if (performanceLogStatus != null) performanceLogStatus.text = downloaded ? "CSV download started." : "CSV download is unavailable in this player.";
+                RuntimePerformanceDiagnostics.TryDownloadLog(true);
+                performanceLogRefreshTimer = 0f;
+                UpdatePerformanceLogDisplay();
             });
-            AddButton(developerToolsCard, "Copy diagnostics", true, () =>
+            AddPerformanceButton("Performance.CopyDiagnostics", "Copy diagnostics", true, () =>
             {
-                bool copied = RuntimePerformanceDiagnostics.TryCopyText(RuntimePerformanceDiagnostics.BuildCompactDiagnostics());
-                if (performanceLogStatus != null) performanceLogStatus.text = copied ? "Summary and recent spikes copied." : "Clipboard copy is unavailable in this player.";
+                RuntimePerformanceDiagnostics.TryCopyText(RuntimePerformanceDiagnostics.BuildCompactDiagnostics(), gameObject.name);
+                performanceLogRefreshTimer = 0f;
+                UpdatePerformanceLogDisplay();
             });
+            AddPerformanceManualCopyField();
             performanceLogRefreshTimer = 0f;
+            UpdatePerformanceControlLabels();
             UpdatePerformanceLogDisplay();
-            AddText(developerToolsCard, "A/B switches combine independently • current: " + RuntimePerformanceDiagnostics.IsolationMode, 13, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
-            AddButton(developerToolsCard, "A/B baseline • restore all systems", true,
+            performanceIsolationStatusText = AddText(developerToolsCard,
+                "A/B switches combine independently • current: " + RuntimePerformanceDiagnostics.IsolationMode,
+                13, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
+            performanceIsolationBaselineButton = AddPerformanceButton("Performance.AB.Baseline", "A/B baseline • restore all systems", true,
                 () => SetPerformanceIsolationMode(PerformanceIsolationMode.Normal));
-            AddButton(developerToolsCard, IsolationToggleLabel(PerformanceIsolationMode.RatBehavior, "rat AI/movement", "skipped", "running"), true,
+            performanceIsolationButtons[PerformanceIsolationMode.RatBehavior] = AddPerformanceButton("Performance.AB.RatBehavior", IsolationToggleLabel(PerformanceIsolationMode.RatBehavior, "rat AI/movement", "skipped", "running"), true,
                 () => TogglePerformanceIsolationMode(PerformanceIsolationMode.RatBehavior));
-            AddButton(developerToolsCard, IsolationToggleLabel(PerformanceIsolationMode.RatAnimation, "rat/pinkie animators", "frozen", "running"), true,
+            performanceIsolationButtons[PerformanceIsolationMode.RatAnimation] = AddPerformanceButton("Performance.AB.RatAnimation", IsolationToggleLabel(PerformanceIsolationMode.RatAnimation, "rat/pinkie animators", "frozen", "running"), true,
                 () => TogglePerformanceIsolationMode(PerformanceIsolationMode.RatAnimation));
-            AddButton(developerToolsCard, IsolationToggleLabel(PerformanceIsolationMode.RatRendering, "rat visuals", "hidden", "visible"), true,
+            performanceIsolationButtons[PerformanceIsolationMode.RatRendering] = AddPerformanceButton("Performance.AB.RatRendering", IsolationToggleLabel(PerformanceIsolationMode.RatRendering, "rat visuals", "hidden", "visible"), true,
                 () => TogglePerformanceIsolationMode(PerformanceIsolationMode.RatRendering));
-            AddButton(developerToolsCard, IsolationToggleLabel(PerformanceIsolationMode.RatShadows, "rat shadows", "off", "on"), true,
+            performanceIsolationButtons[PerformanceIsolationMode.RatShadows] = AddPerformanceButton("Performance.AB.RatShadows", IsolationToggleLabel(PerformanceIsolationMode.RatShadows, "rat shadows", "off", "on"), true,
                 () => TogglePerformanceIsolationMode(PerformanceIsolationMode.RatShadows));
-            AddButton(developerToolsCard, IsolationToggleLabel(PerformanceIsolationMode.AutomaticUiRefresh, "automatic UI refresh", "skipped", "normal"), true,
+            performanceIsolationButtons[PerformanceIsolationMode.AutomaticUiRefresh] = AddPerformanceButton("Performance.AB.UiRefresh", IsolationToggleLabel(PerformanceIsolationMode.AutomaticUiRefresh, "automatic UI refresh", "skipped", "normal"), true,
                 () => TogglePerformanceIsolationMode(PerformanceIsolationMode.AutomaticUiRefresh));
-            AddButton(developerToolsCard, IsolationToggleLabel(PerformanceIsolationMode.ColonyMaintenance, "colony maintenance", "skipped", "normal"), true,
+            performanceIsolationButtons[PerformanceIsolationMode.ColonyMaintenance] = AddPerformanceButton("Performance.AB.ColonyMaintenance", IsolationToggleLabel(PerformanceIsolationMode.ColonyMaintenance, "colony maintenance", "skipped", "normal"), true,
                 () => TogglePerformanceIsolationMode(PerformanceIsolationMode.ColonyMaintenance));
 #endif
             AddText(developerToolsCard, "Visual seam isolation", 17, Color.white, TextAnchor.UpperLeft);
@@ -6904,15 +7212,23 @@ namespace RatHabitat
                 AddButtonTo(developerToolsCard, "Delete Selected Rat", true, game.RequestDeleteSelectedRat, new Color(0.55f, 0.18f, 0.16f), 48f);
             }
 
+            AddText(developerToolsCard, "Destructive colony reset • separate from performance diagnostics", 17,
+                new Color(1f, 0.48f, 0.34f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
             if (game.ResetConfirmationPending)
             {
                 AddText(developerToolsCard, "This permanently clears the local save and rebuilds the default colony, habitat, clock, founders, and UI state.", 13, new Color(1f, 0.52f, 0.36f), TextAnchor.UpperLeft);
-                AddButtonTo(developerToolsCard, "CONFIRM FULL RESET", true, game.ConfirmFullReset, new Color(0.68f, 0.12f, 0.1f), 50f);
-                AddButtonTo(developerToolsCard, "Cancel full reset", true, game.CancelFullReset, new Color(0.22f, 0.31f, 0.4f), 46f);
+                Button confirmReset = AddButtonTo(developerToolsCard, "CONFIRM DESTRUCTIVE RESET", true,
+                    game.ConfirmFullReset, new Color(0.68f, 0.12f, 0.1f), 50f);
+                confirmReset.gameObject.name = "Developer.DestructiveReset.Confirm";
+                Button cancelReset = AddButtonTo(developerToolsCard, "Cancel full reset", true,
+                    game.CancelFullReset, new Color(0.22f, 0.31f, 0.4f), 46f);
+                cancelReset.gameObject.name = "Developer.DestructiveReset.Cancel";
             }
             else
             {
-                AddButtonTo(developerToolsCard, "Fully Reset Game", true, game.RequestFullReset, new Color(0.68f, 0.12f, 0.1f), 50f);
+                Button resetButton = AddButtonTo(developerToolsCard, "REQUEST DESTRUCTIVE COLONY RESET", true,
+                    game.RequestFullReset, new Color(0.68f, 0.12f, 0.1f), 50f);
+                resetButton.gameObject.name = "Developer.DestructiveReset.Request";
             }
             AddButtonTo(developerToolsCard, "Close Developer Tools", true, CloseDeveloperTools, new Color(0.14f, 0.22f, 0.25f), 46f);
         }
@@ -6932,13 +7248,13 @@ namespace RatHabitat
         private void SetPerformanceIsolationMode(PerformanceIsolationMode mode)
         {
             game.SetPerformanceIsolation(mode);
-            RebuildDeveloperToolsContent();
+            UpdatePerformanceControlLabels();
         }
 
         private void TogglePerformanceIsolationMode(PerformanceIsolationMode mode)
         {
             game.TogglePerformanceIsolation(mode);
-            RebuildDeveloperToolsContent();
+            UpdatePerformanceControlLabels();
         }
 
         private static string IsolationToggleLabel(PerformanceIsolationMode mode, string label,

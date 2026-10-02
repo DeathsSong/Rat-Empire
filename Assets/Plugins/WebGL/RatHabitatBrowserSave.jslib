@@ -530,9 +530,12 @@ mergeInto(LibraryManager.library, {
         }
     },
 
-    RatPerformanceCopyText: function (textPtr) {
+    RatPerformanceCopyText: function (textPtr, receiverPtr, callbackMethodPtr, actionIdPtr) {
         try {
             var text = UTF8ToString(textPtr);
+            var receiver = UTF8ToString(receiverPtr);
+            var callbackMethod = UTF8ToString(callbackMethodPtr);
+            var actionId = UTF8ToString(actionIdPtr);
             var field = document.createElement("textarea");
             field.value = text;
             field.setAttribute("readonly", "readonly");
@@ -548,8 +551,12 @@ mergeInto(LibraryManager.library, {
             document.body.removeChild(field);
             if (copied) return 1;
             if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-                navigator.clipboard.writeText(text).catch(function () { });
-                return 1;
+                navigator.clipboard.writeText(text).then(function () {
+                    if (receiver && callbackMethod) SendMessage(receiver, callbackMethod, actionId + ":copied");
+                }).catch(function () {
+                    if (receiver && callbackMethod) SendMessage(receiver, callbackMethod, actionId + ":blocked");
+                });
+                return 2;
             }
         } catch (error) {
         }
@@ -571,10 +578,28 @@ mergeInto(LibraryManager.library, {
             link.style.display = "none";
             document.body.appendChild(link);
             link.click();
+            return 1;
         } catch (error) {
+            // Keep a data-URL path for mobile browsers that reject Blob URLs.
+            try {
+                var fallbackFileName = UTF8ToString(fileNamePtr);
+                var fallbackContent = UTF8ToString(contentPtr);
+                var fallbackType = UTF8ToString(mimeTypePtr) || "text/plain;charset=utf-8";
+                var fallbackLink = document.createElement("a");
+                fallbackLink.href = "data:" + fallbackType + ";base64," + btoa(unescape(encodeURIComponent(fallbackContent)));
+                fallbackLink.download = fallbackFileName;
+                fallbackLink.style.display = "none";
+                document.body.appendChild(fallbackLink);
+                fallbackLink.click();
+                document.body.removeChild(fallbackLink);
+                return 1;
+            } catch (fallbackError) {
+                return 0;
+            }
         } finally {
             if (link && link.parentNode) link.parentNode.removeChild(link);
             if (objectUrl) window.setTimeout(function () { window.URL.revokeObjectURL(objectUrl); }, 1000);
         }
+        return 0;
     }
 });

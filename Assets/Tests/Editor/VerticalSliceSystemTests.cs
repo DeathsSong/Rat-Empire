@@ -1,6 +1,7 @@
 #if UNITY_EDITOR
 using System;
 using System.Collections.Generic;
+using System.IO;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEngine;
@@ -79,6 +80,89 @@ namespace RatHabitat.Tests
             {
                 RuntimePerformanceDiagnostics.ClearLog();
                 RuntimePerformanceDiagnostics.SetCaptureEnabled(wasCapturing);
+            }
+        }
+
+        [Test]
+        public void PerformanceControlsOnlyChangeDiagnosticsAndNeverTouchColonyOrLocalSave()
+        {
+            const string browserSaveKey = "rat-habitat-save-v1";
+            bool hadSaveKey = PlayerPrefs.HasKey(browserSaveKey);
+            string previousSaveKeyValue = PlayerPrefs.GetString(browserSaveKey, string.Empty);
+            string previousClipboard = GUIUtility.systemCopyBuffer;
+            bool hadSaveFile = File.Exists(SaveSystem.SavePath);
+            string previousSaveFile = hadSaveFile ? File.ReadAllText(SaveSystem.SavePath) : string.Empty;
+            ColonySaveData colony = ColonyFactory.CreateNew(GameConfig.NowMs());
+            string colonyJsonBefore = JsonUtility.ToJson(colony, true);
+            bool previousCapture = RuntimePerformanceDiagnostics.CaptureEnabled;
+            bool previousHud = RuntimePerformanceDiagnostics.HudVisible;
+            PerformanceIsolationMode previousIsolation = RuntimePerformanceDiagnostics.IsolationMode;
+
+            try
+            {
+                // Sentinel the stable browser-save key in the Editor prefs
+                // namespace so any accidental reset/write is observable.
+                PlayerPrefs.SetString(browserSaveKey, "performance-controls-must-not-touch-this");
+                RuntimePerformanceDiagnostics.ClearLog();
+                RuntimePerformanceDiagnostics.SetCaptureEnabled(false); // Stop
+                Assert.IsFalse(RuntimePerformanceDiagnostics.CaptureEnabled);
+                RuntimePerformanceDiagnostics.SetCaptureEnabled(true); // Start
+                Assert.IsTrue(RuntimePerformanceDiagnostics.CaptureEnabled);
+
+                RuntimePerformanceDiagnostics.RecordSample(new PerformanceLogSample
+                {
+                    UtcTicks = DateTime.UtcNow.Ticks,
+                    GameTimeMs = GameConfig.StartGameTimeMs,
+                    Speed = 1,
+                    Fps = 60f,
+                    AverageFrameMs = 16.7f,
+                    WorstFrameMs = 23f,
+                    CpuMainThreadMs = 5f,
+                    GpuMs = -1f,
+                    ActiveRatCount = 2,
+                    CurrentPanel = "Developer Tools",
+                });
+                Assert.AreEqual(1, RuntimePerformanceDiagnostics.SampleCount);
+
+                RuntimePerformanceDiagnostics.SetHudVisible(!previousHud);
+                RuntimePerformanceDiagnostics.SetIsolationMode(PerformanceIsolationMode.RatRendering);
+                string copiedText = RuntimePerformanceDiagnostics.BuildExportText(false);
+                bool copyReported = RuntimePerformanceDiagnostics.TryCopyText(copiedText);
+                Assert.IsTrue(copyReported);
+                Assert.AreEqual(copiedText, RuntimePerformanceDiagnostics.ManualExportText);
+                StringAssert.Contains("Copied to clipboard", RuntimePerformanceDiagnostics.LastExportActionStatus);
+                RuntimePerformanceDiagnostics.TryDownloadLog(true);
+                Assert.IsNotEmpty(RuntimePerformanceDiagnostics.ManualExportText);
+                StringAssert.Contains("manual copy text", RuntimePerformanceDiagnostics.LastExportActionStatus);
+
+                // Clear is explicitly allowed to clear only diagnostics and
+                // must re-arm capture for the next sample window.
+                RuntimePerformanceDiagnostics.SetCaptureEnabled(false);
+                RuntimePerformanceDiagnostics.ClearLog();
+                Assert.IsTrue(RuntimePerformanceDiagnostics.CaptureEnabled);
+                Assert.AreEqual(0, RuntimePerformanceDiagnostics.SampleCount);
+                Assert.AreEqual(0, RuntimePerformanceDiagnostics.SpikeCount);
+                StringAssert.Contains("Capture ON — waiting for the next sample.", RuntimePerformanceDiagnostics.BuildLiveSummary());
+                StringAssert.Contains("0 samples • 0 lag episodes", RuntimePerformanceDiagnostics.BuildStatusText());
+
+                Assert.AreEqual(colonyJsonBefore, JsonUtility.ToJson(colony, true),
+                    "Performance controls must not modify any colony record or simulation state.");
+                Assert.AreEqual("performance-controls-must-not-touch-this", PlayerPrefs.GetString(browserSaveKey),
+                    "Performance controls must never write or delete the local save key.");
+                Assert.AreEqual(hadSaveFile, File.Exists(SaveSystem.SavePath));
+                if (hadSaveFile)
+                    Assert.AreEqual(previousSaveFile, File.ReadAllText(SaveSystem.SavePath),
+                        "Performance controls must leave the existing persistent save file byte-for-byte unchanged.");
+            }
+            finally
+            {
+                RuntimePerformanceDiagnostics.ClearLog();
+                RuntimePerformanceDiagnostics.SetCaptureEnabled(previousCapture);
+                RuntimePerformanceDiagnostics.SetHudVisible(previousHud);
+                RuntimePerformanceDiagnostics.SetIsolationMode(previousIsolation);
+                GUIUtility.systemCopyBuffer = previousClipboard;
+                if (hadSaveKey) PlayerPrefs.SetString(browserSaveKey, previousSaveKeyValue);
+                else PlayerPrefs.DeleteKey(browserSaveKey);
             }
         }
 
@@ -220,6 +304,85 @@ namespace RatHabitat.Tests
             Assert.AreEqual(0, visibleFavorites.Count);
             Assert.IsTrue(RatFavoriteSystem.IsVisibleInFavorites(first, false),
                 "Leaving Favorites must return ordinary roster rows even when there are no favorites.");
+        }
+
+        [Test]
+        public void StoreSellFiltersRespectEligibilitySexAndFavoriteStatus()
+        {
+            ColonySaveData save = ColonyFactory.CreateNew(1000000L);
+            Assert.GreaterOrEqual(save.rats.Count, 2);
+            RatData female = save.rats[0];
+            RatData male = save.rats[1];
+            female.sex = RatSex.Female;
+            male.sex = RatSex.Male;
+            MakeEligibleAdultForSale(female);
+            MakeEligibleAdultForSale(male);
+            female.isFavorite = true;
+
+            RatData ineligiblePinkie = ColonyFactory.CreateRat(
+                "sell-filter-pinkie", "Pip", RatSex.Female, 1000000L, 1,
+                female.genotype.Clone(), new TraitData(3f, 5f, 4f), RatStage.Pinkie);
+            ineligiblePinkie.isFavorite = true;
+            ineligiblePinkie.ageDays = 0f;
+            save.rats.Add(ineligiblePinkie);
+
+            Assert.AreEqual(2, StoreSystem.GetSellableRats(
+                save, 1000000L, StoreSellFilter.All).Count);
+            List<RatData> males = StoreSystem.GetSellableRats(
+                save, 1000000L, StoreSellFilter.Males);
+            Assert.AreEqual(1, males.Count);
+            Assert.AreSame(male, males[0]);
+
+            List<RatData> females = StoreSystem.GetSellableRats(
+                save, 1000000L, StoreSellFilter.Females);
+            Assert.AreEqual(1, females.Count);
+            Assert.AreSame(female, females[0]);
+
+            List<RatData> favorites = StoreSystem.GetSellableRats(
+                save, 1000000L, StoreSellFilter.Favorites);
+            Assert.AreEqual(1, favorites.Count,
+                "Favorites filtering must still exclude a favorite pinkie that sale rules reject.");
+            Assert.AreSame(female, favorites[0]);
+            Assert.IsFalse(StoreSystem.CanSellRat(save, ineligiblePinkie, 1000000L));
+        }
+
+        [Test]
+        public void StoreSellFiltersReturnEmptyResultsAndResetToAllOnOpen()
+        {
+            ColonySaveData save = ColonyFactory.CreateNew(1000000L);
+            for (int index = 0; index < save.rats.Count; index++)
+            {
+                RatData rat = save.rats[index];
+                rat.stage = RatStage.Pinkie;
+                rat.ageDays = 0f;
+                rat.isFavorite = false;
+            }
+
+            Assert.AreEqual(0, StoreSystem.GetSellableRats(
+                save, 1000000L, StoreSellFilter.All).Count);
+            Assert.AreEqual(0, StoreSystem.GetSellableRats(
+                save, 1000000L, StoreSellFilter.Males).Count);
+            Assert.AreEqual(0, StoreSystem.GetSellableRats(
+                save, 1000000L, StoreSellFilter.Females).Count);
+            Assert.AreEqual(0, StoreSystem.GetSellableRats(
+                save, 1000000L, StoreSellFilter.Favorites).Count);
+
+            var state = new StoreSellFilterState();
+            Assert.AreEqual(StoreSellFilter.All, state.Selected);
+            state.Select(StoreSellFilter.Favorites);
+            Assert.AreEqual(StoreSellFilter.Favorites, state.Selected);
+            state.ResetForSellPanelOpen();
+            Assert.AreEqual(StoreSellFilter.All, state.Selected,
+                "Opening Sell again must return to All regardless of the previous selection.");
+            state.Select((StoreSellFilter)999);
+            Assert.AreEqual(StoreSellFilter.All, state.Selected,
+                "An invalid filter value safely falls back to All.");
+        }
+
+        private static void MakeEligibleAdultForSale(RatData rat)
+        {
+            rat.stage = RatStage.Adult;
+            rat.ageDays = Mathf.Max(GameConfig.PupSaleMinimumAgeDays + 1f, 60f);
         }
 
         [Test]
