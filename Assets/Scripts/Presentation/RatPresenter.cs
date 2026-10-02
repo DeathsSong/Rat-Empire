@@ -243,6 +243,10 @@ namespace RatHabitat
 
         private void LateUpdateCore()
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.RatPresentation))
+                return;
+#endif
             // Animator deformation and code-driven movement both occur before
             // this point in the frame. Keep the stable selection surfaces
             // aligned with the currently visible mesh instead of leaving a

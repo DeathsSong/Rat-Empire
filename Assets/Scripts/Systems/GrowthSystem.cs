@@ -24,6 +24,13 @@ namespace RatHabitat
         private static int lastCompressedVisualActionCount;
         private static long totalSimulationSteps;
         private static int behaviorParticipantCount = 1;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        private static readonly HashSet<string> behaviorParticipantsThisFrame = new HashSet<string>();
+        private static int lastBehaviorUpdateCount;
+        private static long totalBehaviorUpdateCount;
+        private static int lastRepeatedBehaviorUpdateCount;
+        private static long totalRepeatedBehaviorUpdateCount;
+#endif
 
         // A high-speed frame can represent many in-game seconds. Subdivide
         // behavior updates into bounded chunks so state transitions remain
@@ -33,7 +40,11 @@ namespace RatHabitat
         // Bound catch-up work across the entire colony, not independently for
         // every rat. Every rat still receives a behavior update each rendered
         // frame; only excess intermediate decision steps are compressed.
-        public const int MaximumTotalBehaviorStepsPerFrame = 240;
+        public const int MaximumTotalBehaviorStepsPerFrame = 64;
+        // Keep only a short visual behavior backlog after a long browser stall.
+        // Biological deadlines and the authoritative game clock are timestamp
+        // driven elsewhere; older missed movement/idle steps are compressed.
+        public const float MaximumBehaviorBacklogSeconds = 12f;
         public const float MaximumVisualMovementUnitsPerFrame = 1.25f;
         public const float MaximumFastRouteMovementUnitsPerFrame = 8f;
         public const float MaximumAnimationPlaybackMultiplier = 12f;
@@ -58,6 +69,12 @@ namespace RatHabitat
         public static int LastSimulationStepCount { get { return lastSimulationStepCount; } }
         public static int LastCompressedVisualActionCount { get { return lastCompressedVisualActionCount; } }
         public static long TotalSimulationSteps { get { return totalSimulationSteps; } }
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        public static int LastBehaviorUpdateCount { get { return lastBehaviorUpdateCount; } }
+        public static long TotalBehaviorUpdateCount { get { return totalBehaviorUpdateCount; } }
+        public static int LastRepeatedBehaviorUpdateCount { get { return lastRepeatedBehaviorUpdateCount; } }
+        public static long TotalRepeatedBehaviorUpdateCount { get { return totalRepeatedBehaviorUpdateCount; } }
+#endif
 
         public static void SetBehaviorParticipantCount(int count)
         {
@@ -101,10 +118,20 @@ namespace RatHabitat
         /// unusually long, the excess is treated as compressed visual work
         /// rather than replayed as thousands of intermediate animations.
         /// </summary>
-        public static int BeginBehaviorUpdate(float simulationDeltaSeconds)
+        public static int BeginBehaviorUpdate(float simulationDeltaSeconds, string participantId = null)
         {
             EnsureDiagnosticsFrame();
             if (simulationDeltaSeconds <= 0f) return 0;
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            lastBehaviorUpdateCount++;
+            totalBehaviorUpdateCount++;
+            if (!string.IsNullOrEmpty(participantId) && !behaviorParticipantsThisFrame.Add(participantId))
+            {
+                lastRepeatedBehaviorUpdateCount++;
+                totalRepeatedBehaviorUpdateCount++;
+            }
+#endif
 
             float requestedFloat = Mathf.Ceil(simulationDeltaSeconds / MaximumBehaviorStepSeconds);
             int requested = requestedFloat >= int.MaxValue
@@ -127,12 +154,66 @@ namespace RatHabitat
             lastCompressedVisualActionCount += Mathf.Max(0, count);
         }
 
+        /// <summary>
+        /// Finds the next biologically meaningful age boundary without
+        /// running the full growth/phenotype pass. The scheduler uses this to
+        /// wake maintenance once when a stage or lifespan deadline is due,
+        /// instead of treating a stale threshold as due on every rendered
+        /// frame.
+        /// </summary>
+        public static long NextAgeBoundaryGameTime(ColonySaveData save, long gameTime)
+        {
+            if (save == null || save.rats == null || save.rats.Count == 0) return long.MaxValue;
+            long next = long.MaxValue;
+            for (int index = 0; index < save.rats.Count; index++)
+            {
+                RatData rat = save.rats[index];
+                if (rat == null || rat.removalDisposition != RatRemovalDisposition.None) continue;
+                float age = AgeDaysAt(rat, gameTime);
+                float threshold = float.MaxValue;
+                float maturity = rat.sexualMaturityDays > 0f
+                    ? rat.sexualMaturityDays
+                    : rat.sex == RatSex.Female ? GameConfig.FemaleSexualMaturityDays : GameConfig.MaleSexualMaturityDays;
+                if (GameConfig.PinkieStageDays > age) threshold = Mathf.Min(threshold, GameConfig.PinkieStageDays);
+                if (maturity > age) threshold = Mathf.Min(threshold, maturity);
+                if (GameConfig.MatureStartDays > age) threshold = Mathf.Min(threshold, GameConfig.MatureStartDays);
+                if (rat.breedingEndAgeDays > age) threshold = Mathf.Min(threshold, rat.breedingEndAgeDays);
+                if (rat.expectedLifespanDays > age && rat.expectedLifespanDays < threshold)
+                    threshold = rat.expectedLifespanDays;
+                if (threshold == float.MaxValue) continue;
+
+                // Developer-forced age overrides with no timestamp are
+                // intentionally static. Scheduling their anchor-relative
+                // threshold against Unix/game epoch zero would leave a due
+                // timestamp behind and run full colony maintenance each frame.
+                if (rat.developerGrowthOverride && rat.growthTimestamp <= 0L) continue;
+                long anchorTime = rat.developerGrowthOverride && rat.growthTimestamp > 0L
+                    ? rat.growthTimestamp
+                    : rat.birthTimestamp;
+                float anchorAge = rat.developerGrowthOverride ? rat.growthAnchorAgeDays : 0f;
+                long boundary = anchorTime + (long)Math.Ceiling(
+                    (double)(threshold - anchorAge) * GameConfig.GameDayMs);
+                // Never return a past/current deadline as "next". If float
+                // rounding placed the mathematical boundary behind the
+                // current timestamp, the already-run maintenance pass has
+                // handled it; retrying it every frame would be pathological.
+                if (boundary <= gameTime) continue;
+                if (boundary < next) next = boundary;
+            }
+            return next;
+        }
+
         private static void EnsureDiagnosticsFrame()
         {
             if (diagnosticsFrame == Time.frameCount) return;
             diagnosticsFrame = Time.frameCount;
             lastSimulationStepCount = 0;
             lastCompressedVisualActionCount = 0;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            lastBehaviorUpdateCount = 0;
+            lastRepeatedBehaviorUpdateCount = 0;
+            behaviorParticipantsThisFrame.Clear();
+#endif
         }
 
         // Timed behavior and movement share the same clock. Keep the older

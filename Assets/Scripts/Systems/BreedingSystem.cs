@@ -7,6 +7,17 @@ namespace RatHabitat
 {
     public static class BreedingSystem
     {
+        /// <summary>
+        /// Recovery timestamps are historical after the state has returned to
+        /// fertile. Only a rat still in Recovery should wake the full colony
+        /// maintenance pass at that timestamp.
+        /// </summary>
+        public static bool IsRecoveryTransitionDue(RatData rat, long gameTime)
+        {
+            return rat != null && rat.reproductiveState == ReproductiveState.Recovery &&
+                rat.recoveryUntil > 0L && rat.recoveryUntil <= gameTime;
+        }
+
         public struct ReproductiveStatus
         {
             public ReproductiveState state;

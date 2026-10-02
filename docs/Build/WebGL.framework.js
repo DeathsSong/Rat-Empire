@@ -1993,13 +1993,13 @@ var tempI64;
 // === Body ===
 
 var ASM_CONSTS = {
-  1877648: function() {return Module.webglContextAttributes.premultipliedAlpha;},  
- 1877709: function() {return Module.webglContextAttributes.preserveDrawingBuffer;},  
- 1877773: function() {return Module.webglContextAttributes.powerPreference;},  
- 1877831: function() {Module['emscripten_get_now_backup'] = performance.now;},  
- 1877886: function($0) {performance.now = function() { return $0; };},  
- 1877934: function($0) {performance.now = function() { return $0; };},  
- 1877982: function() {performance.now = Module['emscripten_get_now_backup'];}
+  1878928: function() {return Module.webglContextAttributes.premultipliedAlpha;},  
+ 1878989: function() {return Module.webglContextAttributes.preserveDrawingBuffer;},  
+ 1879053: function() {return Module.webglContextAttributes.powerPreference;},  
+ 1879111: function() {Module['emscripten_get_now_backup'] = performance.now;},  
+ 1879166: function($0) {performance.now = function() { return $0; };},  
+ 1879214: function($0) {performance.now = function() { return $0; };},  
+ 1879262: function() {performance.now = Module['emscripten_get_now_backup'];}
 };
 
 
@@ -5073,6 +5073,111 @@ var ASM_CONSTS = {
               if (objectUrl) window.setTimeout(function () { window.URL.revokeObjectURL(objectUrl); }, 1000);
           }
           return 0;
+      }
+
+  function _RatPerformanceStartBrowserTelemetryNative(targetPtr, callbackMethodPtr) {
+          try {
+              var previous = window.__ratEmpireBrowserPerformanceTelemetry;
+              if (previous && previous.stop) previous.stop();
+              var state = {
+                  active: true,
+                  target: UTF8ToString(targetPtr),
+                  callbackMethod: UTF8ToString(callbackMethodPtr),
+                  raf: 0,
+                  observer: null,
+                  lastFrameNow: -1,
+                  windowStartedAt: performance.now(),
+                  frameCount: 0,
+                  frameGapTotal: 0,
+                  frameGapMax: 0,
+                  longTaskCount: 0,
+                  longTaskTotal: 0,
+                  longTaskMax: 0,
+                  longTaskSupported: false,
+                  hiddenObserved: document.visibilityState !== "visible",
+                  unfocusedObserved: !document.hasFocus(),
+                  onVisibilityChange: null,
+                  onBlur: null,
+                  stop: null
+              };
+              state.stop = function () {
+                  state.active = false;
+                  if (state.raf) cancelAnimationFrame(state.raf);
+                  if (state.observer) state.observer.disconnect();
+                  if (state.onVisibilityChange)
+                      document.removeEventListener("visibilitychange", state.onVisibilityChange, false);
+                  if (state.onBlur) window.removeEventListener("blur", state.onBlur, false);
+              };
+              state.onVisibilityChange = function () {
+                  if (document.visibilityState !== "visible") state.hiddenObserved = true;
+              };
+              state.onBlur = function () { state.unfocusedObserved = true; };
+              document.addEventListener("visibilitychange", state.onVisibilityChange, false);
+              window.addEventListener("blur", state.onBlur, false);
+              if (typeof PerformanceObserver !== "undefined" &&
+                  PerformanceObserver.supportedEntryTypes &&
+                  PerformanceObserver.supportedEntryTypes.indexOf("longtask") !== -1) {
+                  state.longTaskSupported = true;
+                  state.observer = new PerformanceObserver(function (list) {
+                      var entries = list.getEntries();
+                      for (var i = 0; i < entries.length; i++) {
+                          state.longTaskCount++;
+                          state.longTaskTotal += entries[i].duration;
+                          state.longTaskMax = Math.max(state.longTaskMax, entries[i].duration);
+                      }
+                  });
+                  state.observer.observe({ entryTypes: ["longtask"] });
+              }
+              state.tick = function () {
+                  if (!state.active) return;
+                  var now = performance.now();
+                  if (state.lastFrameNow >= 0) {
+                      var gap = Math.max(0, now - state.lastFrameNow);
+                      state.frameCount++;
+                      state.frameGapTotal += gap;
+                      state.frameGapMax = Math.max(state.frameGapMax, gap);
+                  }
+                  state.lastFrameNow = now;
+                  if (now - state.windowStartedAt >= 1000) {
+                      var longTotal = state.longTaskSupported ? state.longTaskTotal : -1;
+                      var longMax = state.longTaskSupported ? state.longTaskMax : -1;
+                      var payload = [
+                          state.frameCount > 0 ? (state.frameGapTotal / state.frameCount).toFixed(2) : "-1",
+                          state.frameCount > 0 ? state.frameGapMax.toFixed(2) : "-1",
+                          String(state.frameCount),
+                          String(state.longTaskCount),
+                          longTotal.toFixed(2),
+                          longMax.toFixed(2),
+                          document.visibilityState === "visible" ? "1" : "0",
+                          document.hasFocus() ? "1" : "0",
+                          state.longTaskSupported ? "1" : "0",
+                          state.hiddenObserved ? "1" : "0",
+                          state.unfocusedObserved ? "1" : "0"
+                      ].join(",");
+                      if (state.target && state.callbackMethod)
+                          SendMessage(state.target, state.callbackMethod, payload);
+                      state.windowStartedAt = now;
+                      state.frameCount = 0;
+                      state.frameGapTotal = 0;
+                      state.frameGapMax = 0;
+                      state.longTaskCount = 0;
+                      state.longTaskTotal = 0;
+                      state.longTaskMax = 0;
+                      state.hiddenObserved = document.visibilityState !== "visible";
+                      state.unfocusedObserved = !document.hasFocus();
+                  }
+                  state.raf = requestAnimationFrame(state.tick);
+              };
+              window.__ratEmpireBrowserPerformanceTelemetry = state;
+              state.raf = requestAnimationFrame(state.tick);
+          } catch (error) {
+          }
+      }
+
+  function _RatPerformanceStopBrowserTelemetryNative() {
+          var state = window.__ratEmpireBrowserPerformanceTelemetry;
+          if (state && state.stop) state.stop();
+          window.__ratEmpireBrowserPerformanceTelemetry = null;
       }
 
   function ___assert_fail(condition, filename, line, func) {
@@ -15724,6 +15829,8 @@ var asmLibraryArg = {
   "RatHabitatBrowserWrite": _RatHabitatBrowserWrite,
   "RatPerformanceCopyText": _RatPerformanceCopyText,
   "RatPerformanceDownloadText": _RatPerformanceDownloadText,
+  "RatPerformanceStartBrowserTelemetryNative": _RatPerformanceStartBrowserTelemetryNative,
+  "RatPerformanceStopBrowserTelemetryNative": _RatPerformanceStopBrowserTelemetryNative,
   "__assert_fail": ___assert_fail,
   "__cxa_allocate_exception": ___cxa_allocate_exception,
   "__cxa_begin_catch": ___cxa_begin_catch,
@@ -16387,6 +16494,9 @@ var dynCall_ffi = Module["dynCall_ffi"] = createExportWrapper("dynCall_ffi");
 
 /** @type {function(...*):?} */
 var dynCall_vifffi = Module["dynCall_vifffi"] = createExportWrapper("dynCall_vifffi");
+
+/** @type {function(...*):?} */
+var dynCall_vffiiffiiiiii = Module["dynCall_vffiiffiiiiii"] = createExportWrapper("dynCall_vffiiffiiiiii");
 
 /** @type {function(...*):?} */
 var dynCall_vfjiffjiiiiiiiiiifffii = Module["dynCall_vfjiffjiiiiiiiiiifffii"] = createExportWrapper("dynCall_vfjiffjiiiiiiiiiifffii");

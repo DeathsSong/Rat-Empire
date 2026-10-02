@@ -123,6 +123,7 @@ namespace RatHabitat
         private bool diagnosticsHavePreviousPosition;
         private float lastActualWorldMovementSpeed;
         private float spacingTimer;
+        private float pendingBehaviorTimeSeconds;
 
         private const float MinimumWalkSpeed = 0.55f;
         private const float MaximumWalkSpeed = 0.92f;
@@ -692,6 +693,15 @@ namespace RatHabitat
         private void UpdateCore()
         {
             if (!configured || rat == null || habitat == null) return;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            // This isolation switch is an A/B experiment, so do not accumulate
+            // a visual behavior backlog while the subsystem is disabled.
+            if (RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.RatBehavior))
+            {
+                pendingBehaviorTimeSeconds = 0f;
+                return;
+            }
+#endif
             if (!animatorLookupAttempted || animator == null)
             {
                 animator = GetComponentInChildren<Animator>(true);
@@ -701,19 +711,36 @@ namespace RatHabitat
             }
 
             float deltaTime = GrowthSystem.SimulationBehaviorDeltaSeconds(Time.unscaledDeltaTime);
-            int simulationSteps = GrowthSystem.BeginBehaviorUpdate(deltaTime);
-            float stepDeltaTime = simulationSteps <= 0 ? 0f : deltaTime / simulationSteps;
+            if (deltaTime <= 0f)
+            {
+                pendingBehaviorTimeSeconds = 0f;
+            }
+            else
+            {
+                float accumulated = pendingBehaviorTimeSeconds + deltaTime;
+                if (accumulated > GrowthSystem.MaximumBehaviorBacklogSeconds)
+                {
+                    int compressedSteps = Mathf.CeilToInt(
+                        (accumulated - GrowthSystem.MaximumBehaviorBacklogSeconds) /
+                        GrowthSystem.MaximumBehaviorStepSeconds);
+                    GrowthSystem.RecordCompressedVisualAction(compressedSteps);
+                    accumulated = GrowthSystem.MaximumBehaviorBacklogSeconds;
+                }
+                pendingBehaviorTimeSeconds = accumulated;
+            }
+
+            int simulationSteps = GrowthSystem.BeginBehaviorUpdate(pendingBehaviorTimeSeconds, rat.id);
+            float processedDeltaTime = simulationSteps <= 0
+                ? 0f
+                : Mathf.Min(pendingBehaviorTimeSeconds,
+                    simulationSteps * GrowthSystem.MaximumBehaviorStepSeconds);
+            pendingBehaviorTimeSeconds = Mathf.Max(0f, pendingBehaviorTimeSeconds - processedDeltaTime);
+            float stepDeltaTime = simulationSteps <= 0 ? 0f : processedDeltaTime / simulationSteps;
             float visualMovementBudget = pairingApproachActive || birthApproachActive || nursingInteractionActive ||
                 nursingCareRestActive || nursingCareMovementActive
                 ? GrowthSystem.MaximumFastRouteMovementUnitsPerFrame
                 : GrowthSystem.MaximumVisualMovementUnitsPerFrame;
             ApplySimulationAnimationSpeed();
-
-            // A/B-only diagnostic: leaves the clock and all other systems
-            // untouched while suppressing this rat's decision/movement loop.
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-            if (RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.RatBehavior)) return;
-#endif
 
             if (state == RatBehaviorState.Dying)
             {

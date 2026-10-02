@@ -76,9 +76,13 @@ namespace RatHabitat
         private const float AmbientActivityPollIntervalSeconds = 0.25f;
         private const float AutosaveIntervalSeconds = 5f;
         private long nextColonyMaintenanceGameTime;
+        private long nextAgeTransitionGameTime = long.MaxValue;
         private long nextNursingTickGameTime = long.MaxValue;
         private bool colonyMaintenanceInitialized;
+        private bool ageTransitionScheduleInitialized;
         private bool nursingScheduleInitialized;
+        private bool performanceSimulationPauseActive;
+        private long performanceSimulationPauseStartedAt;
         private float ambientActivityPollTimer;
         private float wakeLockPollTimer;
         private int maintenancePassCount;
@@ -1657,7 +1661,7 @@ namespace RatHabitat
             {
                 foreach (RatData rat in Save.rats)
                 {
-                    if (rat != null && rat.recoveryUntil > 0L && rat.recoveryUntil <= gameTime)
+                    if (BreedingSystem.IsRecoveryTransitionDue(rat, gameTime))
                         return true;
                 }
             }
@@ -1733,12 +1737,43 @@ namespace RatHabitat
             bool newbornNamingPaused = HasPendingLitterNaming ||
                 (ui != null && ui.IsPendingLitterNamingOpen);
             bool modalPaused = welcomePaused || newbornNamingPaused;
-            GrowthSystem.SetSimulationPaused(modalPaused);
+            bool performanceSimulationPaused =
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.Simulation);
+#else
+                false;
+#endif
+            GrowthSystem.SetSimulationPaused(modalPaused || performanceSimulationPaused);
+            if (performanceSimulationPaused)
+            {
+                // Keep this A/B experiment entirely outside the colony save.
+                // Capture one transient real-time boundary, then discard any
+                // hidden-tab elapsed signal without touching Save.clock.
+                if (!performanceSimulationPauseActive)
+                {
+                    performanceSimulationPauseStartedAt = GameConfig.NowMs();
+                    performanceSimulationPauseActive = true;
+                }
+                SaveSystem.DiscardBrowserLifecycleElapsed();
+                return;
+            }
+            long simulationClockNow = GameConfig.NowMs();
+            bool resumedFromPerformancePause = performanceSimulationPauseActive;
+            if (resumedFromPerformancePause)
+            {
+                performanceSimulationPauseActive = false;
+                // Advance through the final active instant before the switch
+                // was enabled, but not through diagnostic pause time.
+                simulationClockNow = performanceSimulationPauseStartedAt;
+                performanceSimulationPauseStartedAt = 0L;
+                SaveSystem.DiscardBrowserLifecycleElapsed();
+            }
             // Browser visibility changes can suspend Unity's rendered loop.
             // Consume the guarded lifecycle signal before the normal frame
             // clock update so the same persisted timestamp advances the
             // colony once on resume, without replaying visual frames.
-            SaveSystem.ResumeFromBrowserLifecycle(Save, modalPaused);
+            if (!resumedFromPerformancePause)
+                SaveSystem.ResumeFromBrowserLifecycle(Save, modalPaused);
             if (modalPaused)
             {
                 // Keep the clock's real-time anchor at the current instant so
@@ -1752,8 +1787,8 @@ namespace RatHabitat
             long clockAgeSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.ClockAndAge);
 #endif
             BeginPerformanceSample("Rat Empire/Frame/Clock and Age");
-            GrowthSystem.AdvanceClock(Save, GameConfig.NowMs());
-            bool ageThresholdCrossed = GrowthSystem.RefreshRatAges(Save, GameTime);
+            GrowthSystem.AdvanceClock(Save, simulationClockNow);
+            GrowthSystem.RefreshRatAges(Save, GameTime);
             EndPerformanceSample();
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             RuntimePerformanceDiagnostics.End(PerformanceProbeArea.ClockAndAge, clockAgeSample);
@@ -1766,8 +1801,10 @@ namespace RatHabitat
             // as a full-colony scan on every rendered frame.
             frameSampleStartedAt = Time.realtimeSinceStartup;
             BeginPerformanceSample("Rat Empire/Frame/Movement and Pairing");
+            long pairingMovementSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.PairingMovement);
             UpdatePairingApproach();
             PruneGroupSelection();
+            RuntimePerformanceDiagnostics.End(PerformanceProbeArea.PairingMovement, pairingMovementSample);
             EndPerformanceSample();
             lastMovementFrameDurationMs = (Time.realtimeSinceStartup - frameSampleStartedAt) * 1000f;
 
@@ -1792,10 +1829,12 @@ namespace RatHabitat
 #endif
                 (!colonyMaintenanceInitialized ||
                 GameTime >= nextColonyMaintenanceGameTime ||
-                ageThresholdCrossed || IsTimedSimulationWorkDue());
+                !ageTransitionScheduleInitialized || GameTime >= nextAgeTransitionGameTime ||
+                IsTimedSimulationWorkDue());
             if (maintenanceDue)
             {
                 float maintenanceStartedAt = Time.realtimeSinceStartup;
+                long simulationMaintenanceSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.SimulationMaintenance);
                 BeginPerformanceSample("Rat Empire/Simulation Maintenance");
                 BeginPerformanceSample("Rat Empire/Simulation/Growth and Biology");
                 stageChanged = GrowthSystem.RefreshRatStages(Save);
@@ -1859,12 +1898,15 @@ namespace RatHabitat
                 nursingPassDue = !nursingScheduleInitialized || nextNursingTickGameTime <= GameTime || births > 0;
 
                 nextColonyMaintenanceGameTime = GameTime + ColonyMaintenanceIntervalGameMs;
+                nextAgeTransitionGameTime = GrowthSystem.NextAgeBoundaryGameTime(Save, GameTime);
+                ageTransitionScheduleInitialized = true;
                 colonyMaintenanceInitialized = true;
                 maintenancePassCount++;
                 lastMaintenanceDurationMs = (Time.realtimeSinceStartup - maintenanceStartedAt) * 1000f;
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
                 performanceMaintenanceWindowMs += lastMaintenanceDurationMs;
 #endif
+                RuntimePerformanceDiagnostics.End(PerformanceProbeArea.SimulationMaintenance, simulationMaintenanceSample);
                 EndPerformanceSample();
             }
 
@@ -1911,7 +1953,9 @@ namespace RatHabitat
             if (nursingPassDue)
             {
                 BeginPerformanceSample("Rat Empire/Simulation/Nursing");
+                long nursingSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.NursingUpdate);
                 nursingChanged = NursingSystem.Tick(Save, GameTime, rats);
+                RuntimePerformanceDiagnostics.End(PerformanceProbeArea.NursingUpdate, nursingSample);
                 ScheduleNextNursingTick();
                 EndPerformanceSample();
             }
@@ -1983,7 +2027,7 @@ namespace RatHabitat
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             RuntimePerformanceDiagnostics.SetIsolationMode(mode);
             if (rats != null) rats.ApplyPerformanceIsolationMode();
-            Debug.Log("[Performance Diagnostics] Isolation mode: " + mode + ". This mode is transient and does not modify the save.");
+            Debug.Log("[Performance Diagnostics] Isolation mode: " + mode + ". This mode is transient and does not write or reset the save.");
 #endif
         }
 
@@ -1993,7 +2037,7 @@ namespace RatHabitat
             RuntimePerformanceDiagnostics.ToggleIsolationMode(mode);
             if (rats != null) rats.ApplyPerformanceIsolationMode();
             Debug.Log("[Performance Diagnostics] Isolation modes: " + RuntimePerformanceDiagnostics.IsolationMode +
-                ". This mode is transient and does not modify the save.");
+                ". This mode is transient and does not write or reset the save.");
 #endif
         }
 

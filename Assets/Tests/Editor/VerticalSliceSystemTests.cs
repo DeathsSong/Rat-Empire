@@ -126,6 +126,7 @@ namespace RatHabitat.Tests
 
                 RuntimePerformanceDiagnostics.SetHudVisible(!previousHud);
                 RuntimePerformanceDiagnostics.SetIsolationMode(PerformanceIsolationMode.RatRendering);
+                SaveSystem.DiscardBrowserLifecycleElapsed();
                 string copiedText = RuntimePerformanceDiagnostics.BuildExportText(false);
                 bool copyReported = RuntimePerformanceDiagnostics.TryCopyText(copiedText);
                 Assert.IsTrue(copyReported);
@@ -175,17 +176,24 @@ namespace RatHabitat.Tests
                 GrowthSystem.BeginBehaviorUpdate(0.01f); // establish this frame's diagnostic window
                 int beforeTwenty = GrowthSystem.LastSimulationStepCount;
                 for (int rat = 0; rat < 20; rat++)
-                    Assert.AreEqual(12, GrowthSystem.BeginBehaviorUpdate(120f));
-                Assert.AreEqual(GrowthSystem.MaximumTotalBehaviorStepsPerFrame,
-                    GrowthSystem.LastSimulationStepCount - beforeTwenty,
-                    "Twenty rats share the total catch-up budget instead of each replaying 24 steps.");
+                    Assert.AreEqual(GrowthSystem.MaximumTotalBehaviorStepsPerFrame / 20,
+                        GrowthSystem.BeginBehaviorUpdate(120f, "twenty-rat-" + rat));
+                Assert.LessOrEqual(GrowthSystem.LastSimulationStepCount - beforeTwenty,
+                    GrowthSystem.MaximumTotalBehaviorStepsPerFrame,
+                    "Twenty rats share the total catch-up budget instead of each replaying 120 steps.");
+                Assert.AreEqual(0, GrowthSystem.LastRepeatedBehaviorUpdateCount,
+                    "A one-second sample with one behavior update per rat is not duplicated simulation work.");
+                GrowthSystem.BeginBehaviorUpdate(120f, "twenty-rat-0");
+                Assert.AreEqual(1, GrowthSystem.LastRepeatedBehaviorUpdateCount,
+                    "The diagnostic must expose a repeated same-rat update in one rendered frame.");
 
                 GrowthSystem.SetBehaviorParticipantCount(40);
                 int beforeForty = GrowthSystem.LastSimulationStepCount;
                 for (int rat = 0; rat < 40; rat++)
-                    Assert.AreEqual(6, GrowthSystem.BeginBehaviorUpdate(120f));
-                Assert.AreEqual(GrowthSystem.MaximumTotalBehaviorStepsPerFrame,
-                    GrowthSystem.LastSimulationStepCount - beforeForty);
+                    Assert.AreEqual(Mathf.Max(1, GrowthSystem.MaximumTotalBehaviorStepsPerFrame / 40),
+                        GrowthSystem.BeginBehaviorUpdate(120f, "forty-rat-" + rat));
+                Assert.LessOrEqual(GrowthSystem.LastSimulationStepCount - beforeForty,
+                    GrowthSystem.MaximumTotalBehaviorStepsPerFrame);
 
                 GrowthSystem.SetBehaviorParticipantCount(20);
                 Assert.AreEqual(1, GrowthSystem.BeginBehaviorUpdate(0.5f),
@@ -198,15 +206,96 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void ExpiredRecoveryDeadlineDoesNotKeepSchedulingMaintenanceAfterRecoveryEnds()
+        {
+            var rat = new RatData
+            {
+                id = "recovery-scheduler-test",
+                sex = RatSex.Female,
+                stage = RatStage.Adult,
+                reproductiveState = ReproductiveState.Recovery,
+                recoveryUntil = 1000L,
+            };
+
+            Assert.IsTrue(BreedingSystem.IsRecoveryTransitionDue(rat, 1000L));
+            // RefreshReproductiveStates changes the state but intentionally
+            // preserves its historical deadline. That old timestamp must no
+            // longer wake full-colony maintenance on every frame.
+            rat.reproductiveState = ReproductiveState.Fertile;
+            Assert.IsFalse(BreedingSystem.IsRecoveryTransitionDue(rat, 1001L));
+        }
+
+        [Test]
+        public void AgeMaintenanceSchedulerReturnsTheNextStageBoundary()
+        {
+            long day = GameConfig.GameDayMs;
+            long now = 100L * day;
+            var save = new ColonySaveData();
+            save.EnsureLists();
+            var rat = new RatData
+            {
+                id = "age-boundary-test",
+                sex = RatSex.Female,
+                stage = RatStage.Adult,
+                birthTimestamp = 0L,
+                sexualMaturityDays = 60f,
+                breedingEndAgeDays = 500f,
+                expectedLifespanDays = 500f,
+                ageDays = 100f,
+            };
+            save.rats.Add(rat);
+
+            Assert.AreEqual(now + (long)((GameConfig.MatureStartDays - 100f) * day),
+                GrowthSystem.NextAgeBoundaryGameTime(save, now));
+
+            rat.ageDays = 70f;
+            rat.birthTimestamp = now - 70L * day;
+            rat.breedingEndAgeDays = 75f;
+            Assert.AreEqual(now + 5L * day,
+                GrowthSystem.NextAgeBoundaryGameTime(save, now),
+                "The scheduler must choose the earliest future boundary, including breeding-end age.");
+        }
+
+        [Test]
+        public void StaticDeveloperGrowthOverrideDoesNotScheduleAStaleDueBoundary()
+        {
+            var save = new ColonySaveData();
+            save.EnsureLists();
+            save.rats.Add(new RatData
+            {
+                id = "static-dev-age-test",
+                sex = RatSex.Female,
+                stage = RatStage.Adult,
+                developerGrowthOverride = true,
+                growthTimestamp = 0L,
+                growthAnchorAgeDays = 10f,
+                ageDays = 10f,
+                expectedLifespanDays = 500f,
+                sexualMaturityDays = 60f,
+                breedingEndAgeDays = 300f,
+            });
+
+            long now = 100L * GameConfig.GameDayMs;
+            Assert.AreEqual(long.MaxValue, GrowthSystem.NextAgeBoundaryGameTime(save, now),
+                "A non-advancing override must not produce a current/past due time that retriggers maintenance every frame.");
+        }
+
+        [Test]
         public void PerformanceIsolationSwitchesCanBeCombinedAndResetTogether()
         {
             PerformanceIsolationMode previous = RuntimePerformanceDiagnostics.IsolationMode;
             try
             {
                 RuntimePerformanceDiagnostics.SetIsolationMode(PerformanceIsolationMode.Normal);
+                RuntimePerformanceDiagnostics.ToggleIsolationMode(PerformanceIsolationMode.Simulation);
+                RuntimePerformanceDiagnostics.ToggleIsolationMode(PerformanceIsolationMode.RatPresentation);
                 RuntimePerformanceDiagnostics.ToggleIsolationMode(PerformanceIsolationMode.RatAnimation);
+                RuntimePerformanceDiagnostics.ToggleIsolationMode(PerformanceIsolationMode.UiRendering);
                 RuntimePerformanceDiagnostics.ToggleIsolationMode(PerformanceIsolationMode.AutomaticUiRefresh);
+                Assert.IsTrue(RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.Simulation));
+                Assert.IsTrue(RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.RatPresentation));
                 Assert.IsTrue(RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.RatAnimation));
+                Assert.IsTrue(RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.UiRendering));
                 Assert.IsTrue(RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.AutomaticUiRefresh));
                 Assert.IsFalse(RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.RatRendering));
                 RuntimePerformanceDiagnostics.ToggleIsolationMode(PerformanceIsolationMode.Normal);
@@ -231,6 +320,54 @@ namespace RatHabitat.Tests
                 StringAssert.Contains("UNATTRIBUTED FRAME GAP", RuntimePerformanceDiagnostics.BuildRecentSpikesText(1));
                 StringAssert.Contains("unattributed_frame_gap_ms", RuntimePerformanceDiagnostics.BuildExportText(true));
                 StringAssert.Contains("CPU/GPU 8.00 ms/n/a", RuntimePerformanceDiagnostics.BuildRecentSpikesText(1));
+            }
+            finally
+            {
+                RuntimePerformanceDiagnostics.ClearLog();
+                RuntimePerformanceDiagnostics.SetCaptureEnabled(wasCapturing);
+            }
+        }
+
+        [Test]
+        public void BrowserGapDoesNotClaimCpuAttributionWhenWebGlCpuCounterIsZero()
+        {
+            bool wasCapturing = RuntimePerformanceDiagnostics.CaptureEnabled;
+            try
+            {
+                RuntimePerformanceDiagnostics.ClearLog();
+                RuntimePerformanceDiagnostics.SetCaptureEnabled(true);
+                RuntimePerformanceDiagnostics.RecordBrowserTelemetry(16.7f, 3055.6f, 61,
+                    1, 3055.6f, 3055.6f, true, true, true, true, true);
+                RuntimePerformanceDiagnostics.ObserveFrame(3055.6f, GameConfig.StartGameTimeMs, 1,
+                    0f, -1f, 0, 0, 0, 0, 14, 0, 14, 42, 160, 2, 854, 0f, 0f, 0f, "Habitat");
+                RuntimePerformanceDiagnostics.RecordSample(new PerformanceLogSample
+                {
+                    UtcTicks = DateTime.UtcNow.Ticks,
+                    GameTimeMs = GameConfig.StartGameTimeMs,
+                    Speed = 1,
+                    Fps = 0f,
+                    AverageFrameMs = 3055.6f,
+                    WorstFrameMs = 3055.6f,
+                    CpuMainThreadMs = 0f,
+                    GpuMs = -1f,
+                    ActiveRatCount = 14,
+                    CurrentPanel = "Habitat",
+                });
+
+                string export = RuntimePerformanceDiagnostics.BuildExportText(true);
+                StringAssert.Contains("browser_avg_frame_gap_ms", export);
+                StringAssert.Contains("page_hidden_during_window", export);
+                StringAssert.Contains("simulation_probe_calls", export);
+                StringAssert.Contains("presentation_updates", export);
+                string[] csvLines = export.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                Assert.AreEqual(csvLines[0].TrimEnd('\r').Split(',').Length,
+                    csvLines[1].TrimEnd('\r').Split(',').Length,
+                    "CSV data rows must stay aligned with the expanded telemetry header.");
+                StringAssert.Contains("n/a", RuntimePerformanceDiagnostics.BuildRecentSamplesText(1));
+                StringAssert.DoesNotContain("UNATTRIBUTED FRAME GAP", RuntimePerformanceDiagnostics.BuildRecentSpikesText(1),
+                    "A zero CPU reading is unavailable, not proof the full browser gap happened outside Unity CPU work.");
+                StringAssert.Contains("hidden during window", RuntimePerformanceDiagnostics.BuildRecentSamplesText(1));
+                StringAssert.Contains("browser gap 3055.60 ms", RuntimePerformanceDiagnostics.BuildRecentSpikesText(1));
             }
             finally
             {

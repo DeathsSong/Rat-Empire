@@ -219,6 +219,7 @@ namespace RatHabitat
             if (save == null) return false;
             if (saveInProgress) return true;
 
+            long performanceSaveSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.SaveExport);
             saveInProgress = true;
             try
             {
@@ -227,6 +228,7 @@ namespace RatHabitat
             finally
             {
                 saveInProgress = false;
+                RuntimePerformanceDiagnostics.End(PerformanceProbeArea.SaveExport, performanceSaveSample);
             }
         }
 
@@ -577,6 +579,20 @@ namespace RatHabitat
             }
 #else
             return false;
+#endif
+        }
+
+        /// <summary>
+        /// Drops browser-hidden elapsed time without advancing or editing the
+        /// colony clock. Used only by transient performance isolation so the
+        /// test mode cannot modify persistent colony data.
+        /// </summary>
+        public static void DiscardBrowserLifecycleElapsed()
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            if (browserLifecyclePollUnavailable) return;
+            try { RatHabitatBrowserConsumeInactiveElapsedSeconds(); }
+            catch { browserLifecyclePollUnavailable = true; }
 #endif
         }
 

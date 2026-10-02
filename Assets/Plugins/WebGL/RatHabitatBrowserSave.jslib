@@ -530,6 +530,111 @@ mergeInto(LibraryManager.library, {
         }
     },
 
+    RatPerformanceStartBrowserTelemetryNative: function (targetPtr, callbackMethodPtr) {
+        try {
+            var previous = window.__ratEmpireBrowserPerformanceTelemetry;
+            if (previous && previous.stop) previous.stop();
+            var state = {
+                active: true,
+                target: UTF8ToString(targetPtr),
+                callbackMethod: UTF8ToString(callbackMethodPtr),
+                raf: 0,
+                observer: null,
+                lastFrameNow: -1,
+                windowStartedAt: performance.now(),
+                frameCount: 0,
+                frameGapTotal: 0,
+                frameGapMax: 0,
+                longTaskCount: 0,
+                longTaskTotal: 0,
+                longTaskMax: 0,
+                longTaskSupported: false,
+                hiddenObserved: document.visibilityState !== "visible",
+                unfocusedObserved: !document.hasFocus(),
+                onVisibilityChange: null,
+                onBlur: null,
+                stop: null
+            };
+            state.stop = function () {
+                state.active = false;
+                if (state.raf) cancelAnimationFrame(state.raf);
+                if (state.observer) state.observer.disconnect();
+                if (state.onVisibilityChange)
+                    document.removeEventListener("visibilitychange", state.onVisibilityChange, false);
+                if (state.onBlur) window.removeEventListener("blur", state.onBlur, false);
+            };
+            state.onVisibilityChange = function () {
+                if (document.visibilityState !== "visible") state.hiddenObserved = true;
+            };
+            state.onBlur = function () { state.unfocusedObserved = true; };
+            document.addEventListener("visibilitychange", state.onVisibilityChange, false);
+            window.addEventListener("blur", state.onBlur, false);
+            if (typeof PerformanceObserver !== "undefined" &&
+                PerformanceObserver.supportedEntryTypes &&
+                PerformanceObserver.supportedEntryTypes.indexOf("longtask") !== -1) {
+                state.longTaskSupported = true;
+                state.observer = new PerformanceObserver(function (list) {
+                    var entries = list.getEntries();
+                    for (var i = 0; i < entries.length; i++) {
+                        state.longTaskCount++;
+                        state.longTaskTotal += entries[i].duration;
+                        state.longTaskMax = Math.max(state.longTaskMax, entries[i].duration);
+                    }
+                });
+                state.observer.observe({ entryTypes: ["longtask"] });
+            }
+            state.tick = function () {
+                if (!state.active) return;
+                var now = performance.now();
+                if (state.lastFrameNow >= 0) {
+                    var gap = Math.max(0, now - state.lastFrameNow);
+                    state.frameCount++;
+                    state.frameGapTotal += gap;
+                    state.frameGapMax = Math.max(state.frameGapMax, gap);
+                }
+                state.lastFrameNow = now;
+                if (now - state.windowStartedAt >= 1000) {
+                    var longTotal = state.longTaskSupported ? state.longTaskTotal : -1;
+                    var longMax = state.longTaskSupported ? state.longTaskMax : -1;
+                    var payload = [
+                        state.frameCount > 0 ? (state.frameGapTotal / state.frameCount).toFixed(2) : "-1",
+                        state.frameCount > 0 ? state.frameGapMax.toFixed(2) : "-1",
+                        String(state.frameCount),
+                        String(state.longTaskCount),
+                        longTotal.toFixed(2),
+                        longMax.toFixed(2),
+                        document.visibilityState === "visible" ? "1" : "0",
+                        document.hasFocus() ? "1" : "0",
+                        state.longTaskSupported ? "1" : "0",
+                        state.hiddenObserved ? "1" : "0",
+                        state.unfocusedObserved ? "1" : "0"
+                    ].join(",");
+                    if (state.target && state.callbackMethod)
+                        SendMessage(state.target, state.callbackMethod, payload);
+                    state.windowStartedAt = now;
+                    state.frameCount = 0;
+                    state.frameGapTotal = 0;
+                    state.frameGapMax = 0;
+                    state.longTaskCount = 0;
+                    state.longTaskTotal = 0;
+                    state.longTaskMax = 0;
+                    state.hiddenObserved = document.visibilityState !== "visible";
+                    state.unfocusedObserved = !document.hasFocus();
+                }
+                state.raf = requestAnimationFrame(state.tick);
+            };
+            window.__ratEmpireBrowserPerformanceTelemetry = state;
+            state.raf = requestAnimationFrame(state.tick);
+        } catch (error) {
+        }
+    },
+
+    RatPerformanceStopBrowserTelemetryNative: function () {
+        var state = window.__ratEmpireBrowserPerformanceTelemetry;
+        if (state && state.stop) state.stop();
+        window.__ratEmpireBrowserPerformanceTelemetry = null;
+    },
+
     RatPerformanceCopyText: function (textPtr, receiverPtr, callbackMethodPtr, actionIdPtr) {
         try {
             var text = UTF8ToString(textPtr);

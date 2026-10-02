@@ -20,12 +20,17 @@ namespace RatHabitat
         RatShadows = 1 << 3,
         AutomaticUiRefresh = 1 << 4,
         ColonyMaintenance = 1 << 5,
+        Simulation = 1 << 6,
+        RatPresentation = 1 << 7,
+        UiRendering = 1 << 8,
     }
 
     public enum PerformanceProbeArea
     {
         BootstrapUpdate,
         ClockAndAge,
+        SimulationMaintenance,
+        PairingMovement,
         RatBehaviorUpdate,
         RatBehaviorLateUpdate,
         RatDestinationSelection,
@@ -38,6 +43,8 @@ namespace RatHabitat
         InteractionUpdate,
         RatPresentationBuild,
         RatMaterialSetup,
+        NursingUpdate,
+        SaveExport,
         Count,
     }
 
@@ -61,6 +68,20 @@ namespace RatHabitat
         public float CpuMainThreadMs;
         public float GpuMs;
         public float UnattributedFrameGapMs;
+        public float BrowserAverageFrameGapMs;
+        public float BrowserWorstFrameGapMs;
+        public float BrowserGapWithinUnityCpuMs;
+        public float BrowserGapOutsideUnityCpuMs;
+        public int BrowserFrameCount;
+        public int BrowserLongTaskCount;
+        public float BrowserLongTaskTotalMs;
+        public float BrowserLongTaskMaxMs;
+        public bool BrowserTelemetryAvailable;
+        public bool PageVisible;
+        public bool PageFocused;
+        public bool PageWasHiddenDuringSample;
+        public bool PageWasUnfocusedDuringSample;
+        public bool LongTaskApiAvailable;
         public long GcAllocatedBytes;
         public int Gc0Collections;
         public int Gc1Collections;
@@ -72,12 +93,19 @@ namespace RatHabitat
         public int UiGraphicCount;
         public int CanvasCount;
         public int SimulationSteps;
+        public int SimulationProbeCalls;
+        public int RatBehaviorUpdates;
+        public int RepeatedRatBehaviorUpdates;
+        public float SimulationMs;
         public float SimulationMaintenanceMs;
         public float UiRefreshMs;
         public float RatAiMovementMs;
         public float AnimationMs;
         public float GroundingBoundsMs;
         public float RatPresentationMs;
+        public int RatPresentationUpdates;
+        public float SaveExportMs;
+        public int SaveExportOperations;
         public float InputInteractionsMs;
         public string CurrentPanel;
     }
@@ -101,6 +129,8 @@ namespace RatHabitat
         {
             "Rat Empire/Measured/Bootstrap Update",
             "Rat Empire/Measured/Clock and Age",
+            "Rat Empire/Measured/Simulation Maintenance",
+            "Rat Empire/Measured/Pairing Movement",
             "Rat Empire/Measured/Rat Behavior Update",
             "Rat Empire/Measured/Rat Behavior LateUpdate",
             "Rat Empire/Measured/Rat Destination Selection",
@@ -113,6 +143,8 @@ namespace RatHabitat
             "Rat Empire/Measured/Interaction Update",
             "Rat Empire/Measured/Rat Presentation Build",
             "Rat Empire/Measured/Rat Material Setup",
+            "Rat Empire/Measured/Nursing Update",
+            "Rat Empire/Measured/Save and Export",
         };
         private static readonly long[] WindowTicks = new long[(int)PerformanceProbeArea.Count];
         private static readonly long[] MaxTicks = new long[(int)PerformanceProbeArea.Count];
@@ -139,6 +171,18 @@ namespace RatHabitat
         private static string manualExportText = string.Empty;
         private static int exportActionSequence;
         private static int pendingClipboardAction;
+        private static bool browserTelemetryPending;
+        private static float pendingBrowserAverageGapMs = -1f;
+        private static float pendingBrowserWorstGapMs = -1f;
+        private static int pendingBrowserFrameCount;
+        private static int pendingBrowserLongTaskCount;
+        private static float pendingBrowserLongTaskTotalMs = -1f;
+        private static float pendingBrowserLongTaskMaxMs = -1f;
+        private static bool pendingPageVisible;
+        private static bool pendingPageFocused;
+        private static bool pendingPageWasHidden;
+        private static bool pendingPageWasUnfocused;
+        private static bool pendingLongTaskApiAvailable;
 
         public static bool CaptureEnabled { get { return captureEnabled; } }
         public static bool HudVisible { get { return hudVisible; } }
@@ -175,10 +219,64 @@ namespace RatHabitat
             return (float)TicksToMilliseconds(WindowTicks[(int)area]);
         }
 
+        public static int WindowCallCount(PerformanceProbeArea area)
+        {
+            return Calls[(int)area];
+        }
+
+        public static void RecordBrowserTelemetry(float averageFrameGapMs, float worstFrameGapMs,
+            int frameCount, int longTaskCount, float longTaskTotalMs, float longTaskMaxMs,
+            bool pageVisible, bool pageFocused, bool pageWasHidden, bool pageWasUnfocused,
+            bool longTaskApiAvailable)
+        {
+            if (!captureEnabled) return;
+            browserTelemetryPending = true;
+            pendingBrowserAverageGapMs = averageFrameGapMs;
+            pendingBrowserWorstGapMs = worstFrameGapMs;
+            pendingBrowserFrameCount = Math.Max(0, frameCount);
+            pendingBrowserLongTaskCount = Math.Max(0, longTaskCount);
+            pendingBrowserLongTaskTotalMs = longTaskTotalMs;
+            pendingBrowserLongTaskMaxMs = longTaskMaxMs;
+            pendingPageVisible = pageVisible;
+            pendingPageFocused = pageFocused;
+            pendingPageWasHidden = pageWasHidden;
+            pendingPageWasUnfocused = pageWasUnfocused;
+            pendingLongTaskApiAvailable = longTaskApiAvailable;
+        }
+
+        private static void AttachPendingBrowserTelemetry(ref PerformanceLogSample sample, bool consume)
+        {
+            if (!browserTelemetryPending) return;
+            sample.BrowserTelemetryAvailable = true;
+            sample.BrowserAverageFrameGapMs = pendingBrowserAverageGapMs;
+            sample.BrowserWorstFrameGapMs = pendingBrowserWorstGapMs;
+            // A zero CPU sample commonly means that this profiler counter is
+            // unsupported in WebGL. Keep the split unavailable rather than
+            // falsely attributing the entire browser gap to non-Unity work.
+            sample.BrowserGapWithinUnityCpuMs = sample.CpuMainThreadMs <= 0f || pendingBrowserAverageGapMs < 0f
+                ? -1f
+                : Mathf.Min(pendingBrowserAverageGapMs, sample.CpuMainThreadMs);
+            sample.BrowserGapOutsideUnityCpuMs = sample.CpuMainThreadMs <= 0f || pendingBrowserAverageGapMs < 0f
+                ? -1f
+                : Mathf.Max(0f, pendingBrowserAverageGapMs - sample.CpuMainThreadMs);
+            sample.BrowserFrameCount = pendingBrowserFrameCount;
+            sample.BrowserLongTaskCount = pendingBrowserLongTaskCount;
+            sample.BrowserLongTaskTotalMs = pendingBrowserLongTaskTotalMs;
+            sample.BrowserLongTaskMaxMs = pendingBrowserLongTaskMaxMs;
+            sample.PageVisible = pendingPageVisible;
+            sample.PageFocused = pendingPageFocused;
+            sample.PageWasHiddenDuringSample = pendingPageWasHidden;
+            sample.PageWasUnfocusedDuringSample = pendingPageWasUnfocused;
+            sample.LongTaskApiAvailable = pendingLongTaskApiAvailable;
+            if (consume) browserTelemetryPending = false;
+        }
+
         public static void RecordSample(PerformanceLogSample sample)
         {
             if (!captureEnabled || SampleRing.Length == 0) return;
-            sample.UnattributedFrameGapMs = sample.GpuMs < 0f && sample.CpuMainThreadMs >= 0f
+            if (sample.CpuMainThreadMs <= 0f) sample.CpuMainThreadMs = -1f;
+            AttachPendingBrowserTelemetry(ref sample, true);
+            sample.UnattributedFrameGapMs = sample.GpuMs < 0f && sample.CpuMainThreadMs > 0f
                 ? Mathf.Max(0f, sample.AverageFrameMs - sample.CpuMainThreadMs)
                 : -1f;
             sampleWriteIndex = (sampleWriteIndex + 1) % SampleRing.Length;
@@ -186,11 +284,14 @@ namespace RatHabitat
             if (sampleCount < SampleRing.Length) sampleCount++;
             lastSampleUtcTicks = sample.UtcTicks > 0L ? sample.UtcTicks : DateTime.UtcNow.Ticks;
             TrackWorstSubsystem("Simulation/maintenance", sample.SimulationMaintenanceMs);
+            TrackWorstSubsystem("Simulation", sample.SimulationMs);
             TrackWorstSubsystem("UI refresh", sample.UiRefreshMs);
             TrackWorstSubsystem("Rat AI/movement", sample.RatAiMovementMs);
             TrackWorstSubsystem("Animation", sample.AnimationMs);
             TrackWorstSubsystem("Grounding/bounds", sample.GroundingBoundsMs);
             TrackWorstSubsystem("Rat presentation/rendering", sample.RatPresentationMs);
+            TrackWorstSubsystem("Browser frame gap (not GPU)", sample.BrowserWorstFrameGapMs);
+            TrackWorstSubsystem("Save/export", sample.SaveExportMs);
             TrackWorstSubsystem("Input/interactions", sample.InputInteractionsMs);
         }
 
@@ -201,6 +302,7 @@ namespace RatHabitat
             float maintenanceMs, float uiRefreshMs, float animationMs, string panelName)
         {
             if (!captureEnabled) return;
+            if (cpuMs <= 0f) cpuMs = -1f;
             PerformanceLogSeverity severity = frameMs >= GameConfig.PerformanceCriticalSpikeThresholdMs
                 ? PerformanceLogSeverity.Critical
                 : frameMs >= GameConfig.PerformanceLagSpikeThresholdMs
@@ -230,7 +332,7 @@ namespace RatHabitat
             SpikeRing[spikeWriteIndex] = new PerformanceSpikeRecord
             {
                 Severity = severity,
-                IsUnattributedFrameGap = gpuMs < 0f && cpuMs >= 0f &&
+                IsUnattributedFrameGap = gpuMs < 0f && cpuMs > 0f &&
                     frameMs - cpuMs >= GameConfig.PerformanceUnattributedFrameGapThresholdMs,
                 Context = BuildFrameContext(frameMs, gameTimeMs, speed, cpuMs, gpuMs,
                     gcAllocatedBytes, gc0, gc1, gc2, activeRats, pinkies, animators, renderers,
@@ -244,7 +346,7 @@ namespace RatHabitat
             int activeRats, int pinkies, int animators, int renderers, int uiGraphics, int canvases,
             int simulationSteps, float maintenanceMs, float uiRefreshMs, float animationMs, string panelName)
         {
-            return new PerformanceLogSample
+            PerformanceLogSample context = new PerformanceLogSample
             {
                 UtcTicks = DateTime.UtcNow.Ticks,
                 GameTimeMs = gameTimeMs,
@@ -252,9 +354,15 @@ namespace RatHabitat
                 WorstFrameMs = frameMs,
                 CpuMainThreadMs = cpuMs,
                 GpuMs = gpuMs,
-                UnattributedFrameGapMs = gpuMs < 0f && cpuMs >= 0f
+                UnattributedFrameGapMs = gpuMs < 0f && cpuMs > 0f
                     ? Mathf.Max(0f, frameMs - cpuMs)
                     : -1f,
+                BrowserAverageFrameGapMs = -1f,
+                BrowserWorstFrameGapMs = -1f,
+                BrowserGapWithinUnityCpuMs = -1f,
+                BrowserGapOutsideUnityCpuMs = -1f,
+                BrowserLongTaskTotalMs = -1f,
+                BrowserLongTaskMaxMs = -1f,
                 GcAllocatedBytes = allocatedBytes,
                 Gc0Collections = gc0,
                 Gc1Collections = gc1,
@@ -266,19 +374,39 @@ namespace RatHabitat
                 UiGraphicCount = uiGraphics,
                 CanvasCount = canvases,
                 SimulationSteps = simulationSteps,
-                SimulationMaintenanceMs = maintenanceMs,
-                UiRefreshMs = uiRefreshMs,
+                SimulationProbeCalls = WindowCallCount(PerformanceProbeArea.ClockAndAge) +
+                    WindowCallCount(PerformanceProbeArea.PairingMovement) +
+                    WindowCallCount(PerformanceProbeArea.RatBehaviorUpdate) +
+                    WindowCallCount(PerformanceProbeArea.SimulationMaintenance) +
+                    WindowCallCount(PerformanceProbeArea.NursingUpdate),
+                RatBehaviorUpdates = GrowthSystem.LastBehaviorUpdateCount,
+                RepeatedRatBehaviorUpdates = GrowthSystem.LastRepeatedBehaviorUpdateCount,
+                SimulationMs = WindowMilliseconds(PerformanceProbeArea.ClockAndAge) +
+                    WindowMilliseconds(PerformanceProbeArea.PairingMovement) +
+                    WindowMilliseconds(PerformanceProbeArea.RatBehaviorUpdate) +
+                    WindowMilliseconds(PerformanceProbeArea.SimulationMaintenance) +
+                    WindowMilliseconds(PerformanceProbeArea.NursingUpdate),
+                SimulationMaintenanceMs = WindowMilliseconds(PerformanceProbeArea.SimulationMaintenance),
+                UiRefreshMs = WindowMilliseconds(PerformanceProbeArea.UiRefresh),
                 RatAiMovementMs = WindowMilliseconds(PerformanceProbeArea.RatBehaviorUpdate) +
-                    WindowMilliseconds(PerformanceProbeArea.RatBehaviorLateUpdate) +
-                    WindowMilliseconds(PerformanceProbeArea.RatDestinationSelection),
+                    WindowMilliseconds(PerformanceProbeArea.RatBehaviorLateUpdate),
                 AnimationMs = animationMs,
                 GroundingBoundsMs = WindowMilliseconds(PerformanceProbeArea.GroundingAndBounds),
                 RatPresentationMs = WindowMilliseconds(PerformanceProbeArea.RatPresenterLateUpdate) +
                     WindowMilliseconds(PerformanceProbeArea.RatPresentationBuild) +
-                    WindowMilliseconds(PerformanceProbeArea.RatMaterialSetup),
+                    WindowMilliseconds(PerformanceProbeArea.RatMaterialSetup) +
+                    WindowMilliseconds(PerformanceProbeArea.PinkieUpdate),
+                RatPresentationUpdates = WindowCallCount(PerformanceProbeArea.RatPresenterLateUpdate) +
+                    WindowCallCount(PerformanceProbeArea.RatPresentationBuild) +
+                    WindowCallCount(PerformanceProbeArea.RatMaterialSetup) +
+                    WindowCallCount(PerformanceProbeArea.PinkieUpdate),
+                SaveExportMs = WindowMilliseconds(PerformanceProbeArea.SaveExport),
+                SaveExportOperations = WindowCallCount(PerformanceProbeArea.SaveExport),
                 InputInteractionsMs = WindowMilliseconds(PerformanceProbeArea.InteractionUpdate),
                 CurrentPanel = panelName,
             };
+            AttachPendingBrowserTelemetry(ref context, false);
+            return context;
         }
 
         private static void TrackWorstSubsystem(string name, float value)
@@ -301,6 +429,11 @@ namespace RatHabitat
             sessionWorstSubsystem = "n/a";
             lastSampleUtcTicks = 0L;
             manualExportText = string.Empty;
+            browserTelemetryPending = false;
+            pendingBrowserAverageGapMs = pendingBrowserWorstGapMs = -1f;
+            pendingBrowserFrameCount = pendingBrowserLongTaskCount = 0;
+            pendingBrowserLongTaskTotalMs = pendingBrowserLongTaskMaxMs = -1f;
+            pendingPageWasHidden = pendingPageWasUnfocused = false;
             // Clearing is a log operation, not a capture toggle. Leave the
             // recorder running so the next one-second sample starts a fresh
             // diagnostics window immediately.
@@ -327,9 +460,26 @@ namespace RatHabitat
                 .Append(" • UI ").Append(latest.UiGraphicCount).Append(" graphics/").Append(latest.CanvasCount).Append(" canvases")
                 .Append("\nCPU ").Append(FormatMetric(latest.CpuMainThreadMs)).Append(" • GPU ").Append(FormatMetric(latest.GpuMs))
                 .Append(" • unattributed frame remainder ").Append(FormatMetric(latest.UnattributedFrameGapMs))
+                .Append(" • browser frame gap ").Append(FormatMetric(latest.BrowserWorstFrameGapMs))
+                .Append(" • avg rAF gap: measured CPU / beyond CPU ").Append(FormatMetric(latest.BrowserGapWithinUnityCpuMs)).Append('/')
+                .Append(FormatMetric(latest.BrowserGapOutsideUnityCpuMs))
                 .Append(" • GC ").Append(latest.GcAllocatedBytes).Append(" B in sample; collections ")
                 .Append(latest.Gc0Collections).Append('/').Append(latest.Gc1Collections).Append('/').Append(latest.Gc2Collections)
-                .Append(" • steps ").Append(latest.SimulationSteps)
+                .Append(" • sim steps/rat updates/repeats ").Append(latest.SimulationSteps).Append('/')
+                .Append(latest.RatBehaviorUpdates).Append('/').Append(latest.RepeatedRatBehaviorUpdates)
+                .Append(" • sim probe calls ").Append(latest.SimulationProbeCalls)
+                .Append(" • sim ").Append(FormatMetric(latest.SimulationMs))
+                .Append(" • save/export ").Append(FormatMetric(latest.SaveExportMs)).Append(" x")
+                .Append(latest.SaveExportOperations)
+                .Append(" • page ").Append(latest.BrowserTelemetryAvailable
+                    ? (latest.PageVisible ? "visible" : "hidden") + "/" + (latest.PageFocused ? "focused" : "blurred")
+                    : "browser telemetry n/a")
+                .Append(latest.PageWasHiddenDuringSample ? " (hidden during window)" : string.Empty)
+                .Append(latest.PageWasUnfocusedDuringSample ? " (unfocused during window)" : string.Empty)
+                .Append(" • long tasks ").Append(latest.LongTaskApiAvailable
+                    ? latest.BrowserLongTaskCount.ToString(CultureInfo.InvariantCulture) + "/" +
+                        latest.BrowserLongTaskMaxMs.ToString("0.0", CultureInfo.InvariantCulture) + "ms max"
+                    : "n/a")
                 .Append("\nWorst session frame ").Append(sessionWorstFrameMs.ToString("0.0", CultureInfo.InvariantCulture)).Append(" ms")
                 .Append(" @ ").Append(new DateTime(sessionWorstFrame.UtcTicks, DateTimeKind.Utc).ToString("HH:mm:ss'Z'", CultureInfo.InvariantCulture))
                 .Append(" • ").Append(sessionWorstFrame.CurrentPanel ?? "None")
@@ -409,7 +559,7 @@ namespace RatHabitat
             }
             else
             {
-                ExportBuilder.AppendLine("record,severity,utc,game_day_time,speed,fps,avg_frame_ms,worst_frame_ms,cpu_main_ms,gpu_ms,unattributed_frame_gap_ms,gc_alloc_bytes,gc0,gc1,gc2,rats,pinkies,animators,renderers,ui_graphics,canvases,simulation_steps,maintenance_ms,ui_refresh_ms,rat_ai_movement_ms,animation_ms,grounding_bounds_ms,presentation_ms,input_ms,panel");
+                ExportBuilder.AppendLine("record,severity,utc,game_day_time,speed,fps,avg_frame_ms,worst_frame_ms,cpu_main_ms,gpu_ms,unattributed_frame_gap_ms,browser_avg_frame_gap_ms,browser_worst_frame_gap_ms,browser_gap_within_unity_cpu_ms,browser_gap_outside_unity_cpu_ms,browser_frame_count,browser_telemetry_available,page_visible,page_focused,page_hidden_during_window,page_unfocused_during_window,long_task_api_available,long_task_count,long_task_total_ms,long_task_max_ms,gc_alloc_bytes,gc0,gc1,gc2,rats,pinkies,animators,renderers,ui_graphics,canvases,simulation_steps,simulation_probe_calls,rat_behavior_updates,repeated_rat_behavior_updates,simulation_ms,maintenance_ms,ui_refresh_ms,rat_ai_movement_ms,animation_ms,grounding_bounds_ms,presentation_ms,presentation_updates,save_export_ms,save_export_operations,input_ms,panel");
             }
 
             for (int index = 0; index < sampleCount; index++)
@@ -446,43 +596,51 @@ namespace RatHabitat
         public static bool TryCopyText(string text, string callbackReceiver = null)
         {
             if (string.IsNullOrEmpty(text)) return false;
-            manualExportText = text;
-            int actionId = ++exportActionSequence;
-#if UNITY_WEBGL && !UNITY_EDITOR
+            long exportSample = Begin(PerformanceProbeArea.SaveExport);
             try
             {
-                int result = RatPerformanceCopyText(text, callbackReceiver ?? string.Empty,
-                    "OnPerformanceClipboardResult", actionId.ToString(CultureInfo.InvariantCulture));
-                if (result == 1)
+                manualExportText = text;
+                int actionId = ++exportActionSequence;
+#if UNITY_WEBGL && !UNITY_EDITOR
+                try
+                {
+                    int result = RatPerformanceCopyText(text, callbackReceiver ?? string.Empty,
+                        "OnPerformanceClipboardResult", actionId.ToString(CultureInfo.InvariantCulture));
+                    if (result == 1)
+                    {
+                        pendingClipboardAction = 0;
+                        lastExportActionStatus = "Copied to clipboard.";
+                        return true;
+                    }
+                    if (result == 2)
+                    {
+                        pendingClipboardAction = actionId;
+                        lastExportActionStatus = "Clipboard permission pending; manual copy text is available below.";
+                        return true;
+                    }
+                    pendingClipboardAction = 0;
+                    lastExportActionStatus = "Clipboard unavailable or blocked; use the manual copy text below.";
+                    return false;
+                }
+                catch (Exception exception)
                 {
                     pendingClipboardAction = 0;
-                    lastExportActionStatus = "Copied to clipboard.";
-                    return true;
+                    lastExportActionStatus = "Clipboard failed: " + exception.Message + "; use the manual copy text below.";
+                    return false;
                 }
-                if (result == 2)
-                {
-                    pendingClipboardAction = actionId;
-                    lastExportActionStatus = "Clipboard permission pending; manual copy text is available below.";
-                    return true;
-                }
-                pendingClipboardAction = 0;
-                lastExportActionStatus = "Clipboard unavailable or blocked; use the manual copy text below.";
-                return false;
-            }
-            catch (Exception exception)
-            {
-                pendingClipboardAction = 0;
-                lastExportActionStatus = "Clipboard failed: " + exception.Message + "; use the manual copy text below.";
-                return false;
-            }
 #elif UNITY_EDITOR
-            GUIUtility.systemCopyBuffer = text;
-            lastExportActionStatus = "Copied to clipboard (Editor).";
-            return true;
+                GUIUtility.systemCopyBuffer = text;
+                lastExportActionStatus = "Copied to clipboard (Editor).";
+                return true;
 #else
-            lastExportActionStatus = "Clipboard unavailable; use the manual copy text below.";
-            return false;
+                lastExportActionStatus = "Clipboard unavailable; use the manual copy text below.";
+                return false;
 #endif
+            }
+            finally
+            {
+                End(PerformanceProbeArea.SaveExport, exportSample);
+            }
         }
 
         public static void CompleteClipboardAction(int actionId, bool copied)
@@ -496,33 +654,57 @@ namespace RatHabitat
 
         public static bool TryDownloadLog(bool csv)
         {
-            string content = BuildExportText(csv);
-            manualExportText = content;
-#if UNITY_WEBGL && !UNITY_EDITOR
+            long exportSample = Begin(PerformanceProbeArea.SaveExport);
             try
             {
-                bool requested = RatPerformanceDownloadText(csv ? "rat-empire-performance.csv" : "rat-empire-performance.txt",
-                    content, csv ? "text/csv;charset=utf-8" : "text/plain;charset=utf-8") != 0;
-                lastExportActionStatus = requested
-                    ? "Browser download requested; if blocked, use the manual copy text below."
-                    : "Browser download failed; use the manual copy text below.";
-                return requested;
-            }
-            catch (Exception exception)
-            {
-                lastExportActionStatus = "Browser download failed: " + exception.Message + "; use the manual copy text below.";
-                return false;
-            }
+                string content = BuildExportText(csv);
+                manualExportText = content;
+#if UNITY_WEBGL && !UNITY_EDITOR
+                try
+                {
+                    bool requested = RatPerformanceDownloadText(csv ? "rat-empire-performance.csv" : "rat-empire-performance.txt",
+                        content, csv ? "text/csv;charset=utf-8" : "text/plain;charset=utf-8") != 0;
+                    lastExportActionStatus = requested
+                        ? "Browser download requested; if blocked, use the manual copy text below."
+                        : "Browser download failed; use the manual copy text below.";
+                    return requested;
+                }
+                catch (Exception exception)
+                {
+                    lastExportActionStatus = "Browser download failed: " + exception.Message + "; use the manual copy text below.";
+                    return false;
+                }
 #else
-            lastExportActionStatus = "Browser download unavailable in this player; use the manual copy text below.";
-            return false;
+                lastExportActionStatus = "Browser download unavailable in this player; use the manual copy text below.";
+                return false;
 #endif
+            }
+            finally
+            {
+                End(PerformanceProbeArea.SaveExport, exportSample);
+            }
         }
 
 #if UNITY_WEBGL && !UNITY_EDITOR
+        [DllImport("__Internal")] private static extern void RatPerformanceStartBrowserTelemetryNative(string target, string callbackMethod);
+        [DllImport("__Internal")] private static extern void RatPerformanceStopBrowserTelemetryNative();
         [DllImport("__Internal")] private static extern int RatPerformanceCopyText(string text, string callbackReceiver, string callbackMethod, string actionId);
         [DllImport("__Internal")] private static extern int RatPerformanceDownloadText(string fileName, string content, string mimeType);
 #endif
+
+        public static void StartBrowserTelemetry(string target, string callbackMethod)
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            RatPerformanceStartBrowserTelemetryNative(target, callbackMethod);
+#endif
+        }
+
+        public static void StopBrowserTelemetry()
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            RatPerformanceStopBrowserTelemetryNative();
+#endif
+        }
 
         private static PerformanceLogSample SampleAt(int chronologicalIndex)
         {
@@ -559,10 +741,24 @@ namespace RatHabitat
                 .Append(sample.WorstFrameMs.ToString("0.00", CultureInfo.InvariantCulture)).Append(" ms")
                 .Append(" • CPU/GPU ").Append(FormatMetric(sample.CpuMainThreadMs)).Append('/').Append(FormatMetric(sample.GpuMs))
                 .Append(" • frame remainder ").Append(FormatMetric(sample.UnattributedFrameGapMs))
+                .Append(" • browser gap ").Append(FormatMetric(sample.BrowserWorstFrameGapMs))
+                .Append(" avg rAF gap measured CPU/beyond CPU ").Append(FormatMetric(sample.BrowserGapWithinUnityCpuMs)).Append('/')
+                .Append(FormatMetric(sample.BrowserGapOutsideUnityCpuMs))
+                .Append(" • page ").Append(sample.BrowserTelemetryAvailable
+                    ? (sample.PageVisible ? "visible" : "hidden") + "/" + (sample.PageFocused ? "focused" : "blurred")
+                    : "n/a")
+                .Append(sample.PageWasHiddenDuringSample ? " (hidden during window)" : string.Empty)
+                .Append(sample.PageWasUnfocusedDuringSample ? " (unfocused during window)" : string.Empty)
+                .Append(" • long tasks ").Append(sample.LongTaskApiAvailable
+                    ? sample.BrowserLongTaskCount.ToString(CultureInfo.InvariantCulture) + "/" +
+                        sample.BrowserLongTaskMaxMs.ToString("0.0", CultureInfo.InvariantCulture) + "ms max"
+                    : "n/a")
                 .Append(" • GC ").Append(sample.GcAllocatedBytes).Append(" B, ")
                 .Append(sample.Gc0Collections).Append('/').Append(sample.Gc1Collections).Append('/').Append(sample.Gc2Collections)
                 .Append(" • rats/pinkies ").Append(sample.ActiveRatCount).Append('/').Append(sample.PinkieCount)
-                .Append(" • sim steps ").Append(sample.SimulationSteps)
+                .Append(" • sim steps/rat updates/repeats ").Append(sample.SimulationSteps).Append('/')
+                .Append(sample.RatBehaviorUpdates).Append('/').Append(sample.RepeatedRatBehaviorUpdates)
+                .Append(" • sim ").Append(sample.SimulationMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("ms")
                 .Append(" • maint/UI ").Append(sample.SimulationMaintenanceMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
                 .Append(sample.UiRefreshMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("ms")
                 .Append(" • AI/anim/ground ").Append(sample.RatAiMovementMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
@@ -570,6 +766,9 @@ namespace RatHabitat
                 .Append(sample.GroundingBoundsMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("ms")
                 .Append(" • present/input ").Append(sample.RatPresentationMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
                 .Append(sample.InputInteractionsMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("ms")
+                .Append(" • present updates ").Append(sample.RatPresentationUpdates)
+                .Append(" • save/export ").Append(sample.SaveExportMs.ToString("0.00", CultureInfo.InvariantCulture))
+                .Append("ms (").Append(sample.SaveExportOperations).Append(" ops)")
                 .Append(" • ").Append(sample.CurrentPanel ?? "None");
             return builder;
         }
@@ -585,18 +784,38 @@ namespace RatHabitat
                 .Append(sample.CpuMainThreadMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.GpuMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.UnattributedFrameGapMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.BrowserAverageFrameGapMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.BrowserWorstFrameGapMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.BrowserGapWithinUnityCpuMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.BrowserGapOutsideUnityCpuMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.BrowserFrameCount).Append(',')
+                .Append(sample.BrowserTelemetryAvailable ? 1 : 0).Append(',')
+                .Append(sample.PageVisible ? 1 : 0).Append(',')
+                .Append(sample.PageFocused ? 1 : 0).Append(',')
+                .Append(sample.PageWasHiddenDuringSample ? 1 : 0).Append(',')
+                .Append(sample.PageWasUnfocusedDuringSample ? 1 : 0).Append(',')
+                .Append(sample.LongTaskApiAvailable ? 1 : 0).Append(',')
+                .Append(sample.BrowserLongTaskCount).Append(',')
+                .Append(sample.BrowserLongTaskTotalMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.BrowserLongTaskMaxMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.GcAllocatedBytes).Append(',').Append(sample.Gc0Collections).Append(',')
                 .Append(sample.Gc1Collections).Append(',').Append(sample.Gc2Collections).Append(',')
                 .Append(sample.ActiveRatCount).Append(',').Append(sample.PinkieCount).Append(',')
                 .Append(sample.AnimatorCount).Append(',').Append(sample.RendererCount).Append(',')
                 .Append(sample.UiGraphicCount).Append(',').Append(sample.CanvasCount).Append(',')
                 .Append(sample.SimulationSteps).Append(',')
+                .Append(sample.SimulationProbeCalls).Append(',')
+                .Append(sample.RatBehaviorUpdates).Append(',').Append(sample.RepeatedRatBehaviorUpdates).Append(',')
+                .Append(sample.SimulationMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.SimulationMaintenanceMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.UiRefreshMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.RatAiMovementMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.AnimationMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.GroundingBoundsMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.RatPresentationMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.RatPresentationUpdates).Append(',')
+                .Append(sample.SaveExportMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.SaveExportOperations).Append(',')
                 .Append(sample.InputInteractionsMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append('"').Append((sample.CurrentPanel ?? "None").Replace("\"", "\"\"")).Append('"').AppendLine();
         }
@@ -677,6 +896,8 @@ namespace RatHabitat
             {
                 case PerformanceProbeArea.BootstrapUpdate: return "Bootstrap";
                 case PerformanceProbeArea.ClockAndAge: return "Clock/age";
+                case PerformanceProbeArea.SimulationMaintenance: return "Maintenance";
+                case PerformanceProbeArea.PairingMovement: return "Pairing movement";
                 case PerformanceProbeArea.RatBehaviorUpdate: return "Rat AI";
                 case PerformanceProbeArea.RatBehaviorLateUpdate: return "Rat facing";
                 case PerformanceProbeArea.RatDestinationSelection: return "Target choice";
@@ -689,6 +910,8 @@ namespace RatHabitat
                 case PerformanceProbeArea.InteractionUpdate: return "Input";
                 case PerformanceProbeArea.RatPresentationBuild: return "Rat render/rebuild";
                 case PerformanceProbeArea.RatMaterialSetup: return "Coat/material";
+                case PerformanceProbeArea.NursingUpdate: return "Nursing";
+                case PerformanceProbeArea.SaveExport: return "Save/export";
                 default: return "Unknown";
             }
         }
@@ -709,6 +932,13 @@ namespace RatHabitat
         public static string ManualExportText { get { return string.Empty; } }
         public static long Begin(PerformanceProbeArea area) { return 0L; }
         public static void End(PerformanceProbeArea area, long startedAt) { }
+        public static int WindowCallCount(PerformanceProbeArea area) { return 0; }
+        public static void RecordBrowserTelemetry(float averageFrameGapMs, float worstFrameGapMs,
+            int frameCount, int longTaskCount, float longTaskTotalMs, float longTaskMaxMs,
+            bool pageVisible, bool pageFocused, bool pageWasHidden, bool pageWasUnfocused,
+            bool longTaskApiAvailable) { }
+        public static void StartBrowserTelemetry(string target, string callbackMethod) { }
+        public static void StopBrowserTelemetry() { }
         public static void SetCaptureEnabled(bool enabled) { }
         public static void ClearLog() { }
         public static string BuildLiveSummary() { return "Performance capture is available in Development builds."; }
@@ -778,9 +1008,15 @@ namespace RatHabitat
         private int uiGraphicCount;
         private int canvasCount;
         private long previousSimulationStepTotal;
+        private long previousBehaviorUpdateTotal;
+        private long previousRepeatedBehaviorUpdateTotal;
         private bool frameTimingWarningLogged;
         private GUIStyle boxStyle;
         private GUIStyle labelStyle;
+        private bool browserTelemetryRunning;
+        private Canvas[] uiCanvasesForIsolation;
+        private bool[] uiCanvasEnabledBeforeIsolation;
+        private bool uiCanvasIsolationApplied;
 
         public void Configure(GameBootstrap bootstrap)
         {
@@ -790,12 +1026,71 @@ namespace RatHabitat
         private void Awake()
         {
             previousSimulationStepTotal = GrowthSystem.TotalSimulationSteps;
+            previousBehaviorUpdateTotal = GrowthSystem.TotalBehaviorUpdateCount;
+            previousRepeatedBehaviorUpdateTotal = GrowthSystem.TotalRepeatedBehaviorUpdateCount;
             previousGc0 = GC.CollectionCount(0);
             previousGc1 = GC.CollectionCount(1);
             previousGc2 = GC.CollectionCount(2);
             TryStartRecorder(ref mainThreadRecorder, ProfilerCategory.Internal, "Main Thread");
             TryStartRecorder(ref gcAllocatedRecorder, ProfilerCategory.Memory, "GC Allocated In Frame");
             TryStartRecorder(ref animatorRecorder, ProfilerCategory.Animation, "Animator.Update");
+#if UNITY_WEBGL && !UNITY_EDITOR
+            try
+            {
+                if (RuntimePerformanceDiagnostics.CaptureEnabled)
+                {
+                    RuntimePerformanceDiagnostics.StartBrowserTelemetry(gameObject.name, "OnBrowserPerformanceTelemetry");
+                    browserTelemetryRunning = true;
+                }
+            }
+            catch (Exception exception)
+            {
+                UnityEngine.Debug.LogWarning("[Performance Diagnostics] Browser frame telemetry unavailable: " + exception.Message);
+            }
+#endif
+        }
+
+        private void OnDestroy()
+        {
+            if (uiCanvasIsolationApplied)
+            {
+                RuntimePerformanceDiagnostics.SetIsolationMode(
+                    RuntimePerformanceDiagnostics.IsolationMode & ~PerformanceIsolationMode.UiRendering);
+                RestoreUiCanvasIsolation();
+            }
+#if UNITY_WEBGL && !UNITY_EDITOR
+            if (browserTelemetryRunning)
+            {
+                try { RuntimePerformanceDiagnostics.StopBrowserTelemetry(); }
+                catch (Exception) { }
+                browserTelemetryRunning = false;
+            }
+#endif
+            if (mainThreadRecorder.Valid) mainThreadRecorder.Dispose();
+            if (gcAllocatedRecorder.Valid) gcAllocatedRecorder.Dispose();
+            if (animatorRecorder.Valid) animatorRecorder.Dispose();
+        }
+
+        public void OnBrowserPerformanceTelemetry(string payload)
+        {
+            if (string.IsNullOrEmpty(payload)) return;
+            string[] values = payload.Split(',');
+            if (values.Length < 11) return;
+            float averageGap;
+            float worstGap;
+            int frames;
+            int longTasks;
+            float longTaskTotal;
+            float longTaskMax;
+            if (!float.TryParse(values[0], NumberStyles.Float, CultureInfo.InvariantCulture, out averageGap) ||
+                !float.TryParse(values[1], NumberStyles.Float, CultureInfo.InvariantCulture, out worstGap) ||
+                !int.TryParse(values[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out frames) ||
+                !int.TryParse(values[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out longTasks) ||
+                !float.TryParse(values[4], NumberStyles.Float, CultureInfo.InvariantCulture, out longTaskTotal) ||
+                !float.TryParse(values[5], NumberStyles.Float, CultureInfo.InvariantCulture, out longTaskMax)) return;
+            RuntimePerformanceDiagnostics.RecordBrowserTelemetry(averageGap, worstGap, frames,
+                longTasks, longTaskTotal, longTaskMax, values[6] == "1", values[7] == "1",
+                values[9] == "1", values[10] == "1", values[8] == "1");
         }
 
         private static void TryStartRecorder(ref ProfilerRecorder recorder, ProfilerCategory category, string counterName)
@@ -813,6 +1108,27 @@ namespace RatHabitat
 
         private void Update()
         {
+            ApplyUiCanvasIsolation();
+#if UNITY_WEBGL && !UNITY_EDITOR
+            if (RuntimePerformanceDiagnostics.CaptureEnabled && !browserTelemetryRunning)
+            {
+                try
+                {
+                    RuntimePerformanceDiagnostics.StartBrowserTelemetry(gameObject.name, "OnBrowserPerformanceTelemetry");
+                    browserTelemetryRunning = true;
+                }
+                catch (Exception exception)
+                {
+                    UnityEngine.Debug.LogWarning("[Performance Diagnostics] Browser frame telemetry unavailable: " + exception.Message);
+                }
+            }
+            else if (!RuntimePerformanceDiagnostics.CaptureEnabled && browserTelemetryRunning)
+            {
+                try { RuntimePerformanceDiagnostics.StopBrowserTelemetry(); }
+                catch (Exception) { }
+                browserTelemetryRunning = false;
+            }
+#endif
             try { FrameTimingManager.CaptureFrameTimings(); }
             catch (Exception exception)
             {
@@ -872,6 +1188,12 @@ namespace RatHabitat
                         ? (float)(mainThreadWindowTotalMs / mainThreadWindowSamples)
                         : (cpuMainThreadMs >= 0f ? cpuMainThreadMs : profilerMainThreadMs),
                     GpuMs = gpuFrameMs,
+                    BrowserAverageFrameGapMs = -1f,
+                    BrowserWorstFrameGapMs = -1f,
+                    BrowserGapOutsideUnityCpuMs = -1f,
+                    BrowserLongTaskTotalMs = -1f,
+                    BrowserLongTaskMaxMs = -1f,
+                    BrowserTelemetryAvailable = false,
                     GcAllocatedBytes = gcAllocatedRecorder.Valid ? gcAllocatedWindowBytes : -1L,
                     Gc0Collections = gc0Delta,
                     Gc1Collections = gc1Delta,
@@ -883,21 +1205,43 @@ namespace RatHabitat
                     UiGraphicCount = uiGraphicCount,
                     CanvasCount = canvasCount,
                     SimulationSteps = (int)Math.Min(int.MaxValue, Math.Max(0L, simulationStepTotal - previousSimulationStepTotal)),
+                    SimulationProbeCalls = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.ClockAndAge) +
+                        RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.PairingMovement) +
+                        RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.RatBehaviorUpdate) +
+                        RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.SimulationMaintenance) +
+                        RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.NursingUpdate),
+                    RatBehaviorUpdates = (int)Math.Min(int.MaxValue, Math.Max(0L,
+                        GrowthSystem.TotalBehaviorUpdateCount - previousBehaviorUpdateTotal)),
+                    RepeatedRatBehaviorUpdates = (int)Math.Min(int.MaxValue, Math.Max(0L,
+                        GrowthSystem.TotalRepeatedBehaviorUpdateCount - previousRepeatedBehaviorUpdateTotal)),
+                    SimulationMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.ClockAndAge) +
+                        RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.PairingMovement) +
+                        RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatBehaviorUpdate) +
+                        RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.SimulationMaintenance) +
+                        RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.NursingUpdate),
                     SimulationMaintenanceMs = game == null ? 0f : game.ConsumePerformanceMaintenanceWindowMs(),
                     UiRefreshMs = game == null ? 0f : game.ConsumePerformanceUiRefreshWindowMs(),
                     RatAiMovementMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatBehaviorUpdate) +
-                        RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatBehaviorLateUpdate) +
-                        RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatDestinationSelection),
+                        RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatBehaviorLateUpdate),
                     AnimationMs = !animatorRecorder.Valid ? -1f : (float)(animatorWindowTotalNs / 1000000d),
                     GroundingBoundsMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.GroundingAndBounds),
                     RatPresentationMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatPresenterLateUpdate) +
                         RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatPresentationBuild) +
-                        RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatMaterialSetup),
+                        RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatMaterialSetup) +
+                        RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.PinkieUpdate),
+                    RatPresentationUpdates = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.RatPresenterLateUpdate) +
+                        RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.RatPresentationBuild) +
+                        RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.RatMaterialSetup) +
+                        RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.PinkieUpdate),
+                    SaveExportMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.SaveExport),
+                    SaveExportOperations = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.SaveExport),
                     InputInteractionsMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.InteractionUpdate),
                     CurrentPanel = game == null ? "None" : game.PerformancePanelName,
                 };
                 RuntimePerformanceDiagnostics.RecordSample(sample);
                 previousSimulationStepTotal = simulationStepTotal;
+                previousBehaviorUpdateTotal = GrowthSystem.TotalBehaviorUpdateCount;
+                previousRepeatedBehaviorUpdateTotal = GrowthSystem.TotalRepeatedBehaviorUpdateCount;
             }
             else
             {
@@ -967,7 +1311,7 @@ namespace RatHabitat
             if (mainThreadRecorder.Valid)
             {
                 profilerMainThreadMs = (float)(mainThreadRecorder.LastValue / 1000000d);
-                if (profilerMainThreadMs >= 0f)
+                if (profilerMainThreadMs > 0f)
                 {
                     mainThreadWindowTotalMs += profilerMainThreadMs;
                     mainThreadWindowSamples++;
@@ -1021,9 +1365,9 @@ namespace RatHabitat
 
         private void RebuildReport()
         {
-            if (cpuMainThreadMs < 0f && mainThreadWindowSamples > 0)
+            if (cpuMainThreadMs <= 0f && mainThreadWindowSamples > 0)
                 cpuMainThreadMs = (float)(mainThreadWindowTotalMs / mainThreadWindowSamples);
-            string cpu = cpuMainThreadMs < 0f ? "n/a" : cpuMainThreadMs.ToString("0.00") + "ms";
+            string cpu = cpuMainThreadMs <= 0f ? "n/a" : cpuMainThreadMs.ToString("0.00") + "ms";
             string gpu = gpuFrameMs < 0f ? "n/a" : gpuFrameMs.ToString("0.00") + "ms";
             string allocated = gcAllocatedBytes < 0L ? "n/a" : gcAllocatedBytes.ToString("N0") + " B/frame";
             string allocatedPeak = gcAllocatedWindowPeakBytes < 0L ? "n/a" : gcAllocatedWindowPeakBytes.ToString("N0") + " B";
@@ -1046,7 +1390,8 @@ namespace RatHabitat
 
         private void OnGUI()
         {
-            if (!RuntimePerformanceDiagnostics.HudVisible) return;
+            bool uiRenderingIsolated = RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.UiRendering);
+            if (!RuntimePerformanceDiagnostics.HudVisible && !uiRenderingIsolated) return;
             if (boxStyle == null)
             {
                 boxStyle = new GUIStyle(GUI.skin.box) { alignment = TextAnchor.UpperLeft, padding = new RectOffset(8, 8, 8, 8) };
@@ -1058,6 +1403,22 @@ namespace RatHabitat
                     normal = { textColor = new Color(0.9f, 0.97f, 0.92f) }
                 };
             }
+            if (uiRenderingIsolated)
+            {
+                float restoreWidth = Mathf.Min(Screen.width - 24f, 340f);
+                Rect restoreRect = new Rect((Screen.width - restoreWidth) * 0.5f,
+                    Mathf.Max(8f, Screen.height * 0.08f), restoreWidth, 54f);
+                GUI.depth = -100;
+                GUI.Box(restoreRect, "UI rendering isolated for A/B test", boxStyle);
+                if (GUI.Button(new Rect(restoreRect.x + 8f, restoreRect.y + 27f,
+                    restoreRect.width - 16f, 22f), "Restore UI"))
+                {
+                    RuntimePerformanceDiagnostics.ToggleIsolationMode(PerformanceIsolationMode.UiRendering);
+                    ApplyUiCanvasIsolation();
+                }
+                return;
+            }
+            if (!RuntimePerformanceDiagnostics.HudVisible) return;
             float width = Mathf.Min(Screen.width - 16f, Screen.width < 700 ? 520f : 600f);
             float height = Screen.width < 700 ? 184f : 166f;
             float x = Mathf.Max(8f, Screen.width - width - 8f);
@@ -1067,12 +1428,45 @@ namespace RatHabitat
             GUI.Label(new Rect(x + 8f, y + 6f, width - 16f, height - 12f), report, labelStyle);
         }
 
-        private void OnDestroy()
+        private void ApplyUiCanvasIsolation()
         {
-            if (mainThreadRecorder.Valid) mainThreadRecorder.Dispose();
-            if (gcAllocatedRecorder.Valid) gcAllocatedRecorder.Dispose();
-            if (animatorRecorder.Valid) animatorRecorder.Dispose();
+            bool shouldIsolate = RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.UiRendering);
+            if (shouldIsolate == uiCanvasIsolationApplied) return;
+            if (shouldIsolate)
+            {
+                uiCanvasesForIsolation = UnityEngine.Object.FindObjectsOfType<Canvas>();
+                uiCanvasEnabledBeforeIsolation = new bool[uiCanvasesForIsolation.Length];
+                for (int index = 0; index < uiCanvasesForIsolation.Length; index++)
+                {
+                    Canvas canvas = uiCanvasesForIsolation[index];
+                    if (canvas == null) continue;
+                    uiCanvasEnabledBeforeIsolation[index] = canvas.enabled;
+                    canvas.enabled = false;
+                }
+                uiCanvasIsolationApplied = true;
+                return;
+            }
+
+            RestoreUiCanvasIsolation();
         }
+
+        private void RestoreUiCanvasIsolation()
+        {
+            if (uiCanvasesForIsolation != null)
+            {
+                for (int index = 0; index < uiCanvasesForIsolation.Length; index++)
+                {
+                    Canvas canvas = uiCanvasesForIsolation[index];
+                    if (canvas != null && uiCanvasEnabledBeforeIsolation != null &&
+                        index < uiCanvasEnabledBeforeIsolation.Length)
+                        canvas.enabled = uiCanvasEnabledBeforeIsolation[index];
+                }
+            }
+            uiCanvasesForIsolation = null;
+            uiCanvasEnabledBeforeIsolation = null;
+            uiCanvasIsolationApplied = false;
+        }
+
 #endif
     }
 }

@@ -3379,6 +3379,9 @@ namespace RatHabitat
                     case PerformanceIsolationMode.RatBehavior: label = "rat AI/movement|skipped|running"; break;
                     case PerformanceIsolationMode.RatAnimation: label = "rat/pinkie animators|frozen|running"; break;
                     case PerformanceIsolationMode.RatRendering: label = "rat visuals|hidden|visible"; break;
+                    case PerformanceIsolationMode.RatPresentation: label = "rat presentation updates|skipped|running"; break;
+                    case PerformanceIsolationMode.Simulation: label = "game simulation and clock|paused|running"; break;
+                    case PerformanceIsolationMode.UiRendering: label = "UI canvas rendering|hidden|visible"; break;
                     case PerformanceIsolationMode.RatShadows: label = "rat shadows|off|on"; break;
                     case PerformanceIsolationMode.AutomaticUiRefresh: label = "automatic UI refresh|skipped|normal"; break;
                     default: label = "colony maintenance|skipped|normal"; break;
@@ -7124,6 +7127,15 @@ namespace RatHabitat
                 13, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
             performanceIsolationBaselineButton = AddPerformanceButton("Performance.AB.Baseline", "A/B baseline • restore all systems", true,
                 () => SetPerformanceIsolationMode(PerformanceIsolationMode.Normal));
+            performanceIsolationButtons[PerformanceIsolationMode.Simulation] = AddPerformanceButton("Performance.AB.Simulation",
+                IsolationToggleLabel(PerformanceIsolationMode.Simulation, "simulation + clock", "paused", "running"), true,
+                () => TogglePerformanceIsolationMode(PerformanceIsolationMode.Simulation));
+            performanceIsolationButtons[PerformanceIsolationMode.RatPresentation] = AddPerformanceButton("Performance.AB.Presentation",
+                IsolationToggleLabel(PerformanceIsolationMode.RatPresentation, "rat presentation", "skipped", "running"), true,
+                () => TogglePerformanceIsolationMode(PerformanceIsolationMode.RatPresentation));
+            performanceIsolationButtons[PerformanceIsolationMode.UiRendering] = AddPerformanceButton("Performance.AB.UiRendering",
+                IsolationToggleLabel(PerformanceIsolationMode.UiRendering, "UI canvas rendering", "hidden", "visible"), true,
+                () => TogglePerformanceIsolationMode(PerformanceIsolationMode.UiRendering));
             performanceIsolationButtons[PerformanceIsolationMode.RatBehavior] = AddPerformanceButton("Performance.AB.RatBehavior", IsolationToggleLabel(PerformanceIsolationMode.RatBehavior, "rat AI/movement", "skipped", "running"), true,
                 () => TogglePerformanceIsolationMode(PerformanceIsolationMode.RatBehavior));
             performanceIsolationButtons[PerformanceIsolationMode.RatAnimation] = AddPerformanceButton("Performance.AB.RatAnimation", IsolationToggleLabel(PerformanceIsolationMode.RatAnimation, "rat/pinkie animators", "frozen", "running"), true,
