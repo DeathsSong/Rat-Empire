@@ -4031,6 +4031,9 @@ namespace RatHabitat
 
             AddText(card, StoreSystem.GetRestockLabel(game.Save, game.GameTime), 14,
                 new Color(0.68f, 0.84f, 0.78f), TextAnchor.UpperLeft);
+            AddText(card, "Listings: " + game.Save.storeRatListings.Count + " / " +
+                UpgradeSystem.StoreListingCount(game.Save) + " (capacity increases on the next restock)", 13,
+                new Color(0.68f, 0.84f, 0.78f), TextAnchor.UpperLeft);
             AddText(card, "Low-level adult rats for your colony. Each listing keeps its coat, markings, stats, and price until purchased.",
                 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
 
@@ -4071,8 +4074,10 @@ namespace RatHabitat
 
             AddText(card, "Store quality cap: " + game.StoreQualityCap, 16,
                 Color.white, TextAnchor.UpperLeft);
-            AddText(card, "New listings only: next cap " + (game.StoreQualityCap + GameConfig.StoreQualityUpgradeStep) +
-                " (existing listings and rats stay unchanged)", 13,
+            AddText(card, "Next cap " + (game.StoreQualityCap + GameConfig.StoreQualityUpgradeStep) +
+                "; next restock adds " + GameConfig.StoreListingCapacityUpgradeStep +
+                " listing (current: " + game.Save.storeRatListings.Count + " / " + game.StoreListingCapacity +
+                "). Current listings and rats stay unchanged.", 13,
                 new Color(0.76f, 0.86f, 0.80f), TextAnchor.UpperLeft);
             int qualityCost = game.StoreQualityUpgradeCost;
             bool canBuyQuality = game.Save.colonyCredits >= qualityCost;

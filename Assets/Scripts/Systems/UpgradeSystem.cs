@@ -22,6 +22,19 @@ namespace RatHabitat
             return GameConfig.BaseStoreQualityCap + level * GameConfig.StoreQualityUpgradeStep;
         }
 
+        /// <summary>
+        /// Market capacity is derived from the persisted store upgrade level.
+        /// Upgrades never edit current listings; the new count is used the
+        /// next time inventory is restocked.
+        /// </summary>
+        public static int StoreListingCount(ColonySaveData save)
+        {
+            EnsureState(save);
+            int level = save == null ? 0 : save.storeQualityUpgradeLevel;
+            return GameConfig.StoreRestockListingCount +
+                level * GameConfig.StoreListingCapacityUpgradeStep;
+        }
+
         public static int ColonyCapacity(ColonySaveData save)
         {
             EnsureState(save);

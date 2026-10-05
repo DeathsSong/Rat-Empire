@@ -922,7 +922,8 @@ namespace RatHabitat
             if (lower.Contains("became pregnant") || lower.Contains(" is pregnant")) return Pregnancy;
             if (lower.StartsWith("birth:") || lower.Contains(" gave birth") || lower.Contains(" has given birth to")) return Birth;
             if (lower.Contains("was euthanized")) return Euthanasia;
-            if (lower.Contains(" was sold") || lower.StartsWith("sold ")) return Sale;
+            if (lower.Contains(" was sold") || lower.StartsWith("sold ") ||
+                lower.Contains("automatically sold")) return Sale;
             if (lower.Contains("fully weaned")) return FullyWeaned;
             if (lower.Contains(" died") || lower.StartsWith("died")) return NaturalDeath;
 

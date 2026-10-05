@@ -35,7 +35,7 @@ namespace RatHabitat
         // A high-speed frame can represent many in-game seconds. Subdivide
         // behavior updates into bounded chunks so state transitions remain
         // ordered without replaying every skipped render frame. Movement has a
-        // separate per-rat visual cap in RatHabitatBehavior.
+        // separate per-rat, current-frame time budget in RatHabitatBehavior.
         public const float MaximumBehaviorStepSeconds = 1f;
         // Bound catch-up work across the entire colony, not independently for
         // every rat. Every rat still receives a behavior update each rendered
@@ -45,8 +45,10 @@ namespace RatHabitat
         // Biological deadlines and the authoritative game clock are timestamp
         // driven elsewhere; older missed movement/idle steps are compressed.
         public const float MaximumBehaviorBacklogSeconds = 12f;
-        public const float MaximumVisualMovementUnitsPerFrame = 1.25f;
-        public const float MaximumFastRouteMovementUnitsPerFrame = 8f;
+        // Presentation movement may use only the current frame's simulated
+        // interval. A long frame is capped to avoid visible teleports while
+        // behavior timers continue catching up in bounded steps.
+        public const float MaximumVisualMovementRealDeltaSeconds = 0.1f;
         public const float MaximumAnimationPlaybackMultiplier = 12f;
 
         public static float RuntimeSimulationSpeed { get { return simulationPaused ? 0f : runtimeSimulationSpeed; } }
@@ -84,6 +86,43 @@ namespace RatHabitat
         public static void SetRuntimeSpeed(float speed)
         {
             runtimeSimulationSpeed = NormalizeSpeed(speed);
+        }
+
+        /// <summary>
+        /// Changes speed at a real-time boundary. First settle elapsed game
+        /// time using the previously selected rate, then re-anchor the clock
+        /// before applying the new rate so a button press cannot retroactively
+        /// scale the elapsed interval or create a catch-up jump.
+        /// </summary>
+        public static bool ChangeSpeedAtTimestamp(ColonySaveData save, float speed, long realTimestamp)
+        {
+            if (save == null || save.clock == null) return false;
+
+            float normalizedSpeed = NormalizeSpeed(speed);
+            bool changed = Mathf.Abs(NormalizeSpeed(save.clock.speed) - normalizedSpeed) > 0.01f;
+            if (simulationPaused)
+            {
+                // Modal pauses own the clock. Re-anchor without crediting the
+                // interval spent paused, but preserve initialization for old
+                // saves that did not yet have a valid clock timestamp.
+                if (save.clock.lastRealTimestamp <= 0L || save.clock.gameTimeMs <= 0L)
+                    AdvanceClock(save, realTimestamp);
+                else
+                {
+                    save.clock.speed = NormalizeSpeed(save.clock.speed);
+                    SetRuntimeSpeed(save.clock.speed);
+                    save.clock.lastRealTimestamp = realTimestamp;
+                }
+            }
+            else
+            {
+                AdvanceClock(save, realTimestamp);
+            }
+
+            save.clock.speed = normalizedSpeed;
+            save.clock.lastRealTimestamp = realTimestamp;
+            SetRuntimeSpeed(normalizedSpeed);
+            return changed;
         }
 
         public static void SetSimulationPaused(bool paused)
@@ -250,22 +289,35 @@ namespace RatHabitat
 
         /// <summary>
         /// Converts an already scaled behavior step into visual movement. The
-        /// optional per-rat budget prevents a 1,440x frame from teleporting a
-        /// visible rat across the whole enclosure while preserving the full
-        /// simulation-time advancement for actions and deadlines.
+        /// explicit per-rat, per-rendered-frame time budget prevents accumulated
+        /// behavior backlog from becoming extra visible movement. The budget is
+        /// expressed in already-scaled simulation seconds, so this method never
+        /// applies the speed multiplier a second time.
         /// </summary>
         public static float SimulationMovementStep(
             float baseWorldSpeed,
             float simulationDeltaSeconds,
-            ref float visualMovementBudget)
+            ref float visualMovementTimeBudgetSeconds)
         {
-            float rawStep = Mathf.Max(0f, baseWorldSpeed) * Mathf.Max(0f, simulationDeltaSeconds);
-            if (RuntimeSimulationMultiplier <= 1.001f) return rawStep;
+            float allowedSimulationSeconds = Mathf.Min(
+                Mathf.Max(0f, simulationDeltaSeconds),
+                Mathf.Max(0f, visualMovementTimeBudgetSeconds));
+            visualMovementTimeBudgetSeconds = Mathf.Max(
+                0f, visualMovementTimeBudgetSeconds - allowedSimulationSeconds);
+            return Mathf.Max(0f, baseWorldSpeed) * allowedSimulationSeconds;
+        }
 
-            float allowed = Mathf.Max(0f, visualMovementBudget);
-            float step = Mathf.Min(rawStep, allowed);
-            visualMovementBudget = Mathf.Max(0f, visualMovementBudget - step);
-            return step;
+        /// <summary>
+        /// Returns the scaled movement time available in the current rendered
+        /// frame. It deliberately does not include previously accumulated AI
+        /// catch-up time, which must never become extra distance after a speed
+        /// change. The cap only affects visual movement after a long frame.
+        /// </summary>
+        public static float SimulationMovementTimeBudget(float currentFrameSimulationDeltaSeconds)
+        {
+            if (simulationPaused || currentFrameSimulationDeltaSeconds <= 0f) return 0f;
+            float maximumScaledDelta = MaximumVisualMovementRealDeltaSeconds * RuntimeSimulationMultiplier;
+            return Mathf.Min(currentFrameSimulationDeltaSeconds, maximumScaledDelta);
         }
 
         public static float SimulationMultiplierForSpeed(float speed)

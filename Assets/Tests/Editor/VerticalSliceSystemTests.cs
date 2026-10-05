@@ -1718,6 +1718,146 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void MovementSpeedTransitionsRemainLinearAndDoNotCompound()
+        {
+            const float baseWorldSpeed = 0.75f;
+            const float realFrameSeconds = 1f / 60f;
+            const int framesPerSegment = 60;
+            const long startingTimestamp = 2000000L;
+            float[] segmentSpeeds = { 1f, 2f, 3f, 1f };
+            float totalDistance = 0f;
+            ColonySaveData save = ColonyFactory.CreateNew(startingTimestamp);
+            save.clock.gameTimeMs = GameConfig.StartGameTimeMs;
+            save.clock.lastRealTimestamp = startingTimestamp;
+            save.clock.speed = 1f;
+
+            try
+            {
+                GrowthSystem.SetSimulationPaused(false);
+                for (int segment = 0; segment < segmentSpeeds.Length; segment++)
+                {
+                    Assert.AreEqual(
+                        segment > 0,
+                        GrowthSystem.ChangeSpeedAtTimestamp(
+                            save, segmentSpeeds[segment], startingTimestamp + segment * 1000L),
+                        "The active simulation rate must change only at the timestamp boundary.");
+                    float segmentDistance = 0f;
+                    for (int frame = 0; frame < framesPerSegment; frame++)
+                    {
+                        segmentDistance += GrowthSystem.SimulationMovementStep(
+                            baseWorldSpeed, realFrameSeconds);
+                    }
+
+                    Assert.AreEqual(
+                        baseWorldSpeed * segmentSpeeds[segment], segmentDistance, 0.0001f,
+                        "A speed transition must affect only the current interval and must not compound movement speed.");
+                    totalDistance += segmentDistance;
+                }
+
+                Assert.AreEqual(baseWorldSpeed * 7f, totalDistance, 0.0002f,
+                    "One real second at 1x, 2x, 3x, then 1x must total seven baseline-seconds of travel.");
+            }
+            finally
+            {
+                GrowthSystem.SetRuntimeSpeed(1f);
+                GrowthSystem.SetSimulationPaused(false);
+            }
+        }
+
+        [Test]
+        public void CatchUpBehaviorCannotSpendOldSimulationTimeAsMovement()
+        {
+            const float baseWorldSpeed = 0.75f;
+            const float realFrameSeconds = 1f / 60f;
+            float[] measuredFrameDistances = new float[3];
+
+            try
+            {
+                GrowthSystem.SetSimulationPaused(false);
+                for (int speedIndex = 0; speedIndex < measuredFrameDistances.Length; speedIndex++)
+                {
+                    GrowthSystem.SetRuntimeSpeed(speedIndex + 1f);
+                    float currentFrameSimulationDelta =
+                        GrowthSystem.SimulationBehaviorDeltaSeconds(realFrameSeconds);
+                    float movementBudget = GrowthSystem.SimulationMovementTimeBudget(
+                        currentFrameSimulationDelta);
+
+                    // Simulate stale catch-up steps from earlier frames. They
+                    // must share only this frame's budget, not each add more
+                    // movement time to it.
+                    for (int catchUpStep = 0; catchUpStep < 12; catchUpStep++)
+                    {
+                        measuredFrameDistances[speedIndex] += GrowthSystem.SimulationMovementStep(
+                            baseWorldSpeed, currentFrameSimulationDelta, ref movementBudget);
+                    }
+
+                    Assert.AreEqual(
+                        baseWorldSpeed * currentFrameSimulationDelta,
+                        measuredFrameDistances[speedIndex], 0.0001f,
+                        "Backlog steps must not produce movement beyond the current frame's scaled delta.");
+                }
+
+                Assert.AreEqual(measuredFrameDistances[0] * 2f, measuredFrameDistances[1], 0.0001f);
+                Assert.AreEqual(measuredFrameDistances[0] * 3f, measuredFrameDistances[2], 0.0001f);
+
+                GrowthSystem.SetRuntimeSpeed(3f);
+                float longFrameSimulationDelta = GrowthSystem.SimulationBehaviorDeltaSeconds(1f);
+                float cappedBudget = GrowthSystem.SimulationMovementTimeBudget(longFrameSimulationDelta);
+                float cappedDistance = 0f;
+                for (int catchUpStep = 0; catchUpStep < 12; catchUpStep++)
+                {
+                    cappedDistance += GrowthSystem.SimulationMovementStep(
+                        baseWorldSpeed, longFrameSimulationDelta, ref cappedBudget);
+                }
+                Assert.AreEqual(
+                    baseWorldSpeed * GrowthSystem.MaximumVisualMovementRealDeltaSeconds * 3f,
+                    cappedDistance, 0.0001f,
+                    "A long frame is capped to the configured visual movement interval at each speed.");
+            }
+            finally
+            {
+                GrowthSystem.SetRuntimeSpeed(1f);
+                GrowthSystem.SetSimulationPaused(false);
+            }
+        }
+
+        [Test]
+        public void ChangingSimulationSpeedSettlesClockAtPreviousRate()
+        {
+            const long startingTimestamp = 1000000L;
+            ColonySaveData save = ColonyFactory.CreateNew(startingTimestamp);
+            save.clock.gameTimeMs = GameConfig.StartGameTimeMs;
+            save.clock.lastRealTimestamp = startingTimestamp;
+            save.clock.speed = 1f;
+
+            try
+            {
+                GrowthSystem.SetSimulationPaused(false);
+                GrowthSystem.SetRuntimeSpeed(1f);
+                Assert.IsTrue(GrowthSystem.ChangeSpeedAtTimestamp(save, 2f, startingTimestamp + 1000L));
+                Assert.AreEqual(GameConfig.StartGameTimeMs + 60000L, save.clock.gameTimeMs,
+                    "The first interval must be accrued using the old 1x clock rate.");
+
+                Assert.IsTrue(GrowthSystem.ChangeSpeedAtTimestamp(save, 3f, startingTimestamp + 2000L));
+                Assert.AreEqual(GameConfig.StartGameTimeMs + 3660000L, save.clock.gameTimeMs,
+                    "The next interval must be accrued using the old 2x clock rate.");
+
+                Assert.IsTrue(GrowthSystem.ChangeSpeedAtTimestamp(save, 1f, startingTimestamp + 3000L));
+                Assert.AreEqual(GameConfig.StartGameTimeMs + 90060000L, save.clock.gameTimeMs,
+                    "The next interval must be accrued using the old 3x clock rate.");
+
+                GrowthSystem.AdvanceClock(save, startingTimestamp + 4000L);
+                Assert.AreEqual(GameConfig.StartGameTimeMs + 90120000L, save.clock.gameTimeMs,
+                    "After returning to 1x, the next interval must use 1x and no prior segment is rescaled.");
+            }
+            finally
+            {
+                GrowthSystem.SetRuntimeSpeed(1f);
+                GrowthSystem.SetSimulationPaused(false);
+            }
+        }
+
+        [Test]
         public void ConceptionChanceKeepsLowFertilityViableWithoutChangingHabitatMaximums()
         {
             const long gameTime = 700000000L;
@@ -1990,6 +2130,8 @@ namespace RatHabitat.Tests
         {
             var save = ColonyFactory.CreateNew(1000000L);
             Assert.AreEqual(15, UpgradeSystem.StoreQualityCap(save));
+            Assert.AreEqual(2, UpgradeSystem.StoreListingCount(save));
+            Assert.AreEqual(2, save.storeRatListings.Count);
             var originalListings = new List<StoreRatListingData>();
             foreach (var listing in save.storeRatListings)
             {
@@ -2007,6 +2149,9 @@ namespace RatHabitat.Tests
             int nextCap;
             Assert.IsTrue(UpgradeSystem.PurchaseStoreQualityUpgrade(save, out nextCap));
             Assert.AreEqual(20, nextCap);
+            Assert.AreEqual(3, UpgradeSystem.StoreListingCount(save));
+            Assert.AreEqual(2, save.storeRatListings.Count,
+                "Buying an upgrade must not delete, reroll, or add listings before restock.");
             for (int index = 0; index < originalListings.Count; index++)
             {
                 StoreRatListingData current = save.storeRatListings[index];
@@ -2017,12 +2162,152 @@ namespace RatHabitat.Tests
             }
 
             StoreSystem.RestockNow(save, save.clock.gameTimeMs);
+            Assert.AreEqual(3, save.storeRatListings.Count,
+                "The first store upgrade adds exactly one listing on restock.");
             foreach (var listing in save.storeRatListings)
             {
                 Assert.LessOrEqual(listing.traits.size, 20f);
                 Assert.LessOrEqual(listing.traits.health, 20f);
                 Assert.LessOrEqual(listing.traits.fertility, 20f);
             }
+
+            save.colonyCredits = 10000;
+            Assert.IsTrue(UpgradeSystem.PurchaseStoreQualityUpgrade(save, out nextCap));
+            Assert.AreEqual(4, UpgradeSystem.StoreListingCount(save));
+            Assert.AreEqual(3, save.storeRatListings.Count,
+                "The second upgrade leaves current stock untouched.");
+            string json = SaveSystem.ToJson(save);
+            ColonySaveData loaded = SaveSystem.FromJson(json);
+            Assert.IsNotNull(loaded);
+            Assert.AreEqual(2, loaded.storeQualityUpgradeLevel);
+            Assert.AreEqual(4, UpgradeSystem.StoreListingCount(loaded));
+            Assert.AreEqual(3, loaded.storeRatListings.Count,
+                "Save/load must preserve existing listings until the next restock.");
+            StoreSystem.RestockNow(loaded, loaded.clock.gameTimeMs);
+            Assert.AreEqual(4, loaded.storeRatListings.Count,
+                "The second persisted upgrade adds exactly one more listing.");
+
+            ColonySaveData legacy = SaveSystem.FromJson("{\"storeInventoryInitialized\":true}");
+            Assert.IsNotNull(legacy);
+            Assert.AreEqual(0, legacy.storeQualityUpgradeLevel,
+                "A legacy save without an upgrade field migrates to the base level.");
+            Assert.AreEqual(2, UpgradeSystem.StoreListingCount(legacy));
+        }
+
+        [Test]
+        public void RestockAutomaticallySellsOnlyEligibleForSaleRatsOnceAndPreservesLineage()
+        {
+            const long now = 900000000L;
+            ColonySaveData save = ColonyFactory.CreateNew(now);
+            RatData eligible = CreateAutoSaleTestRat(save, "auto-sale-eligible", "Sale Rat", RatSex.Male, 120f);
+            eligible.motherId = "historical-mother";
+            eligible.fatherId = "historical-father";
+            eligible.litterId = "historical-litter";
+            save.litters.Add(new LitterData
+            {
+                id = "historical-litter",
+                motherId = eligible.motherId,
+                fatherId = eligible.fatherId,
+                size = 1,
+                pupIds = new List<string> { eligible.id },
+            });
+
+            RatData pregnant = CreateAutoSaleTestRat(save, "auto-sale-pregnant", "Pregnant Rat", RatSex.Female, 120f);
+            pregnant.reproductiveState = ReproductiveState.Pregnant;
+            pregnant.pregnancyId = "auto-sale-pregnancy";
+            save.pregnancies.Add(new PregnancyData
+            {
+                id = pregnant.pregnancyId,
+                motherId = pregnant.id,
+                fatherId = save.rats[1].id,
+                startedAt = now,
+                dueAt = now + GameConfig.PregnancyMs,
+                gestationDurationMs = GameConfig.PregnancyMs,
+                status = "pending",
+                expectedLitterSize = 3,
+            });
+
+            RatData tooYoung = CreateAutoSaleTestRat(save, "auto-sale-too-young", "Young Rat", RatSex.Male, 12f);
+            RatData nursing = CreateAutoSaleTestRat(save, "auto-sale-nursing", "Nursing Rat", RatSex.Female, 120f);
+            nursing.nursing = true;
+            RatData dependentPinkie = ColonyFactory.CreateRat(
+                "auto-sale-dependent-pinkie", "Dependent Pinkie", RatSex.Female,
+                save.clock.gameTimeMs, 2, nursing.genotype.Clone(), new TraitData(2f, 2f, 2f), RatStage.Pinkie);
+            dependentPinkie.motherId = nursing.id;
+            dependentPinkie.enclosure = RatEnclosure.ForSale;
+            save.rats.Add(dependentPinkie);
+            save.ratIds.Add(dependentPinkie.id);
+            RatData pairingAssigned = CreateAutoSaleTestRat(
+                save, "auto-sale-pairing-assigned", "Pairing Family Rat", RatSex.Female, 120f);
+            pairingAssigned.pairingHabitatAssigned = true;
+            int walletBefore = save.colonyCredits;
+            int expectedSale = StoreSystem.CalculateSaleValue(save, eligible, now);
+            Assert.Greater(expectedSale, 0);
+
+            StoreRestockResult result = StoreSystem.RestockNowWithResult(save, now);
+            Assert.AreEqual(1, result.soldRatCount);
+            Assert.AreEqual(expectedSale, result.creditedDollars);
+            Assert.AreEqual(walletBefore + expectedSale, save.colonyCredits);
+            Assert.AreEqual(expectedSale, save.lifetimeSaleCredits);
+            Assert.IsFalse(save.rats.Contains(eligible));
+            Assert.AreSame(eligible, save.retiredRats.Find(rat => rat.id == eligible.id));
+            Assert.AreEqual(RatRemovalDisposition.Sold, eligible.removalDisposition);
+            Assert.AreEqual("historical-mother", eligible.motherId);
+            Assert.AreEqual("historical-father", eligible.fatherId);
+            Assert.AreEqual("historical-litter", eligible.litterId);
+            Assert.IsTrue(save.litters[0].pupIds.Contains(eligible.id));
+            Assert.IsTrue(save.rats.Contains(pregnant), "A pending pregnancy must not be auto-sold.");
+            Assert.IsTrue(save.rats.Contains(tooYoung), "An age-ineligible rat must remain in the tank.");
+            Assert.IsTrue(save.rats.Contains(nursing), "A mother with dependent pinkies must remain in the tank.");
+            Assert.IsTrue(save.rats.Contains(dependentPinkie), "An ineligible pinkie must remain in the tank.");
+            Assert.IsTrue(save.rats.Contains(pairingAssigned), "A Pairing-assigned family member must never be auto-sold.");
+            Assert.AreEqual(5, result.skippedRatCount);
+            StringAssert.Contains("automatically sold for $" + expectedSale, result.autoSaleMessage);
+            StringAssert.Contains("Pregnant Rat", result.autoSaleMessage);
+            StringAssert.Contains("(pregnant)", result.autoSaleMessage);
+            StringAssert.Contains("Young Rat", result.autoSaleMessage);
+            StringAssert.Contains("Too young to sell", result.autoSaleMessage);
+            StringAssert.Contains("Nursing Rat", result.autoSaleMessage);
+            StringAssert.Contains("nursing with dependent pinkies", result.autoSaleMessage);
+            StringAssert.Contains("Pairing Family Rat", result.autoSaleMessage);
+            StringAssert.Contains("assigned to Pairing Habitat", result.autoSaleMessage);
+            Assert.AreEqual(EventLogPolicy.Sale, save.eventLog[0].category);
+
+            int walletAfterSale = save.colonyCredits;
+            StoreRestockResult repeated = StoreSystem.RestockNowWithResult(save, now + GameConfig.GameDayMs);
+            Assert.AreEqual(0, repeated.soldRatCount);
+            Assert.AreEqual(walletAfterSale, save.colonyCredits,
+                "Repeated restock processing must not pay for an already-retired rat again.");
+            Assert.AreEqual(1, save.retiredRats.FindAll(rat => rat.id == eligible.id).Count);
+
+            ColonySaveData loaded = SaveSystem.FromJson(SaveSystem.ToJson(save));
+            Assert.IsNotNull(loaded);
+            RatData loadedHistory = loaded.retiredRats.Find(rat => rat.id == eligible.id);
+            Assert.IsNotNull(loadedHistory);
+            Assert.AreEqual("historical-mother", loadedHistory.motherId);
+            Assert.AreEqual("historical-father", loadedHistory.fatherId);
+            Assert.AreEqual("historical-litter", loadedHistory.litterId);
+            Assert.IsTrue(loaded.litters[0].pupIds.Contains(eligible.id));
+            int loadedWallet = loaded.colonyCredits;
+            StoreSystem.RestockNow(loaded, loaded.clock.gameTimeMs + GameConfig.GameDayMs);
+            Assert.AreEqual(loadedWallet, loaded.colonyCredits,
+                "Save/load and a subsequent restock must not replay the payout.");
+        }
+
+        private static RatData CreateAutoSaleTestRat(
+            ColonySaveData save, string id, string name, RatSex sex, float ageDays)
+        {
+            long gameTime = save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs;
+            GenotypeData genotype = save.rats[0].genotype.Clone();
+            RatData rat = ColonyFactory.CreateRat(id, name, sex,
+                gameTime - (long)(ageDays * GameConfig.GameDayMs), 1,
+                genotype, new TraitData(10f, 10f, 10f),
+                ageDays < GameConfig.PupSaleMinimumAgeDays ? RatStage.YoungRat : RatStage.Adult);
+            rat.ageDays = ageDays;
+            rat.enclosure = RatEnclosure.ForSale;
+            save.rats.Add(rat);
+            save.ratIds.Add(id);
+            return rat;
         }
 
         [Test]
@@ -2079,7 +2364,7 @@ namespace RatHabitat.Tests
         [Test]
         public void MarkingMutationRateIsSeparateDeterministicAndShownInBreedingPreview()
         {
-            Assert.AreEqual(0.01f, GameConfig.MarkingMutationRate, 0.000001f);
+            Assert.AreEqual(0.05f, GameConfig.MarkingMutationRate, 0.000001f);
             Assert.AreEqual(0.0025f, GameConfig.MutationRate, 0.000001f);
             Assert.AreEqual(GameConfig.MarkingMutationRate, GeneticsSystem.MutationRateForLocus("S"));
             Assert.AreEqual(GameConfig.MutationRate, GeneticsSystem.MutationRateForLocus("B"));
@@ -2107,12 +2392,27 @@ namespace RatHabitat.Tests
                     "The same random seed must reproduce the same inherited mutations.");
 
                 // Each B/C/D locus has two inherited alleles at 0.25%; S has
-                // two at 1%. These deterministic bounds distinguish the rates
+                // two at 5%. These deterministic bounds distinguish the rates
                 // without relying on an exact count from a random distribution.
                 Assert.That(firstRun[0], Is.InRange(35, 85), "B-locus mutation count");
                 Assert.That(firstRun[1], Is.InRange(35, 85), "C-locus mutation count");
                 Assert.That(firstRun[2], Is.InRange(35, 85), "D-locus mutation count");
-                Assert.That(firstRun[3], Is.InRange(190, 290), "S-locus mutation count");
+                Assert.That(firstRun[3], Is.InRange(1100, 1300), "S-locus mutation count");
+
+                RatData solidMother = new RatData { id = "solid-mother", genotype = solidGenotype.Clone(), markingFamily = "Solid" };
+                RatData solidFather = new RatData { id = "solid-father", genotype = solidGenotype.Clone(), markingFamily = "Self" };
+                int markedPups = CountSeededSpontaneouslyMarkedOffspring(
+                    solidMother, solidFather, 12000, 481516);
+                Assert.That(markedPups, Is.InRange(1050, 1300),
+                    "Solid s/s parents should produce visibly marked offspring at the configured non-guaranteed rate.");
+
+                GenotypeData inheritedMarked = GeneticsSystem.CreateFounder(
+                    "B", "B", "C", "C", "D", "D", "S", "S");
+                RatData markedMother = new RatData { id = "marked-mother", genotype = inheritedMarked, markingFamily = "Blaze" };
+                RatData markedFather = new RatData { id = "marked-father", genotype = inheritedMarked.Clone(), markingFamily = "Blaze" };
+                Assert.AreEqual("Blaze", GeneticsSystem.ResolveOffspringMarkingFamily(
+                    markedMother, markedFather, inheritedMarked.Clone(), "inherited-marking-test"),
+                    "Existing marking inheritance must continue to preserve the parental marking family.");
             }
             finally
             {
@@ -2135,6 +2435,23 @@ namespace RatHabitat.Tests
                 }
             }
             return counts;
+        }
+
+        private static int CountSeededSpontaneouslyMarkedOffspring(
+            RatData mother, RatData father, int offspringCount, int seed)
+        {
+            int marked = 0;
+            UnityEngine.Random.InitState(seed);
+            for (int index = 0; index < offspringCount; index++)
+            {
+                GenotypeData child = GeneticsSystem.InheritGenotype(
+                    mother.genotype, father.genotype, index + 1L);
+                string family = GeneticsSystem.ResolveOffspringMarkingFamily(
+                    mother, father, child, "solid-parent-pup-" + index);
+                if (!string.Equals(family, "Solid", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(family, "Self", StringComparison.OrdinalIgnoreCase)) marked++;
+            }
+            return marked;
         }
 
         [Test]

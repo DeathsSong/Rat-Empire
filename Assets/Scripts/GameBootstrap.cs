@@ -659,6 +659,14 @@ namespace RatHabitat
             return Math.Max(60L * 1000L, duration);
         }
 
+        private void ShowTransientRestockSaleAlert(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message)) return;
+            liveEventMessage = message;
+            liveEventCategory = EventLogPolicy.Sale;
+            liveEventExpiresAt = GameTime + LiveEventDurationGameMs();
+        }
+
         private static string CompactEventMessage(string value)
         {
             string compact = value.Replace("\r", " ").Replace("\n", " ").Trim();
@@ -1839,6 +1847,7 @@ namespace RatHabitat
             bool stageChanged = false;
             bool reproductiveStateChanged = false;
             bool storeChanged = false;
+            StoreRestockResult storeRestockResult = default(StoreRestockResult);
             bool saleEligibilityChanged = false;
             bool activityChanged = false;
             bool enclosureChanged = false;
@@ -1872,7 +1881,7 @@ namespace RatHabitat
                 reproductiveStateChanged = BreedingSystem.RefreshReproductiveStates(Save, GameTime);
                 EndPerformanceSample();
                 BeginPerformanceSample("Rat Empire/Simulation/Store and Sale Eligibility");
-                storeChanged = StoreSystem.AdvanceRestock(Save, GameTime);
+                storeChanged = StoreSystem.AdvanceRestock(Save, GameTime, out storeRestockResult);
                 saleEligibilityChanged = UpdateSaleEligibilitySignature();
                 EndPerformanceSample();
 
@@ -1956,7 +1965,10 @@ namespace RatHabitat
             }
 
             if (storeChanged)
+            {
                 StatusMessage = "Rat Market restocked.";
+                ShowTransientRestockSaleAlert(storeRestockResult.autoSaleMessage);
+            }
 
             bool structuralPresentationChange = stageChanged || reproductiveStateChanged || enclosureChanged || births > 0;
             if (structuralPresentationChange)
@@ -3061,6 +3073,11 @@ namespace RatHabitat
             get { return UpgradeSystem.StoreQualityUpgradeCost(Save); }
         }
 
+        public int StoreListingCapacity
+        {
+            get { return UpgradeSystem.StoreListingCount(Save); }
+        }
+
         public int ColonyCapacityUpgradeCost
         {
             get { return UpgradeSystem.ColonyCapacityUpgradeCost(Save); }
@@ -3080,7 +3097,8 @@ namespace RatHabitat
 
             int newCap;
             if (!UpgradeSystem.PurchaseStoreQualityUpgrade(Save, out newCap)) return;
-            StatusMessage = "Store quality upgraded. New listings can reach " + newCap + ".";
+            StatusMessage = "Store quality upgraded. New listings can reach " + newCap +
+                "; the next restock will offer " + StoreListingCapacity + " rats.";
             SaveSystem.Save(Save);
             RefreshWorldAndUi(true);
         }
@@ -3107,8 +3125,9 @@ namespace RatHabitat
         public void RestockStoreNow()
         {
             if (Save == null) return;
-            StoreSystem.RestockNow(Save, GameTime);
+            StoreRestockResult result = StoreSystem.RestockNowWithResult(Save, GameTime);
             StatusMessage = "Rat Market restocked.";
+            ShowTransientRestockSaleAlert(result.autoSaleMessage);
             SaveSystem.Save(Save);
             if (ui != null) ui.Refresh(true);
         }
@@ -3927,11 +3946,11 @@ namespace RatHabitat
             if (Save == null || Save.clock == null) return;
             BrowserWakeLockSystem.RequestFromUserGesture(Save);
             float normalized = GrowthSystem.NormalizeSpeed(speed);
-            Save.clock.speed = normalized;
-            // Apply the presentation multiplier in the same action as the
-            // persisted clock change so movement and animations respond on
-            // the very next frame instead of waiting for a second clock tick.
-            GrowthSystem.SetRuntimeSpeed(normalized);
+            // Settle elapsed clock time at the previous rate, then re-anchor
+            // the timestamp before the selected rate takes effect. This keeps
+            // a speed-button press from retroactively scaling the previous
+            // interval while presentation responds immediately.
+            GrowthSystem.ChangeSpeedAtTimestamp(Save, normalized, GameConfig.NowMs());
             SaveSystem.Save(Save);
             Debug.Log("[Rat Movement] " + MovementDiagnostics);
             if (ui != null) ui.Refresh(true);

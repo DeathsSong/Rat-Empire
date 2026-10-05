@@ -118,7 +118,9 @@ namespace RatHabitat
         public const string StarterSolidCoatColorVariant = "agouti";
         public const int StarterAdultRatPrice = StorePurchaseBasePrice;
         public const long StoreRestockIntervalGameMs = GameDayMs;
+        // Legacy base-count name is retained for source compatibility.
         public const int StoreRestockListingCount = 2;
+        public const int StoreListingCapacityUpgradeStep = 1;
         public const float StoreSharedMarkingFamilyChance = 0.70f;
         // New-game founders are deliberately weak but still varied. These
         // are absolute stat values, not percentages.
@@ -161,9 +163,11 @@ namespace RatHabitat
         public const float SellCreditTraitMultiplier = 0.5f;
         public const float TraitVariation = 4f;
         // B/C/D pigment mutations retain the original rate. S-locus marking
-        // mutations use their own per-inherited-allele rate in GeneticsSystem.
+        // mutations use a separate per-inherited-allele rate: 5% per allele
+        // gives solid s/s parents a 9.75% chance of at least one spontaneous
+        // marking allele in a pup (1 - 0.95^2), while remaining non-guaranteed.
         public const float MutationRate = 0.0025f;
-        public const float MarkingMutationRate = 0.01f;
+        public const float MarkingMutationRate = 0.05f;
         // Visual scale endpoints are presentation-only. GrowthSystem uses
         // them as the endpoints of its age-based uniform curve; they do not
         // change the saved age, stage, phenotype, or biology rules above.
