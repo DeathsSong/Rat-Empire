@@ -35,11 +35,14 @@ namespace RatHabitat
             foreach (RatData rat in save.rats)
             {
                 if (rat == null) continue;
-                string normalized = ColonyFactory.NormalizeDisplayName(rat.name);
-                if (!string.Equals(normalized, rat.name, StringComparison.Ordinal))
+                if (!rat.nameWasPlayerAssigned)
                 {
-                    rat.name = normalized;
-                    changed = true;
+                    string normalized = ColonyFactory.NormalizeDisplayName(rat.name);
+                    if (!string.Equals(normalized, rat.name, StringComparison.Ordinal))
+                    {
+                        rat.name = normalized;
+                        changed = true;
+                    }
                 }
                 string key = NormalizeForComparison(rat.name);
                 bool duplicate = string.IsNullOrEmpty(key) || occupied.Contains(key) ||

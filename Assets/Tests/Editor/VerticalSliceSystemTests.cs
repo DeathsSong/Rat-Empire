@@ -316,6 +316,7 @@ namespace RatHabitat.Tests
         {
             try
             {
+                GrowthSystem.ResetBehaviorDiagnosticsForTests();
                 GrowthSystem.SetBehaviorParticipantCount(20);
                 GrowthSystem.BeginBehaviorUpdate(0.01f); // establish this frame's diagnostic window
                 int beforeTwenty = GrowthSystem.LastSimulationStepCount;
@@ -354,6 +355,7 @@ namespace RatHabitat.Tests
         {
             try
             {
+                GrowthSystem.ResetBehaviorDiagnosticsForTests();
                 GrowthSystem.SetBehaviorParticipantCount(2);
                 GrowthSystem.BeginBehaviorUpdate(0.01f); // begin a diagnostic frame
                 int stepsBefore = GrowthSystem.LastSimulationStepCount;
@@ -1448,6 +1450,10 @@ namespace RatHabitat.Tests
             rat.birthTimestamp = save.clock.gameTimeMs - (long)(700f * GameConfig.GameDayMs);
             rat.ageDays = 700f;
             rat.breedingEndAgeDays = 700f;
+            // This case is about the Elderly-stage sale restriction, not
+            // natural death. Ensure this rat's saved lifespan extends past
+            // the 700-day stage boundary before reloading the colony.
+            rat.expectedLifespanDays = GameConfig.MaximumLifespanDays;
             rat.stage = RatStage.Mature;
 
             ColonySaveData loaded = SaveSystem.FromJson(SaveSystem.ToJson(save));
@@ -1824,6 +1830,11 @@ namespace RatHabitat.Tests
                 female, male, GameConfig.PairingPregnancyChance, 0f, 0.20f), 0.000001f);
 
             string reason;
+            // Eligibility uses birthTimestamp as the authoritative age, so
+            // synchronize the fixture timestamp with the 730-day cutoff
+            // instead of relying on the display/cache ageDays field alone.
+            female.birthTimestamp = gameTime - (long)(female.ageDays * GameConfig.GameDayMs);
+            male.birthTimestamp = gameTime - (long)(male.ageDays * GameConfig.GameDayMs);
             Assert.IsFalse(BreedingSystem.IsBreedEligible(save, female, gameTime, out reason));
             Assert.AreEqual("Past breeding age", BreedingSystem.ReproductiveStateLabel(save, female, gameTime));
         }
@@ -1904,6 +1915,7 @@ namespace RatHabitat.Tests
 
             save.pregnancies.Clear();
             female.ageDays = 400f;
+            female.birthTimestamp = outsideWindowTime - (long)(female.ageDays * GameConfig.GameDayMs);
             female.stage = RatStage.Senior;
             female.reproductiveState = ReproductiveState.Infertile;
             Assert.IsFalse(BreedingSystem.IsBreedEligible(save, female, outsideWindowTime, out reason));
@@ -2322,6 +2334,21 @@ namespace RatHabitat.Tests
             Assert.AreEqual("Otto ♂", ColonyFactory.DisplayName(male));
             Assert.AreEqual("Mabel ♀", ColonyFactory.DisplayName(female));
             Assert.AreEqual("Mabel ♀", ColonyFactory.DisplayName("Mabel ♀", RatSex.Female));
+
+            var assignedName = new RatData
+            {
+                name = "Mabel 4",
+                sex = RatSex.Female,
+                nameWasPlayerAssigned = true,
+            };
+            Assert.AreEqual("Mabel 4 ♀", ColonyFactory.DisplayName(assignedName),
+                "Player-entered names are complete names and are not migrated or recombined.");
+            var assignedSave = ColonyFactory.CreateNew(1000000L);
+            assignedSave.rats[0].name = "Mabel 4";
+            assignedSave.rats[0].nameWasPlayerAssigned = true;
+            ColonyFactory.NormalizeDisplayNames(assignedSave);
+            Assert.AreEqual("Mabel 4", assignedSave.rats[0].name,
+                "Save migration must preserve an explicitly assigned full name.");
         }
 
         [Test]
@@ -2348,6 +2375,251 @@ namespace RatHabitat.Tests
             Assert.AreEqual(2, restoredRat.activity.history.Count);
             Assert.AreEqual("Moved to Pairing Habitat", restoredRat.activity.history[0].message);
             Assert.AreEqual(4000000L, restoredRat.activity.history[0].gameTimeMs);
+        }
+
+        [Test]
+        public void GameCalendarFormatsEpochYearsMonthsAndOrdinalExceptions()
+        {
+            Assert.AreEqual("Year 0 - January 1st", GameCalendar.FormatDate(0L));
+            Assert.AreEqual("Year 0 - January 1st  •  08:00",
+                GameCalendar.FormatTimestamp(GameConfig.StartGameTimeMs));
+            long augustFourthYearThree = (3L * 365L + 215L) * GameConfig.GameDayMs;
+            Assert.AreEqual("Year 3 - August 4th", GameCalendar.FormatDate(augustFourthYearThree));
+            Assert.AreEqual("th", GameCalendar.OrdinalSuffix(11));
+            Assert.AreEqual("th", GameCalendar.OrdinalSuffix(12));
+            Assert.AreEqual("th", GameCalendar.OrdinalSuffix(13));
+            Assert.AreEqual("st", GameCalendar.OrdinalSuffix(21));
+            Assert.AreEqual("nd", GameCalendar.OrdinalSuffix(22));
+            Assert.AreEqual("rd", GameCalendar.OrdinalSuffix(23));
+            Assert.AreEqual("st", GameCalendar.OrdinalSuffix(31));
+            Assert.AreEqual("Year 0 - January 11th", GameCalendar.FormatDate(10L * GameConfig.GameDayMs));
+            Assert.AreEqual("Year 0 - January 12th", GameCalendar.FormatDate(11L * GameConfig.GameDayMs));
+            Assert.AreEqual("Year 0 - January 13th", GameCalendar.FormatDate(12L * GameConfig.GameDayMs));
+        }
+
+        [Test]
+        public void SaleTankMovesOnlyEligibleIndependentRatsAndPreservesNursingFamilies()
+        {
+            EnclosureSystem.ClearBreedingPair();
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            var save = CreateEmptySaleTestSave(now);
+            RatData male = CreateSaleTestRat(save, "sale-male", RatSex.Male, 100f, RatStage.Adult);
+            RatData mother = CreateSaleTestRat(save, "sale-mother", RatSex.Female, 100f, RatStage.Adult);
+            mother.enclosure = RatEnclosure.FemaleColony;
+            RatData pinkie = CreateSaleTestRat(save, "sale-pinkie", RatSex.Female, 1f, RatStage.Pinkie);
+            pinkie.motherId = mother.id;
+            pinkie.enclosure = RatEnclosure.FemaleColony;
+
+            string reason;
+            Assert.IsTrue(EnclosureSystem.TryAssignToForSale(save, male, now, 2, out reason), reason);
+            Assert.IsFalse(EnclosureSystem.TryAssignToForSale(save, mother, now, 2, out reason));
+            StringAssert.Contains("dependent pinkies", reason);
+            Assert.AreEqual(RatEnclosure.FemaleColony, mother.enclosure);
+            Assert.AreEqual(RatEnclosure.FemaleColony, pinkie.enclosure);
+
+            int moved;
+            Assert.IsTrue(EnclosureSystem.TryAssignAllSellableToForSale(save, now, 2, out moved, out reason));
+            Assert.AreEqual(0, moved, "The already-moved male is not moved or logged twice.");
+            StringAssert.Contains("mother with dependent pinkies stayed", reason);
+            EnclosureSystem.RecalculateAssignments(save);
+            Assert.AreEqual(RatEnclosure.ForSale, male.enclosure);
+            Assert.AreEqual(RatEnclosure.FemaleColony, mother.enclosure);
+            Assert.AreEqual(RatEnclosure.FemaleColony, pinkie.enclosure);
+            Assert.AreEqual(1, EnclosureSystem.CountForSaleRats(save),
+                "A pinkie cannot be carried into For Sale through its mother's assignment.");
+            Assert.AreEqual(3, save.rats.Count, "Habitat transfer must not duplicate or remove rat records.");
+        }
+
+        [Test]
+        public void SaleTankBulkMoveIsAtomicWhenCapacityIsInsufficient()
+        {
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            var save = CreateEmptySaleTestSave(now);
+            RatData first = CreateSaleTestRat(save, "sale-capacity-1", RatSex.Male, 100f, RatStage.Adult);
+            RatData second = CreateSaleTestRat(save, "sale-capacity-2", RatSex.Female, 100f, RatStage.Adult);
+            int moved;
+            string reason;
+
+            Assert.IsFalse(EnclosureSystem.TryAssignAllSellableToForSale(save, now, 1, out moved, out reason));
+            Assert.AreEqual(0, moved);
+            Assert.AreEqual(RatEnclosure.MaleColony, first.enclosure);
+            Assert.AreEqual(RatEnclosure.FemaleColony, second.enclosure);
+            StringAssert.Contains("No rats were moved", reason);
+        }
+
+        [Test]
+        public void SaleTankBulkMoveTransfersEligibleRatsAndKeepsNursingFamiliesTogether()
+        {
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            var save = CreateEmptySaleTestSave(now);
+            RatData male = CreateSaleTestRat(save, "sale-bulk-male", RatSex.Male, 100f, RatStage.Adult);
+            RatData female = CreateSaleTestRat(save, "sale-bulk-female", RatSex.Female, 100f, RatStage.Adult);
+            RatData nursingMother = CreateSaleTestRat(save, "sale-bulk-nursing-mother",
+                RatSex.Female, 100f, RatStage.Adult);
+            RatData pinkie = CreateSaleTestRat(save, "sale-bulk-pinkie", RatSex.Female, 1f, RatStage.Pinkie);
+            pinkie.motherId = nursingMother.id;
+
+            int moved;
+            string reason;
+            Assert.IsTrue(EnclosureSystem.TryAssignAllSellableToForSale(save, now, 3,
+                out moved, out reason), reason);
+            Assert.AreEqual(2, moved);
+            Assert.AreEqual(RatEnclosure.ForSale, male.enclosure);
+            Assert.AreEqual(RatEnclosure.ForSale, female.enclosure);
+            Assert.AreEqual(RatEnclosure.FemaleColony, nursingMother.enclosure);
+            Assert.AreEqual(RatEnclosure.FemaleColony, pinkie.enclosure);
+            StringAssert.Contains("mother with dependent pinkies stayed", reason);
+            Assert.AreEqual(4, save.rats.Count, "Bulk transfer changes assignments only, not colony records.");
+        }
+
+        [Test]
+        public void LegacyBreedingAssignmentsMigrateWithoutChangingSerializedEnumOrIncludingPinkiesForSale()
+        {
+            EnclosureSystem.ClearBreedingPair();
+            Assert.AreEqual((int)RatEnclosure.Breeding, (int)RatEnclosure.ForSale,
+                "For Sale uses the original serialized enum value for save compatibility.");
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            var save = CreateEmptySaleTestSave(now);
+            RatData eligible = CreateSaleTestRat(save, "legacy-sale-eligible", RatSex.Male, 100f, RatStage.Adult);
+            eligible.enclosure = (RatEnclosure)3;
+            RatData mother = CreateSaleTestRat(save, "legacy-sale-mother", RatSex.Female, 100f, RatStage.Adult);
+            mother.enclosure = (RatEnclosure)3;
+            RatData pinkie = CreateSaleTestRat(save, "legacy-sale-pinkie", RatSex.Female, 1f, RatStage.Pinkie);
+            pinkie.motherId = mother.id;
+            pinkie.enclosure = (RatEnclosure)3;
+
+            ColonySaveData restored = SaveSystem.FromJson(SaveSystem.ToJson(save));
+            EnclosureSystem.RecalculateAssignments(restored);
+
+            Assert.AreEqual(RatEnclosure.ForSale,
+                BreedingSystem.FindRat(restored, eligible.id).enclosure);
+            Assert.AreEqual(RatEnclosure.FemaleColony,
+                BreedingSystem.FindRat(restored, mother.id).enclosure);
+            Assert.AreEqual(RatEnclosure.FemaleColony,
+                BreedingSystem.FindRat(restored, pinkie.id).enclosure);
+            foreach (RatData rat in restored.rats)
+                if (rat != null && rat.enclosure == RatEnclosure.ForSale)
+                    Assert.IsTrue(StoreSystem.CanSellRat(restored, rat, now),
+                        rat.id + " must pass the same eligibility check as the Sell screen.");
+        }
+
+        [Test]
+        public void LegacyForSaleMigrationRespectsTheUpgradedColonyCapacity()
+        {
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            var save = CreateEmptySaleTestSave(now);
+            int capacity = UpgradeSystem.ColonyCapacity(save);
+            for (int index = 0; index < capacity + 2; index++)
+            {
+                RatData rat = CreateSaleTestRat(save, "legacy-sale-overflow-" + index,
+                    index % 2 == 0 ? RatSex.Male : RatSex.Female, 100f, RatStage.Adult);
+                rat.enclosure = RatEnclosure.Breeding;
+            }
+
+            EnclosureSystem.RecalculateAssignments(save);
+
+            Assert.AreEqual(capacity, EnclosureSystem.CountForSaleRats(save));
+            foreach (RatData rat in save.rats)
+            {
+                if (rat.enclosure == RatEnclosure.ForSale)
+                    Assert.IsTrue(StoreSystem.CanSellRat(save, rat, now));
+            }
+            Assert.AreEqual(2, save.rats.FindAll(rat => rat.enclosure != RatEnclosure.ForSale).Count,
+                "Overflow from the previous full-size Breeding zone returns to ordinary habitats without data loss.");
+            Assert.AreEqual(capacity + 2, save.rats.Count);
+        }
+
+        [Test]
+        public void ForSaleBirthTransferMovesExistingFamilyAndRetainsPregnancyWhenCapacityIsFull()
+        {
+            EnclosureSystem.ClearBreedingPair();
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            var save = CreateEmptySaleTestSave(now);
+            RatData mother = CreateSaleTestRat(save, "sale-birth-mother", RatSex.Female, 100f, RatStage.Adult);
+            mother.enclosure = RatEnclosure.ForSale;
+            RatData existingPinkie = CreateSaleTestRat(save, "sale-birth-existing-pinkie", RatSex.Female, 1f, RatStage.Pinkie);
+            existingPinkie.motherId = mother.id;
+            existingPinkie.enclosure = RatEnclosure.ForSale;
+            var pregnancy = new PregnancyData
+            {
+                id = "sale-birth-pregnancy",
+                motherId = mother.id,
+                fatherId = "father-id",
+                status = "pending",
+                expectedLitterSize = 3,
+            };
+            save.pregnancies.Add(pregnancy);
+
+            List<RatData> movedFamily;
+            string reason;
+            Assert.IsTrue(EnclosureSystem.TryPrepareForSaleBirth(save, mother, pregnancy, 10,
+                out movedFamily, out reason), reason);
+            Assert.AreEqual(2, movedFamily.Count);
+            Assert.AreEqual(RatEnclosure.Pairing, mother.enclosure);
+            Assert.AreEqual(RatEnclosure.Pairing, existingPinkie.enclosure);
+            Assert.IsTrue(mother.pairingHabitatAssigned);
+            Assert.AreEqual("pending", pregnancy.status);
+            Assert.AreEqual(2, save.rats.Count, "Preparing a birth moves existing records but creates no extra rats.");
+
+            EnclosureSystem.RecalculateAssignments(save);
+            Assert.AreEqual(RatEnclosure.Pairing, mother.enclosure,
+                "An active pregnancy must not override the temporary Pairing assignment for a For Sale birth.");
+            Assert.AreEqual(RatEnclosure.Pairing, existingPinkie.enclosure,
+                "Reassignment must keep the existing litter with its mother during the birth transfer.");
+
+            var fullSave = CreateEmptySaleTestSave(now);
+            RatData fullMother = CreateSaleTestRat(fullSave, "sale-birth-full-mother", RatSex.Female, 100f, RatStage.Adult);
+            fullMother.enclosure = RatEnclosure.ForSale;
+            for (int index = 0; index < 8; index++)
+            {
+                RatData occupant = CreateSaleTestRat(fullSave, "pairing-occupant-" + index,
+                    index % 2 == 0 ? RatSex.Male : RatSex.Female, 100f, RatStage.Adult);
+                occupant.enclosure = RatEnclosure.Pairing;
+                occupant.pairingHabitatAssigned = true;
+            }
+            var blockedPregnancy = new PregnancyData
+            {
+                id = "sale-birth-blocked-pregnancy",
+                motherId = fullMother.id,
+                status = "pending",
+                expectedLitterSize = 3,
+            };
+            fullSave.pregnancies.Add(blockedPregnancy);
+            int originalRatCount = fullSave.rats.Count;
+            Assert.IsFalse(EnclosureSystem.TryPrepareForSaleBirth(fullSave, fullMother, blockedPregnancy, 10,
+                out movedFamily, out reason));
+            StringAssert.Contains("Move All Out of Pairing Habitat", reason);
+            StringAssert.Contains("retries automatically", reason);
+            Assert.AreEqual(EventLogPolicy.Birth,
+                EventLogPolicy.CategoryForMessage("Birth delayed — " + reason),
+                "A capacity-blocked birth must become a player-visible Birth event.");
+            Assert.AreEqual("pending", blockedPregnancy.status);
+            Assert.AreEqual(RatEnclosure.ForSale, fullMother.enclosure);
+            Assert.AreEqual(originalRatCount, fullSave.rats.Count);
+        }
+
+        private static ColonySaveData CreateEmptySaleTestSave(long gameTime)
+        {
+            var save = new ColonySaveData();
+            save.EnsureLists();
+            save.clock.gameTimeMs = gameTime;
+            return save;
+        }
+
+        private static RatData CreateSaleTestRat(ColonySaveData save, string id, RatSex sex,
+            float ageDays, RatStage stage)
+        {
+            var genotype = GeneticsSystem.CreateFounder("B", "b", "C", "C", "D", "D", "s", "s");
+            RatData rat = ColonyFactory.CreateRat(id, id, sex,
+                save.clock.gameTimeMs - (long)(ageDays * GameConfig.GameDayMs), 0,
+                genotype, new TraitData(50f, 70f, 70f), stage);
+            rat.ageDays = ageDays;
+            rat.sexualMaturityDays = sex == RatSex.Female ? 70f : 56f;
+            rat.breedingEndAgeDays = 700f;
+            rat.enclosure = sex == RatSex.Male ? RatEnclosure.MaleColony : RatEnclosure.FemaleColony;
+            save.rats.Add(rat);
+            save.ratIds.Add(rat.id);
+            return rat;
         }
 
         private static ColonySaveData CreatePairingTestSave(long gameTime, float fertility)
@@ -2412,6 +2684,9 @@ namespace RatHabitat.Tests
             rat.recoveryUntil = gameTime + GameConfig.GameDayMs;
             if (state == ReproductiveState.Immature) rat.ageDays = 10f;
             if (state == ReproductiveState.Infertile) rat.ageDays = rat.breedingEndAgeDays;
+            // The systems under test derive biological age from the saved
+            // birth timestamp; keep it aligned with each synthetic state.
+            rat.birthTimestamp = gameTime - (long)(rat.ageDays * GameConfig.GameDayMs);
             save.rats.Add(rat);
             save.ratIds.Add(rat.id);
             return rat;

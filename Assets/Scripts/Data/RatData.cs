@@ -52,7 +52,11 @@ namespace RatHabitat
         FemaleColony,
         Nursery,
         Breeding,
-        Pairing
+        Pairing,
+        // Player-facing replacement for the former Breeding tank. Keep the
+        // alias at the existing serialized enum value so old saves continue
+        // to resolve their saved enclosure without a data rewrite.
+        ForSale = Breeding,
     }
 
     public enum SelectableKind

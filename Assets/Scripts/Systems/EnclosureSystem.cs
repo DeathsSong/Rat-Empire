@@ -54,7 +54,7 @@ namespace RatHabitat
             RatEnclosure.Nursery, "Legacy Nursery", -HabitatColumnSpacing * 2f,
             new Color(0.72f, 0.62f, 0.48f), new Color(0.45f, 0.29f, 0.20f));
         private static readonly Definition BreedingDefinition = CreateFullHabitatDefinition(
-            RatEnclosure.Breeding, "Breeding", HabitatColumnSpacing * 2f,
+            RatEnclosure.Breeding, "For Sale", HabitatColumnSpacing * 2f,
             new Color(0.50f, 0.58f, 0.72f), new Color(0.25f, 0.32f, 0.52f));
         private static readonly Definition PairingDefinition = CreateFullHabitatDefinition(
             RatEnclosure.Pairing, "Pairing Habitat", HabitatColumnSpacing * 3f,
@@ -334,6 +334,8 @@ namespace RatHabitat
             bool changed = MigrateLegacyNurseryAssignments(save);
             long gameTime = save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs;
             HashSet<string> mothersWithDependentPinkies = BuildDependentPinkieMotherIds(save);
+            int forSaleCapacity = UpgradeSystem.ColonyCapacity(save);
+            int forSaleAssigned = 0;
             foreach (var rat in save.rats)
             {
                 if (rat == null) continue;
@@ -357,6 +359,17 @@ namespace RatHabitat
                 }
                 bool nursingState = rat.sex == RatSex.Female && hasDependentPinkies;
                 RatEnclosure desired = DesiredEnclosure(save, rat, hasDependentPinkies);
+                // Breeding was a full-size habitat with no separate saved
+                // occupancy limit. During migration, retain only the first
+                // eligible residents that fit the new sales tank; send any
+                // overflow back to their normal sex-based enclosure.
+                if (desired == RatEnclosure.ForSale)
+                {
+                    if (forSaleAssigned >= forSaleCapacity)
+                        desired = EnclosureOutsideForSale(save, rat);
+                    else
+                        forSaleAssigned++;
+                }
                 if (rat.nursing != nursingState)
                 {
                     rat.nursing = nursingState;
@@ -450,21 +463,64 @@ namespace RatHabitat
 
         public static RatEnclosure DesiredEnclosure(ColonySaveData save, RatData rat, bool hasDependentPinkies)
         {
-            if (IsActiveBreedingParticipant(save, rat)) return RatEnclosure.Breeding;
+            long gameTime = save == null || save.clock == null
+                ? GameConfig.StartGameTimeMs
+                : save.clock.gameTimeMs;
             // Pairing is a player-assigned habitat. Pregnancy, birth, nursing,
-            // and growth must not pull its residents into the normal Nursery
-            // or colony zones; only an explicit remove action can do that.
+            // and growth must not pull its residents into the For Sale tank,
+            // normal Nursery, or colony zones; only an explicit remove action
+            // can do that. This must precede the active-breeding rule: a
+            // pregnant rat moved from For Sale for a birth is still an active
+            // breeding participant until FinishPregnancy commits the litter.
             if (rat != null && (rat.pairingHabitatAssigned || rat.enclosure == RatEnclosure.Pairing)) return RatEnclosure.Pairing;
+            if (IsActiveBreedingParticipant(save, rat))
+                return StoreSystem.CanSellRat(save, rat, gameTime) && !hasDependentPinkies
+                    ? RatEnclosure.ForSale
+                    : StandardEnclosure(save, rat);
             if (rat == null) return RatEnclosure.FemaleColony;
+            // Do not split a nursing family to populate the sales display.
+            if (rat.sex == RatSex.Female && hasDependentPinkies && rat.enclosure == RatEnclosure.ForSale)
+                return RatEnclosure.FemaleColony;
+            // Breeding was historically serialized as an enclosure. It now
+            // represents For Sale, and the assignment is retained only while
+            // the same authoritative rule used by the Sell screen allows it.
+            if (rat.enclosure == RatEnclosure.Breeding &&
+                StoreSystem.CanSellRat(save, rat, gameTime) && !hasDependentPinkies)
+                return RatEnclosure.ForSale;
             if ((rat.stage == RatStage.Pinkie || rat.stage == RatStage.YoungRat) &&
                 (!string.IsNullOrEmpty(rat.motherId) || !string.IsNullOrEmpty(rat.litterId)))
-                return ResolveMotherHabitat(save, rat);
+            {
+                RatEnclosure motherHabitat = ResolveMotherHabitat(save, rat);
+                // A family link must not implicitly add a pup to the new
+                // sales display. Keep a previously assigned pup there only
+                // when it independently passes the Sell screen's current
+                // eligibility rule; pinkies therefore always stay out.
+                if (motherHabitat == RatEnclosure.ForSale)
+                {
+                    if (rat.enclosure == RatEnclosure.ForSale &&
+                        StoreSystem.CanSellRat(save, rat, gameTime))
+                        return RatEnclosure.ForSale;
+                    return rat.sex == RatSex.Male
+                        ? RatEnclosure.MaleColony
+                        : RatEnclosure.FemaleColony;
+                }
+                return motherHabitat;
+            }
             if (rat.sex == RatSex.Male) return RatEnclosure.MaleColony;
             // Pregnancy, nursing, and weaning are relationship states, not a
             // reason to move the mother to a separate enclosure. Keep her in
             // the habitat she is already assigned to; Pairing/Breeding were
             // handled above and ordinary females remain in Female Cage.
             return RatEnclosure.FemaleColony;
+        }
+
+        private static RatEnclosure EnclosureOutsideForSale(ColonySaveData save, RatData rat)
+        {
+            RatEnclosure standard = StandardEnclosure(save, rat);
+            if (standard != RatEnclosure.ForSale) return standard;
+            return rat != null && rat.sex == RatSex.Male
+                ? RatEnclosure.MaleColony
+                : RatEnclosure.FemaleColony;
         }
 
         public static RatEnclosure StandardEnclosure(ColonySaveData save, RatData rat)
@@ -479,6 +535,162 @@ namespace RatHabitat
             }
             if (rat.sex == RatSex.Male) return RatEnclosure.MaleColony;
             return RatEnclosure.FemaleColony;
+        }
+
+        public static int CountForSaleRats(ColonySaveData save)
+        {
+            if (save == null || save.rats == null) return 0;
+            int count = 0;
+            foreach (RatData rat in save.rats)
+                if (rat != null && rat.enclosure == RatEnclosure.ForSale) count++;
+            return count;
+        }
+
+        public static bool TryAssignToForSale(ColonySaveData save, RatData rat,
+            long gameTime, int capacity, out string reason)
+        {
+            reason = string.Empty;
+            if (save == null || rat == null || string.IsNullOrEmpty(rat.id))
+            {
+                reason = "That rat is no longer available.";
+                return false;
+            }
+            if (!StoreSystem.CanSellRat(save, rat, gameTime))
+            {
+                reason = StoreSystem.SaleRestrictionReason(save, rat, gameTime);
+                if (string.IsNullOrEmpty(reason)) reason = "That rat is not currently eligible for sale.";
+                return false;
+            }
+            if (HasDependentPinkies(save, rat.id))
+            {
+                reason = "Keep a mother with dependent pinkies together; move her after the litter is weaned.";
+                return false;
+            }
+            if (rat.enclosure != RatEnclosure.ForSale && CountForSaleRats(save) >= Math.Max(0, capacity))
+            {
+                reason = "The For Sale tank is full.";
+                return false;
+            }
+
+            rat.enclosure = RatEnclosure.ForSale;
+            rat.pairingHabitatAssigned = false;
+            return true;
+        }
+
+        /// <summary>
+        /// Moves the complete currently-sellable set atomically. If the tank
+        /// cannot hold every newly assigned rat, none are moved.
+        /// </summary>
+        public static bool TryAssignAllSellableToForSale(ColonySaveData save,
+            long gameTime, int capacity, out int moved, out string reason)
+        {
+            moved = 0;
+            reason = string.Empty;
+            if (save == null || save.rats == null)
+            {
+                reason = "The colony is not available.";
+                return false;
+            }
+
+            List<RatData> sellable = StoreSystem.GetSellableRats(save, gameTime, StoreSellFilter.All);
+            var candidates = new List<RatData>(sellable.Count);
+            int skippedWithPinkies = 0;
+            foreach (RatData rat in sellable)
+            {
+                if (rat == null) continue;
+                if (HasDependentPinkies(save, rat.id))
+                {
+                    skippedWithPinkies++;
+                    continue;
+                }
+                candidates.Add(rat);
+            }
+            int incoming = 0;
+            foreach (RatData rat in candidates)
+                if (rat != null && rat.enclosure != RatEnclosure.ForSale) incoming++;
+            int current = CountForSaleRats(save);
+            if (current + incoming > Math.Max(0, capacity))
+            {
+                reason = "The For Sale tank needs " + (current + incoming) +
+                    " spaces but holds " + Math.Max(0, capacity) + ". No rats were moved.";
+                return false;
+            }
+
+            foreach (RatData rat in candidates)
+            {
+                if (rat == null || rat.enclosure == RatEnclosure.ForSale) continue;
+                rat.enclosure = RatEnclosure.ForSale;
+                rat.pairingHabitatAssigned = false;
+                moved++;
+            }
+            if (skippedWithPinkies > 0)
+                reason = skippedWithPinkies + " mother" + (skippedWithPinkies == 1 ? " with" : "s with") +
+                    " dependent pinkies stayed with the litter.";
+            return true;
+        }
+
+        public static bool TryPrepareForSaleBirth(ColonySaveData save, RatData mother,
+            PregnancyData pregnancy, int pairingCapacity, out List<RatData> movedFamily,
+            out string reason)
+        {
+            movedFamily = new List<RatData>();
+            reason = string.Empty;
+            if (save == null || save.rats == null || mother == null || pregnancy == null)
+            {
+                reason = "For Sale birth transfer data is unavailable; pregnancy retained.";
+                return false;
+            }
+
+            var motherLitterIds = new HashSet<string>(StringComparer.Ordinal);
+            if (save.litters != null)
+            {
+                foreach (LitterData litter in save.litters)
+                    if (litter != null && litter.motherId == mother.id && !string.IsNullOrEmpty(litter.id))
+                        motherLitterIds.Add(litter.id);
+            }
+
+            var family = new List<RatData> { mother };
+            foreach (RatData pup in save.rats)
+            {
+                if (pup == null || pup.stage != RatStage.Pinkie || pup.id == mother.id) continue;
+                if (pup.motherId == mother.id ||
+                    (!string.IsNullOrEmpty(pup.litterId) && motherLitterIds.Contains(pup.litterId)))
+                    family.Add(pup);
+            }
+
+            int moving = 0;
+            foreach (RatData member in family)
+                if (member.enclosure != RatEnclosure.Pairing) moving++;
+            int newPinkies = pregnancy.birthCommitState > 0
+                ? 0
+                : Math.Max(1, pregnancy.expectedLitterSize);
+            int required = CountPairingRats(save) + moving + newPinkies;
+            if (required > Math.Max(0, pairingCapacity))
+            {
+                reason = "For Sale birth needs " + required + "/" + Math.Max(0, pairingCapacity) +
+                    " Pairing Habitat spaces. Use “Move All Out of Pairing Habitat” to free space; " +
+                    "the pregnancy stays due and retries automatically.";
+                return false;
+            }
+
+            foreach (RatData member in family)
+            {
+                if (member.enclosure == RatEnclosure.Pairing) continue;
+                member.enclosure = RatEnclosure.Pairing;
+                member.pairingHabitatAssigned = true;
+                movedFamily.Add(member);
+            }
+            mother.pairingHabitatAssigned = true;
+            return true;
+        }
+
+        private static int CountPairingRats(ColonySaveData save)
+        {
+            if (save == null || save.rats == null) return 0;
+            int count = 0;
+            foreach (RatData rat in save.rats)
+                if (rat != null && rat.enclosure == RatEnclosure.Pairing) count++;
+            return count;
         }
 
         /// <summary>
@@ -833,11 +1045,11 @@ namespace RatHabitat
                         PointInEnclosure(enclosure, 1.45f, 2.40f));
                     break;
                 case RatEnclosure.Breeding:
-                    AddTarget(targets, "breeding_meet_spot", "Breeding meet point", RatBehaviorTargetKind.Toy,
+                    AddTarget(targets, "breeding_meet_spot", "For Sale meet point", RatBehaviorTargetKind.Toy,
                         PointInEnclosure(enclosure, 0f, 0.10f));
-                    AddTarget(targets, "breeding_rest_spot", "Breeding rest point", RatBehaviorTargetKind.Hide,
+                    AddTarget(targets, "breeding_rest_spot", "For Sale rest point", RatBehaviorTargetKind.Hide,
                         PointInEnclosure(enclosure, -1.45f, 2.30f));
-                    AddTarget(targets, "breeding_explore_spot", "Breeding explore point", RatBehaviorTargetKind.Toy,
+                    AddTarget(targets, "breeding_explore_spot", "For Sale explore point", RatBehaviorTargetKind.Toy,
                         PointInEnclosure(enclosure, 1.45f, -2.10f));
                     break;
                 case RatEnclosure.Pairing:

@@ -268,11 +268,17 @@ namespace RatHabitat
         public static string NormalizeDisplayName(string value)
         {
             if (string.IsNullOrWhiteSpace(value)) return value;
-            // Numeric suffixes are now legitimate deterministic fallbacks
-            // when a name pool is exhausted. Do not strip them during a save
-            // migration or a UI refresh, or the allocator would recreate the
-            // same collision on every load.
-            return value.Trim();
+            string trimmed = value.Trim();
+            int lastSpace = trimmed.LastIndexOf(' ');
+            if (lastSpace <= 0 || lastSpace == trimmed.Length - 1) return trimmed;
+
+            // Older generated listings used a trailing numeric disambiguator
+            // (for example "Mabel 4"). Migrate only that final token; lineage
+            // suffixes such as Jr/II/III remain intact. Player-assigned names
+            // bypass this method at persistence/display boundaries.
+            for (int index = lastSpace + 1; index < trimmed.Length; index++)
+                if (!char.IsDigit(trimmed[index])) return trimmed;
+            return trimmed.Substring(0, lastSpace).TrimEnd();
         }
 
         /// <summary>
@@ -282,7 +288,10 @@ namespace RatHabitat
         /// </summary>
         public static string DisplayName(RatData rat)
         {
-            return rat == null ? "Unknown" : DisplayName(rat.name, rat.sex);
+            if (rat == null) return "Unknown";
+            return rat.nameWasPlayerAssigned
+                ? FormatDisplayName(rat.name, rat.sex)
+                : DisplayName(rat.name, rat.sex);
         }
 
         public static string DisplayName(StoreRatListingData listing)
@@ -293,6 +302,12 @@ namespace RatHabitat
         public static string DisplayName(string name, RatSex sex)
         {
             string result = NormalizeDisplayName(name);
+            return FormatDisplayName(result, sex);
+        }
+
+        private static string FormatDisplayName(string name, RatSex sex)
+        {
+            string result = name == null ? string.Empty : name.Trim();
             if (string.IsNullOrWhiteSpace(result)) result = "Unknown";
             result = RemoveTrailingSexSymbol(result);
             return result + " " + SexSymbol(sex);
@@ -338,7 +353,7 @@ namespace RatHabitat
 
         private static bool NormalizeRatName(RatData rat)
         {
-            if (rat == null) return false;
+            if (rat == null || rat.nameWasPlayerAssigned) return false;
             string normalized = NormalizeDisplayName(rat.name);
             if (normalized == rat.name) return false;
             rat.name = normalized;

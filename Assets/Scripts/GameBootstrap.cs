@@ -337,6 +337,8 @@ namespace RatHabitat
         public bool PairingMoveAllConfirmationPending { get { return pairingMoveAllConfirmationPending; } }
         public int PairingHabitatCapacity { get { return GameConfig.BasePairingHabitatCapacity; } }
         public int PairingHabitatCount { get { return CountPairingHabitatRats(); } }
+        public int ForSaleHabitatCount { get { return EnclosureSystem.CountForSaleRats(Save); } }
+        public int ForSaleHabitatCapacity { get { return UpgradeSystem.ColonyCapacity(Save); } }
         public float SimulationSpeed { get { return Save == null || Save.clock == null ? 1f : GrowthSystem.NormalizeSpeed(Save.clock.speed); } }
         public string SimulationSpeedLabel { get { return ((int)SimulationSpeed) + "×"; } }
         public string MovementDiagnostics { get { return RatHabitatBehavior.GetMovementDiagnosticReadout(); } }
@@ -559,12 +561,7 @@ namespace RatHabitat
 
         public string FormatSimulationTimestamp(long gameTimeMs)
         {
-            long safeTime = Math.Max(0L, gameTimeMs);
-            long day = (safeTime / GameConfig.GameDayMs) + 1L;
-            long dayTime = safeTime % GameConfig.GameDayMs;
-            int hours = (int)(dayTime / (60L * 60L * 1000L));
-            int minutes = (int)((dayTime / (60L * 1000L)) % 60L);
-            return "Day " + day + "  •  " + hours.ToString("00") + ":" + minutes.ToString("00");
+            return GameCalendar.FormatTimestamp(gameTimeMs);
         }
 
         public string FormatRatActivityEntry(RatActivityEntryData entry)
@@ -1695,7 +1692,18 @@ namespace RatHabitat
         {
             if (pregnancy != null && !string.IsNullOrEmpty(pregnancy.id))
                 birthRetryAfterRealtime[pregnancy.id] = Time.unscaledTime + BirthRetryCooldownSeconds;
-            return BreedingSystem.MarkBirthBlocked(pregnancy, GameTime, reason);
+            bool changed = BreedingSystem.MarkBirthBlocked(pregnancy, GameTime, reason);
+            if (changed)
+            {
+                string playerMessage = reason.Trim();
+                if (!playerMessage.StartsWith("Birth delayed", StringComparison.OrdinalIgnoreCase))
+                    playerMessage = "Birth delayed — " + playerMessage;
+                // RecordStatusEvent puts this in the persistent Events history
+                // and the configured birth alert. Do this only when the
+                // diagnostic reason changes, not on every retry window.
+                StatusMessage = playerMessage;
+            }
+            return changed;
         }
 
         private void ScheduleNextNursingTick()
@@ -2343,7 +2351,7 @@ namespace RatHabitat
             {
                 case HabitatCameraView.MaleEnclosure: return "Male Cage";
                 case HabitatCameraView.FemaleEnclosure: return "Female Cage";
-                case HabitatCameraView.Breeding: return "Breeding";
+                case HabitatCameraView.Breeding: return "For Sale";
                 case HabitatCameraView.Pairing: return "Pairing Habitat";
                 default: return "Overview";
             }
@@ -2442,6 +2450,68 @@ namespace RatHabitat
             cameraView = CameraViewForRat(rat);
             StatusMessage = "[Rat Empire] " + ColonyFactory.DisplayName(rat) + " moved to Pairing Habitat.";
             Debug.Log(StatusMessage);
+            SaveSystem.Save(Save);
+            RefreshWorldAndUi(true);
+        }
+
+        public void MoveRatToForSaleTank(string ratId)
+        {
+            RatData rat = BreedingSystem.FindRat(Save, ratId);
+            string reason;
+            if (!EnclosureSystem.TryAssignToForSale(Save, rat, GameTime,
+                ForSaleHabitatCapacity, out reason))
+            {
+                StatusMessage = reason;
+                if (ui != null) ui.Refresh(true);
+                return;
+            }
+
+            RatActivitySystem.SetCurrent(Save, rat, "movement", "Moving habitats", GameTime,
+                "Moved to For Sale tank");
+            EnclosureSystem.RecalculateAssignments(Save);
+            selectedRatId = rat.id;
+            selectedObjectId = null;
+            cameraFollowSelectedRat = true;
+            if (rats != null) rats.SetSelected(rat.id);
+            cameraView = HabitatCameraView.Breeding;
+            StatusMessage = ColonyFactory.DisplayName(rat) + " moved to the For Sale tank.";
+            SaveSystem.Save(Save);
+            RefreshWorldAndUi(true);
+        }
+
+        public void MoveAllEligibleRatsToForSaleTank()
+        {
+            if (Save == null) return;
+            var alreadyInForSale = new HashSet<string>(StringComparer.Ordinal);
+            foreach (RatData existing in Save.rats)
+                if (existing != null && existing.enclosure == RatEnclosure.ForSale)
+                    alreadyInForSale.Add(existing.id);
+            int moved;
+            string reason;
+            if (!EnclosureSystem.TryAssignAllSellableToForSale(Save, GameTime,
+                ForSaleHabitatCapacity, out moved, out reason))
+            {
+                StatusMessage = reason;
+                if (ui != null) ui.Refresh(true);
+                return;
+            }
+
+            foreach (RatData rat in Save.rats)
+            {
+                if (rat == null || rat.enclosure != RatEnclosure.ForSale ||
+                    alreadyInForSale.Contains(rat.id) ||
+                    !StoreSystem.CanSellRat(Save, rat, GameTime) ||
+                    EnclosureSystem.HasDependentPinkies(Save, rat.id)) continue;
+                RatActivitySystem.SetCurrent(Save, rat, "movement", "Moving habitats", GameTime,
+                    "Moved to For Sale tank");
+            }
+            EnclosureSystem.RecalculateAssignments(Save);
+            StatusMessage = moved == 0
+                ? (string.IsNullOrEmpty(reason)
+                    ? "All rats eligible for sale are already in the For Sale tank."
+                    : reason)
+                : "Moved " + moved + " eligible rat" + (moved == 1 ? string.Empty : "s") +
+                    " to the For Sale tank." + (string.IsNullOrEmpty(reason) ? string.Empty : " " + reason);
             SaveSystem.Save(Save);
             RefreshWorldAndUi(true);
         }
@@ -3452,6 +3522,16 @@ namespace RatHabitat
                         "Mother record is unavailable; pregnancy retained for retry.");
                     continue;
                 }
+                if (mother.enclosure == RatEnclosure.ForSale)
+                {
+                    string transferReason;
+                    if (!MoveSaleBirthFamilyToPairing(mother, pregnancy, out transferReason))
+                    {
+                        sequenceChanged |= MarkBirthBlockedAndScheduleRetry(pregnancy, transferReason);
+                        continue;
+                    }
+                    sequenceChanged = true;
+                }
                 if (!EnclosureSystem.HasNest(mother.enclosure))
                 {
                     sequenceChanged |= MarkBirthBlockedAndScheduleRetry(pregnancy,
@@ -3514,6 +3594,25 @@ namespace RatHabitat
             }
 
             return newLitters.Count;
+        }
+
+        private bool MoveSaleBirthFamilyToPairing(RatData mother, PregnancyData pregnancy,
+            out string reason)
+        {
+            List<RatData> movedFamily;
+            if (!EnclosureSystem.TryPrepareForSaleBirth(Save, mother, pregnancy,
+                PairingHabitatCapacity, out movedFamily, out reason)) return false;
+
+            foreach (RatData member in movedFamily)
+                RatActivitySystem.SetCurrent(Save, member, "movement", "Moving habitats", GameTime,
+                    "Moved with family to Pairing Habitat for birth");
+            EnclosureSystem.RecalculateAssignments(Save);
+            cameraView = HabitatCameraView.Pairing;
+            cameraFocusNest = false;
+            cameraFollowSelectedRat = false;
+            SaveSystem.Save(Save);
+            RefreshWorldAndUi(false);
+            return true;
         }
 
         private bool AnnounceBirth(LitterData litter)
@@ -3846,6 +3945,13 @@ namespace RatHabitat
         public bool CanSellRat(RatData rat)
         {
             return StoreSystem.CanSellRat(Save, rat, GameTime);
+        }
+
+        public bool CanMoveRatToForSaleTank(RatData rat)
+        {
+            return rat != null && rat.enclosure != RatEnclosure.ForSale && CanSellRat(rat) &&
+                !EnclosureSystem.HasDependentPinkies(Save, rat.id) &&
+                ForSaleHabitatCount < ForSaleHabitatCapacity;
         }
 
         public string SaleRestrictionReason(RatData rat)

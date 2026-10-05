@@ -913,6 +913,11 @@ namespace RatHabitat
             if (string.IsNullOrWhiteSpace(message)) return null;
             string lower = message.Trim().ToLowerInvariant();
 
+            // A blocked/delayed birth is still a critical pregnancy event. It
+            // must be retained in Events and surfaced through the birth alert
+            // instead of remaining only in a developer diagnostic field.
+            if (lower.StartsWith("birth delayed") || lower.StartsWith("birth retry") ||
+                lower.Contains("for sale birth needs")) return Birth;
             if (lower.Contains("restocked")) return StoreRestocked;
             if (lower.Contains("became pregnant") || lower.Contains(" is pregnant")) return Pregnancy;
             if (lower.StartsWith("birth:") || lower.Contains(" gave birth") || lower.Contains(" has given birth to")) return Birth;

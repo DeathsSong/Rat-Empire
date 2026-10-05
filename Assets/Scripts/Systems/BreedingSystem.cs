@@ -178,7 +178,7 @@ namespace RatHabitat
             if (pregnancy == null) return string.Empty;
             int percentage = Mathf.Clamp(Mathf.RoundToInt(PregnancyProgress01(pregnancy, gameTime) * 100f), 0, 100);
             long remainingMs = Math.Max(0L, pregnancy.dueAt - gameTime);
-            return "Pregnancy " + percentage + "%  •  " + FormatDuration(remainingMs);
+            return "Pregnant — " + percentage + "%  •  " + FormatDuration(remainingMs);
         }
 
         public static PregnancyData FindPregnancyForLitter(ColonySaveData save, string litterId)
@@ -563,16 +563,30 @@ namespace RatHabitat
             long gameTime,
             bool ascending)
         {
-            bool firstPregnant = FindActivePregnancyForMother(save, first) != null;
-            bool secondPregnant = FindActivePregnancyForMother(save, second) != null;
-            if (firstPregnant != secondPregnant) return firstPregnant ? -1 : 1;
-            if (firstPregnant)
+            PregnancyData firstPregnancy = FindActivePregnancyForMother(save, first);
+            PregnancyData secondPregnancy = FindActivePregnancyForMother(save, second);
+            bool firstPregnant = firstPregnancy != null;
+            bool secondPregnant = secondPregnancy != null;
+
+            int firstRank = firstPregnant ? 0 : PregnancyStateSortRank(
+                first != null && EnclosureSystem.HasDependentPinkies(save, first.id)
+                    ? ReproductiveState.Nursing
+                    : GetReproductiveStatus(save, first, gameTime).state);
+            int secondRank = secondPregnant ? 0 : PregnancyStateSortRank(
+                second != null && EnclosureSystem.HasDependentPinkies(save, second.id)
+                    ? ReproductiveState.Nursing
+                    : GetReproductiveStatus(save, second, gameTime).state);
+            int rankComparison = firstRank.CompareTo(secondRank);
+            if (rankComparison != 0) return ascending ? rankComparison : -rankComparison;
+
+            if (firstPregnant && secondPregnant)
             {
-                int dueComparison = PregnancyDueSortValue(FindActivePregnancyForMother(save, first))
-                    .CompareTo(PregnancyDueSortValue(FindActivePregnancyForMother(save, second)));
-                if (dueComparison != 0) return dueComparison;
+                int dueComparison = PregnancyDueSortValue(firstPregnancy)
+                    .CompareTo(PregnancyDueSortValue(secondPregnancy));
+                if (dueComparison != 0) return ascending ? dueComparison : -dueComparison;
             }
-            return CompareStableRatId(first, second);
+            int stableComparison = CompareStableRatId(first, second);
+            return ascending ? stableComparison : -stableComparison;
         }
 
         /// <summary>

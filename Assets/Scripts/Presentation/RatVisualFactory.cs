@@ -295,14 +295,14 @@ namespace RatHabitat
                     if (material.HasProperty("_Color")) material.SetColor("_Color", target);
                     if (importedVisual && !featureMaterial)
                     {
-                        // Albino uses an explicit neutral main albedo texture.
-                        // The imported map remains available through the
-                        // shader's feature-only sampler for eyes and small
-                        // authored details, but its pink/beige fur pixels can
-                        // no longer reach the final body albedo. Other coats
-                        // continue using their recorded coat texture normally.
+                        // Keep the imported map assigned for every coat,
+                        // including albino. The coat shader's AlbinoMode
+                        // neutralizes fur at the final shading stage while
+                        // retaining the authored face/eye detail from this
+                        // texture; a white main map erases those details and
+                        // breaks material-path diagnostics.
                         Texture2D featureSourceTexture = coatTexture == null ? Texture2D.whiteTexture : coatTexture;
-                        Texture2D mainCoatTexture = albino ? Texture2D.whiteTexture : featureSourceTexture;
+                        Texture2D mainCoatTexture = featureSourceTexture;
                         if (material.HasProperty("_BaseMap")) material.SetTexture("_BaseMap", mainCoatTexture);
                         if (material.HasProperty("_MainTex")) material.SetTexture("_MainTex", mainCoatTexture);
                         if (material.HasProperty("_FeatureSourceTex")) material.SetTexture("_FeatureSourceTex", featureSourceTexture);

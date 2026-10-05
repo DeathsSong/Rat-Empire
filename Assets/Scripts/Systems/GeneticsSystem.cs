@@ -274,6 +274,7 @@ namespace RatHabitat
         private static float Vary(float midpoint)
         {
             float safeMidpoint = ClampTrait(midpoint);
+            if (safeMidpoint <= 0f) return 0f;
             return Mathf.Clamp(safeMidpoint + UnityEngine.Random.Range(-GameConfig.TraitVariation, GameConfig.TraitVariation), 0f, 100f);
         }
 

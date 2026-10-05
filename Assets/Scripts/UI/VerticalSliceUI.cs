@@ -53,7 +53,9 @@ namespace RatHabitat
         private RectTransform settingsViewport;
         private ScrollRect settingsScroll;
         private Button keepScreenAwakeButton;
-        private Text keepScreenAwakeStatusText;
+        private Button topScreenAlertsHeading;
+        private RectTransform topScreenAlertsContent;
+        private bool topScreenAlertsExpanded;
         private RectTransform customMaleNamesList;
         private RectTransform customFemaleNamesList;
         private RectTransform customMaleNameInputRow;
@@ -71,6 +73,16 @@ namespace RatHabitat
         private RectTransform developerToolsOverlay;
         private RectTransform developerToolsViewport;
         private RectTransform developerToolsCard;
+        private ScrollRect developerToolsScroll;
+        private readonly Dictionary<string, bool> developerSectionExpanded = new Dictionary<string, bool>(StringComparer.Ordinal);
+        private sealed class DeveloperAccordionGroup
+        {
+            public string key;
+            public string title;
+            public Button heading;
+            public int firstContentChild;
+            public readonly List<GameObject> content = new List<GameObject>();
+        }
         private RectTransform ratAnimationShowcaseOverlay;
         private RectTransform ratAnimationShowcaseCard;
         private RectTransform eventLogOverlay;
@@ -1372,6 +1384,7 @@ namespace RatHabitat
 
         private void BuildShell()
         {
+            TraceBuildShell("begin");
             var canvasObject = new GameObject("UI Canvas");
             canvasObject.transform.SetParent(transform, false);
             canvas = canvasObject.AddComponent<Canvas>();
@@ -1393,6 +1406,7 @@ namespace RatHabitat
 
             safeRoot = CreateRect("Safe Area", canvas.transform);
             ApplySafeArea();
+            TraceBuildShell("canvas and safe area ready");
 
             var header = CreateRect("Fixed Header", safeRoot);
             header.anchorMin = new Vector2(0f, 1f);
@@ -1424,6 +1438,7 @@ namespace RatHabitat
             headerCanvas.overrideSorting = true;
             headerCanvas.sortingOrder = canvas.sortingOrder + 20;
             headerRaycaster = header.gameObject.AddComponent<GraphicRaycaster>();
+            TraceBuildShell("header canvas ready");
 
             var title = AddText(headerContent, "RAT EMPIRE", 16, Color.white, TextAnchor.MiddleLeft);
             title.rectTransform.anchorMin = new Vector2(0f, 0.73f);
@@ -1431,6 +1446,26 @@ namespace RatHabitat
             title.rectTransform.offsetMin = new Vector2(12f, 1f);
             title.rectTransform.offsetMax = new Vector2(0f, -1f);
             title.fontStyle = FontStyle.Bold;
+            title.raycastTarget = false;
+            // Text is already a Graphic, so Unity rejects adding an Image to
+            // the same GameObject. Keep the transparent home hit target on a
+            // separate child Graphic instead of dereferencing a rejected
+            // component during WebGL startup.
+            var habitatHomeHitTarget = CreateRect("Rat Empire Habitat Home Hit Target", title.rectTransform);
+            habitatHomeHitTarget.anchorMin = Vector2.zero;
+            habitatHomeHitTarget.anchorMax = Vector2.one;
+            habitatHomeHitTarget.offsetMin = Vector2.zero;
+            habitatHomeHitTarget.offsetMax = Vector2.zero;
+            var habitatHomeHitImage = habitatHomeHitTarget.gameObject.AddComponent<Image>();
+            habitatHomeHitImage.color = new Color(0f, 0f, 0f, 0f);
+            habitatHomeHitImage.raycastTarget = true;
+            var habitatHomeButton = habitatHomeHitTarget.gameObject.AddComponent<Button>();
+            habitatHomeButton.targetGraphic = habitatHomeHitImage;
+            habitatHomeButton.navigation = new Navigation { mode = Navigation.Mode.None };
+            habitatHomeHitTarget.gameObject.AddComponent<DirectUiClickRelay>().Configure(this, habitatHomeButton,
+                () => ToggleTopPanel(MainPanel.Habitat));
+            var homeTooltip = habitatHomeHitTarget.gameObject.AddComponent<RatUiTooltip>();
+            homeTooltip.Label = "Open habitat views";
 
             walletText = AddText(headerContent, "$0", 12, new Color(1f, 0.82f, 0.38f), TextAnchor.MiddleLeft);
             walletText.rectTransform.anchorMin = new Vector2(0f, 0.59f);
@@ -1438,7 +1473,7 @@ namespace RatHabitat
             walletText.rectTransform.offsetMin = new Vector2(12f, 0f);
             walletText.rectTransform.offsetMax = new Vector2(0f, -1f);
 
-            clockText = AddText(headerContent, "Day 1", 14, new Color(0.73f, 0.9f, 0.78f), TextAnchor.UpperLeft);
+            clockText = AddText(headerContent, "Year 0 - January 1st", 14, new Color(0.73f, 0.9f, 0.78f), TextAnchor.UpperLeft);
             clockText.rectTransform.anchorMin = new Vector2(0.34f, 0.59f);
             clockText.rectTransform.anchorMax = new Vector2(0.55f, 1f);
             clockText.rectTransform.offsetMin = new Vector2(2f, 1f);
@@ -1479,7 +1514,6 @@ namespace RatHabitat
             topNavigationButtons.Clear();
             topNavigationImages.Clear();
             topNavigationLabels.Clear();
-            AddTopNavigationButton(navigation, MainPanel.Habitat, "Habitat");
             AddTopNavigationButton(navigation, MainPanel.MyRats, "My Rats");
             AddTopNavigationButton(navigation, MainPanel.Store, "Store");
             AddTopNavigationButton(navigation, MainPanel.Upgrades, "Upgrades");
@@ -1503,6 +1537,7 @@ namespace RatHabitat
             AddSimulationSpeedButton(speedRow, 3f);
             EnsureHeaderNavigationReady();
             RefreshTopNavigationState();
+            TraceBuildShell("header controls ready");
 
             var scrollObject = new GameObject("Natural Page Scroll");
             scrollObject.transform.SetParent(safeRoot, false);
@@ -1582,24 +1617,41 @@ namespace RatHabitat
             fitter.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
             fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
             pageScroll.content = content;
+            TraceBuildShell("page scroll and content ready");
 
             BuildWelcomeModal();
+            TraceBuildShell("welcome modal ready");
             BuildSettingsPopup();
+            TraceBuildShell("settings popup ready");
             BuildDeveloperToolsPopup();
+            TraceBuildShell("developer tools popup ready");
             BuildRatAnimationShowcasePopup();
+            TraceBuildShell("animation showcase ready");
             BuildEventLogPanel();
+            TraceBuildShell("event log panel ready");
             BuildRenamePopup();
+            TraceBuildShell("rename popup ready");
             BuildPendingNamingPopup();
+            TraceBuildShell("pending naming popup ready");
 
             // Force the first width calculation before the first content
             // rebuild so the initial selected-rat card is already constrained.
             Canvas.ForceUpdateCanvases();
+            TraceBuildShell("first canvas layout pass ready");
             ApplyResponsiveLayout();
             // The runtime Canvas may not have received its final safe-area
             // rectangle until the first layout pass. Let the first Refresh
             // recalculate from the actual screen dimensions.
             layoutScreenWidth = -1;
             layoutScreenHeight = -1;
+            TraceBuildShell("complete");
+        }
+
+        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        private static void TraceBuildShell(string stage)
+        {
+            Debug.Log($"[UI_BOOT] VerticalSliceUI.BuildShell: {stage}");
         }
 
         private void ApplySafeArea()
@@ -1704,27 +1756,34 @@ namespace RatHabitat
         {
             settingsOverlay = CreateModalOverlay("Settings Popup", new Color(0.01f, 0.03f, 0.04f, 0.74f), out settingsCard);
             AddText(settingsCard, "Settings", 22, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
-            AddText(settingsCard, "Local save", 17, Color.white, TextAnchor.UpperLeft);
-            AddText(settingsCard, "Save the colony, pregnancy state, litters, growth, genes, traits, and timestamps locally on this device.", 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
             AddText(settingsCard, "Pairing Habitat: " + (GameConfig.PairingPregnancyChance * 100f).ToString("0") +
                 "% pregnancy chance per " + (GameConfig.PairingCheckIntervalMs / 1000L).ToString() + " in-game seconds.",
                 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
             keepScreenAwakeButton = AddButtonTo(settingsCard, "Keep Screen Awake", true,
                 game.ToggleKeepScreenAwake, new Color(0.16f, 0.38f, 0.33f), 46f);
-            keepScreenAwakeStatusText = AddText(settingsCard, string.Empty, 12,
-                new Color(0.72f, 0.84f, 0.78f), TextAnchor.UpperLeft);
-            AddText(settingsCard, "Top Screen Alerts", 17, Color.white, TextAnchor.UpperLeft);
-            AddText(settingsCard, "Choose which important colony events appear near the header. The full Events history is kept separately.",
+            topScreenAlertsHeading = AddButtonTo(settingsCard,
+                (topScreenAlertsExpanded ? "▾  " : "▸  ") + "Top Screen Alerts", true,
+                ToggleTopScreenAlerts, new Color(0.12f, 0.27f, 0.29f), 42f);
+            topScreenAlertsHeading.gameObject.name = "Settings Section Top Screen Alerts";
+            topScreenAlertsContent = CreateRect("Top Screen Alerts Content", settingsCard);
+            var alertContentLayout = topScreenAlertsContent.gameObject.AddComponent<VerticalLayoutGroup>();
+            alertContentLayout.spacing = 6f;
+            alertContentLayout.childControlWidth = true;
+            alertContentLayout.childControlHeight = true;
+            alertContentLayout.childForceExpandWidth = true;
+            alertContentLayout.childForceExpandHeight = false;
+            topScreenAlertsContent.gameObject.AddComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+            AddText(topScreenAlertsContent, "Choose which important colony events appear near the header. The full Events history is kept separately.",
                 13, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
             alertPreferenceButtons.Clear();
             for (int index = 0; index < EventLogPolicy.CategoryIds.Length; index++)
-                AddAlertPreferenceButton(settingsCard, EventLogPolicy.CategoryIds[index]);
-            alertPreferencesStatusText = AddText(settingsCard, string.Empty, 12,
-                new Color(0.72f, 0.84f, 0.78f), TextAnchor.UpperLeft);
-            AddButtonTo(settingsCard, "Reset Alert Preferences", true,
+                AddAlertPreferenceButton(topScreenAlertsContent, EventLogPolicy.CategoryIds[index]);
+            alertPreferencesStatusText = null;
+            AddButtonTo(topScreenAlertsContent, "Reset Alert Preferences", true,
                 game.ResetAlertPreferences, new Color(0.12f, 0.27f, 0.29f), 40f);
+            topScreenAlertsContent.gameObject.SetActive(topScreenAlertsExpanded);
             AddText(settingsCard, "Custom Rat Names", 17, Color.white, TextAnchor.UpperLeft);
-            AddText(settingsCard, "Add names one at a time. Custom names join the built-in pools for future rats and Randomize buttons.",
+            AddText(settingsCard, "Add your own names here and you might see them appear for future rats!",
                 13, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
             BuildCustomNameList(settingsCard, RatSex.Male);
             BuildCustomNameList(settingsCard, RatSex.Female);
@@ -1778,6 +1837,29 @@ namespace RatHabitat
                 () => game.ToggleAlertCategory(category), new Color(0.16f, 0.38f, 0.33f), 38f);
             button.gameObject.name = "Alert Preference " + category;
             alertPreferenceButtons[category] = button;
+        }
+
+        private void ToggleTopScreenAlerts()
+        {
+            topScreenAlertsExpanded = !topScreenAlertsExpanded;
+            if (topScreenAlertsContent != null)
+                topScreenAlertsContent.gameObject.SetActive(topScreenAlertsExpanded);
+            if (topScreenAlertsHeading != null)
+                SetButtonLabel(topScreenAlertsHeading,
+                    (topScreenAlertsExpanded ? "▾  " : "▸  ") + "Top Screen Alerts");
+            RefreshSettingsLayout();
+        }
+
+        private void RefreshSettingsLayout()
+        {
+            if (settingsCard == null) return;
+            Canvas.ForceUpdateCanvases();
+            LayoutRebuilder.ForceRebuildLayoutImmediate(settingsCard);
+            if (settingsScroll != null && settingsViewport != null)
+            {
+                LayoutRebuilder.ForceRebuildLayoutImmediate(settingsViewport);
+                settingsScroll.StopMovement();
+            }
         }
 
         private void BuildRenamePopup()
@@ -2287,7 +2369,7 @@ namespace RatHabitat
             {
                 alertPreferencesStatusText.text = game.AllAlertCategoriesDisabled
                     ? "Alerts muted. Events history is still saved."
-                    : "Top alerts update immediately and are saved locally.";
+                    : string.Empty;
             }
         }
 
@@ -2306,8 +2388,6 @@ namespace RatHabitat
                         : new Color(0.18f, 0.25f, 0.27f);
                 }
             }
-            if (keepScreenAwakeStatusText != null)
-                keepScreenAwakeStatusText.text = game.KeepScreenAwakeStatusMessage;
         }
 
         private void BuildDeveloperToolsPopup()
@@ -2323,6 +2403,7 @@ namespace RatHabitat
             viewportImage.raycastTarget = true;
             developerToolsViewport.gameObject.AddComponent<RectMask2D>();
             var scroll = developerToolsViewport.gameObject.AddComponent<ScrollRect>();
+            developerToolsScroll = scroll;
             scroll.horizontal = false;
             scroll.vertical = true;
             scroll.inertia = true;
@@ -3035,6 +3116,19 @@ namespace RatHabitat
         private void OpenSettings()
         {
             if (game != null) game.PrepareForSettings();
+            // Settings always opens with the compact alert section collapsed
+            // and its viewport at the top; the player's previous expansion
+            // should not push the custom-name and Developer Tools controls
+            // below the initial phone-sized view.
+            topScreenAlertsExpanded = false;
+            if (topScreenAlertsContent != null) topScreenAlertsContent.gameObject.SetActive(false);
+            if (topScreenAlertsHeading != null)
+                SetButtonLabel(topScreenAlertsHeading, "▸  Top Screen Alerts");
+            if (settingsScroll != null)
+            {
+                settingsScroll.StopMovement();
+                settingsScroll.verticalNormalizedPosition = 1f;
+            }
             expandedMyRatsId = null;
             familyTreeSubjectId = null;
             ResetProfileInformationExpansion();
@@ -5463,7 +5557,39 @@ namespace RatHabitat
             if (parent == null || game == null || game.Save == null) return;
 
             int ratCount = CountVisibleColonyRats();
-            var card = CreateCard("My Rats");
+            var card = CreateCard(string.Empty);
+            var rosterHeader = CreateRect("My Rats Panel Header", card);
+            var rosterHeaderLayout = rosterHeader.gameObject.AddComponent<HorizontalLayoutGroup>();
+            rosterHeaderLayout.spacing = 8f;
+            rosterHeaderLayout.childAlignment = TextAnchor.MiddleCenter;
+            rosterHeaderLayout.childControlWidth = true;
+            rosterHeaderLayout.childControlHeight = true;
+            rosterHeaderLayout.childForceExpandWidth = false;
+            rosterHeaderLayout.childForceExpandHeight = false;
+            Text rosterTitle = AddTextTo(rosterHeader, "My Rats", 18,
+                new Color(0.98f, 0.78f, 0.32f), TextAnchor.MiddleLeft);
+            rosterTitle.fontStyle = FontStyle.Bold;
+            LayoutElement rosterTitleLayout = rosterTitle.GetComponent<LayoutElement>();
+            if (rosterTitleLayout != null) rosterTitleLayout.flexibleWidth = 1f;
+            Button closeRoster = AddButtonTo(rosterHeader, "×", true,
+                () => ToggleTopPanel(MainPanel.MyRats), new Color(0.58f, 0.18f, 0.16f), 42f);
+            closeRoster.gameObject.name = "Close My Rats";
+            LayoutElement closeRosterLayout = closeRoster.GetComponent<LayoutElement>();
+            if (closeRosterLayout != null)
+            {
+                closeRosterLayout.minWidth = 44f;
+                closeRosterLayout.preferredWidth = 44f;
+                closeRosterLayout.flexibleWidth = 0f;
+            }
+            RatUiTooltip closeTooltip = closeRoster.gameObject.AddComponent<RatUiTooltip>();
+            closeTooltip.Label = "Close My Rats";
+
+            List<RatData> eligibleForSale = StoreSystem.GetSellableRats(
+                game.Save, game.GameTime, StoreSellFilter.All);
+            if (eligibleForSale.Count > 0)
+                AddButtonTo(card, "Move All To Sale Tank", true,
+                    game.MoveAllEligibleRatsToForSaleTank,
+                    new Color(0.24f, 0.40f, 0.28f), 42f);
             string countSummary = rosterFavoritesOnly
                 ? ratCount + " favorite rats shown"
                 : rosterSortField == RosterSortField.Pregnancy
@@ -5472,8 +5598,6 @@ namespace RatHabitat
             AddText(card, countSummary + "  •  " + RosterSexFilterLabel() +
                 "  •  Sort: " + RosterSortLabel(), 13,
                 new Color(0.78f, 0.9f, 0.82f), TextAnchor.UpperLeft);
-            AddButtonTo(card, "Close My Rats", true, () => ToggleTopPanel(MainPanel.MyRats),
-                new Color(0.14f, 0.22f, 0.25f), 40f);
             AddRosterSexFilters(card);
             AddRosterSortControls(card);
             AddButtonTo(card, game.MultipleSelectionMode ? "Stop Select Multiple" : "Select Multiple", true,
@@ -6243,6 +6367,27 @@ namespace RatHabitat
                 detailFitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
                 AddDetailedRatInformation(detailPanel, rat, 12);
                 AddRatActivityHistory(detailPanel, rat);
+                if (game != null && game.CanSellRat(rat))
+                {
+                    bool alreadyInSaleTank = rat.enclosure == RatEnclosure.ForSale;
+                    bool hasDependentPinkies = EnclosureSystem.HasDependentPinkies(game.Save, rat.id);
+                    bool canMoveToSaleTank = game.CanMoveRatToForSaleTank(rat);
+                    string moveLabel = alreadyInSaleTank
+                        ? "Already in For Sale tank"
+                        : hasDependentPinkies
+                            ? "Keep mother with dependent pinkies"
+                            : game.ForSaleHabitatCount >= game.ForSaleHabitatCapacity
+                                ? "For Sale tank is full"
+                                : "Send to Sale Tank";
+                    UnityEngine.Events.UnityAction moveToSaleAction = alreadyInSaleTank
+                        ? null
+                        : new UnityEngine.Events.UnityAction(() => game.MoveRatToForSaleTank(rat.id));
+                    AddButtonTo(detailPanel,
+                        moveLabel,
+                        canMoveToSaleTank,
+                        moveToSaleAction,
+                        canMoveToSaleTank ? new Color(0.24f, 0.40f, 0.28f) : new Color(0.18f, 0.25f, 0.27f), 42f);
+                }
                 AddButtonTo(detailPanel, "Profile", true,
                     () => OpenRatProfileFromMyRats(rat.id),
                     new Color(0.22f, 0.38f, 0.46f), 42f);
@@ -7094,9 +7239,12 @@ namespace RatHabitat
 
             AddText(developerToolsCard, "Developer Tools", 22, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
             AddText(developerToolsCard, "Developer-only controls. Test rats use real saved genotype and phenotype data; regular growth and inheritance rules are unchanged.", 13, new Color(0.7f, 0.78f, 0.74f), TextAnchor.UpperLeft);
+            DeveloperAccordionGroup diagnosticsGroup = BeginDeveloperAccordion("diagnostics", "Live diagnostics");
             AddText(developerToolsCard, "Movement diagnostic: " + game.MovementDiagnostics, 12, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
             AddText(developerToolsCard, "Simulation diagnostic: " + game.SimulationPerformanceDiagnostics, 12, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
+            EndDeveloperAccordion(diagnosticsGroup);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
+            DeveloperAccordionGroup performanceGroup = BeginDeveloperAccordion("performance", "Runtime Performance Diagnostics");
             AddText(developerToolsCard, "Runtime Performance Investigation", 17, Color.white, TextAnchor.UpperLeft);
             AddText(developerToolsCard,
                 "Diagnostics are in-memory only. They never create, clear, or save a colony. Capture continues while Developer Tools is closed.",
@@ -7197,7 +7345,9 @@ namespace RatHabitat
                 () => TogglePerformanceIsolationMode(PerformanceIsolationMode.AutomaticUiRefresh));
             performanceIsolationButtons[PerformanceIsolationMode.ColonyMaintenance] = AddPerformanceButton("Performance.AB.ColonyMaintenance", IsolationToggleLabel(PerformanceIsolationMode.ColonyMaintenance, "colony maintenance", "skipped", "normal"), true,
                 () => TogglePerformanceIsolationMode(PerformanceIsolationMode.ColonyMaintenance));
+            EndDeveloperAccordion(performanceGroup);
 #endif
+            DeveloperAccordionGroup visualGroup = BeginDeveloperAccordion("visual-isolation", "Visual seam isolation");
             AddText(developerToolsCard, "Visual seam isolation", 17, Color.white, TextAnchor.UpperLeft);
             AddText(developerToolsCard, "Current mode: " + RatVisualDiagnostics.ModeLabel + ". These modes affect only live visuals and never change saved phenotype data.", 13, new Color(0.7f, 0.78f, 0.74f), TextAnchor.UpperLeft);
             AddButton(developerToolsCard, "1  Plain coat  •  markings disabled", true, () => SetVisualDiagnosticMode(RatVisualDiagnosticMode.PlainCoat));
@@ -7206,6 +7356,8 @@ namespace RatHabitat
             AddButton(developerToolsCard, "4  Material / renderer ID colors", true, () => SetVisualDiagnosticMode(RatVisualDiagnosticMode.MaterialIds));
             AddButton(developerToolsCard, "5  World normal colors", true, () => SetVisualDiagnosticMode(RatVisualDiagnosticMode.Normals));
             AddButton(developerToolsCard, "6  World tangent colors", true, () => SetVisualDiagnosticMode(RatVisualDiagnosticMode.Tangents));
+            EndDeveloperAccordion(visualGroup);
+            DeveloperAccordionGroup spawnGroup = BeginDeveloperAccordion("spawn-tests", "Spawn adult test rats");
             AddText(developerToolsCard, "Spawn adult test rats", 17, Color.white, TextAnchor.UpperLeft);
             AddButton(developerToolsCard, "Solid Black  •  B/B C/C D/D s/s", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.SolidBlack));
             AddButton(developerToolsCard, "Solid Brown  •  b/b C/C D/D s/s", true, () => game.SpawnDeveloperRat(DeveloperRatPreset.SolidBrown));
@@ -7221,10 +7373,14 @@ namespace RatHabitat
                 () => game.SpawnDeveloperRat(DeveloperRatPreset.MarkingMutationTest));
             AddButton(developerToolsCard, "Spawn Pinkie Placement Test Litter  •  5 grounded pups", true, game.SpawnDeveloperPinkieLitter);
             AddButtonTo(developerToolsCard, "Rat Animation Showcase", true, OpenRatAnimationShowcase, new Color(0.18f, 0.34f, 0.42f), 48f);
+            EndDeveloperAccordion(spawnGroup);
 
+            DeveloperAccordionGroup storeGroup = BeginDeveloperAccordion("store-tests", "Store testing");
             AddText(developerToolsCard, "Store testing", 17, Color.white, TextAnchor.UpperLeft);
             AddButton(developerToolsCard, "Restock Rat Market Now", true, game.RestockStoreNow);
+            EndDeveloperAccordion(storeGroup);
 
+            DeveloperAccordionGroup growthGroup = BeginDeveloperAccordion("growth-pregnancy", "Growth and pregnancy tests");
             AddText(developerToolsCard, "Growth and pregnancy tests", 17, Color.white, TextAnchor.UpperLeft);
             if (game.SelectedRat != null)
             {
@@ -7257,6 +7413,8 @@ namespace RatHabitat
                     14, new Color(0.75f, 0.88f, 0.84f), TextAnchor.UpperLeft);
             }
 
+            EndDeveloperAccordion(growthGroup);
+            DeveloperAccordionGroup maintenanceGroup = BeginDeveloperAccordion("colony-maintenance", "Colony maintenance");
             AddText(developerToolsCard, "Colony maintenance", 17, Color.white, TextAnchor.UpperLeft);
             if (game.SelectedRat == null)
             {
@@ -7273,6 +7431,8 @@ namespace RatHabitat
                 AddButtonTo(developerToolsCard, "Delete Selected Rat", true, game.RequestDeleteSelectedRat, new Color(0.55f, 0.18f, 0.16f), 48f);
             }
 
+            EndDeveloperAccordion(maintenanceGroup);
+            DeveloperAccordionGroup resetGroup = BeginDeveloperAccordion("destructive-reset", "Destructive colony reset • separate from performance diagnostics");
             AddText(developerToolsCard, "Destructive colony reset • separate from performance diagnostics", 17,
                 new Color(1f, 0.48f, 0.34f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
             if (game.ResetConfirmationPending)
@@ -7291,7 +7451,65 @@ namespace RatHabitat
                     game.RequestFullReset, new Color(0.68f, 0.12f, 0.1f), 50f);
                 resetButton.gameObject.name = "Developer.DestructiveReset.Request";
             }
+            EndDeveloperAccordion(resetGroup);
             AddButtonTo(developerToolsCard, "Close Developer Tools", true, CloseDeveloperTools, new Color(0.14f, 0.22f, 0.25f), 46f);
+        }
+
+        private DeveloperAccordionGroup BeginDeveloperAccordion(string key, string title)
+        {
+            bool expanded;
+            if (!developerSectionExpanded.TryGetValue(key, out expanded))
+            {
+                expanded = false;
+                developerSectionExpanded[key] = false;
+            }
+
+            var group = new DeveloperAccordionGroup { key = key, title = title };
+            group.heading = AddButtonTo(developerToolsCard,
+                (expanded ? "▾  " : "▸  ") + title, true,
+                () => ToggleDeveloperAccordion(group), new Color(0.12f, 0.27f, 0.29f), 42f);
+            group.heading.gameObject.name = "Developer Section " + key;
+            group.firstContentChild = developerToolsCard.childCount;
+            return group;
+        }
+
+        private void EndDeveloperAccordion(DeveloperAccordionGroup group)
+        {
+            if (group == null || developerToolsCard == null) return;
+            for (int index = group.firstContentChild; index < developerToolsCard.childCount; index++)
+                group.content.Add(developerToolsCard.GetChild(index).gameObject);
+            bool expanded;
+            if (!developerSectionExpanded.TryGetValue(group.key, out expanded)) expanded = false;
+            SetDeveloperAccordionExpanded(group, expanded, false);
+        }
+
+        private void ToggleDeveloperAccordion(DeveloperAccordionGroup group)
+        {
+            if (group == null) return;
+            bool expanded;
+            developerSectionExpanded.TryGetValue(group.key, out expanded);
+            SetDeveloperAccordionExpanded(group, !expanded, true);
+        }
+
+        private void SetDeveloperAccordionExpanded(DeveloperAccordionGroup group, bool expanded, bool rebuildLayout)
+        {
+            developerSectionExpanded[group.key] = expanded;
+            for (int index = 0; index < group.content.Count; index++)
+                if (group.content[index] != null) group.content[index].SetActive(expanded);
+            if (group.heading != null)
+                SetButtonLabel(group.heading, (expanded ? "▾  " : "▸  ") + group.title);
+            if (!rebuildLayout || developerToolsCard == null) return;
+
+            float previousScroll = developerToolsScroll == null ? 1f : developerToolsScroll.verticalNormalizedPosition;
+            Canvas.ForceUpdateCanvases();
+            LayoutRebuilder.ForceRebuildLayoutImmediate(developerToolsCard);
+            if (developerToolsViewport != null)
+                LayoutRebuilder.ForceRebuildLayoutImmediate(developerToolsViewport);
+            if (developerToolsScroll != null)
+            {
+                developerToolsScroll.verticalNormalizedPosition = Mathf.Clamp01(previousScroll);
+                developerToolsScroll.StopMovement();
+            }
         }
 
         private void SetVisualDiagnosticMode(RatVisualDiagnosticMode mode)

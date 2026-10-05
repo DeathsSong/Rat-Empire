@@ -556,7 +556,7 @@ namespace RatHabitat
             ExportBuilder.Length = 0;
             ExportBuilder.Append(captureEnabled ? "CAPTURE ON" : "CAPTURE OFF")
                 .Append(" • ").Append(latest.CurrentPanel ?? "None")
-                .Append(" • Day ").Append(GameDayLabel(latest.GameTimeMs))
+                .Append(" • ").Append(GameCalendar.FormatTimestamp(latest.GameTimeMs))
                 .Append(" • ").Append(latest.Speed).Append('x')
                 .Append(" • ").Append(latest.Fps.ToString("0.0", CultureInfo.InvariantCulture)).Append(" FPS / ")
                 .Append(latest.AverageFrameMs.ToString("0.0", CultureInfo.InvariantCulture)).Append(" ms avg / ")
@@ -835,19 +835,10 @@ namespace RatHabitat
             return value < 0f ? "n/a" : value.ToString("0.00", CultureInfo.InvariantCulture) + " ms";
         }
 
-        private static string GameDayLabel(long gameTimeMs)
-        {
-            long day = Math.Max(1L, gameTimeMs / GameConfig.GameDayMs + 1L);
-            long minuteOfDay = (gameTimeMs % GameConfig.GameDayMs) / 60000L;
-            return day.ToString(CultureInfo.InvariantCulture) + " " +
-                (minuteOfDay / 60L).ToString("00", CultureInfo.InvariantCulture) + ":" +
-                (minuteOfDay % 60L).ToString("00", CultureInfo.InvariantCulture);
-        }
-
         private static StringBuilder AppendCompactSample(StringBuilder builder, PerformanceLogSample sample)
         {
             builder.Append(new DateTime(sample.UtcTicks, DateTimeKind.Utc).ToString("yyyy-MM-dd HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture))
-                .Append(" • Day ").Append(GameDayLabel(sample.GameTimeMs)).Append(" • ").Append(sample.Speed).Append('x')
+                .Append(" • ").Append(GameCalendar.FormatTimestamp(sample.GameTimeMs)).Append(" • ").Append(sample.Speed).Append('x')
                 .Append(" • FPS ").Append(sample.Fps.ToString("0.0", CultureInfo.InvariantCulture))
                 .Append(" • frame ").Append(sample.AverageFrameMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("/")
                 .Append(sample.WorstFrameMs.ToString("0.00", CultureInfo.InvariantCulture)).Append(" ms")
@@ -896,7 +887,8 @@ namespace RatHabitat
         {
             builder.Append(type).Append(',').Append(severity).Append(',')
                 .Append(new DateTime(sample.UtcTicks, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture)).Append(',')
-                .Append(GameDayLabel(sample.GameTimeMs)).Append(',').Append(sample.Speed).Append(',')
+                .Append('"').Append(GameCalendar.FormatTimestamp(sample.GameTimeMs).Replace("\"", "\"\"")).Append('"')
+                .Append(',').Append(sample.Speed).Append(',')
                 .Append(sample.Fps.ToString("0.00", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.AverageFrameMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.WorstFrameMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')

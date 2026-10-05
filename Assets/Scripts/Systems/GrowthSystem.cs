@@ -216,6 +216,20 @@ namespace RatHabitat
 #endif
         }
 
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        /// <summary>
+        /// Gives EditMode tests an isolated diagnostic-frame boundary. Unity's
+        /// editor test loop may execute many tests without advancing
+        /// Time.frameCount, unlike separate rendered frames in play mode.
+        /// This resets counters only; it has no effect on simulation state.
+        /// </summary>
+        public static void ResetBehaviorDiagnosticsForTests()
+        {
+            diagnosticsFrame = int.MinValue;
+            EnsureDiagnosticsFrame();
+        }
+#endif
+
         // Timed behavior and movement share the same clock. Keep the older
         // name as an alias for biological/presentation timers already using it.
         public static float SimulationBehaviorDeltaSeconds(float realDeltaSeconds)
@@ -256,9 +270,12 @@ namespace RatHabitat
 
         public static float SimulationMultiplierForSpeed(float speed)
         {
-            double baseline = SimulationMillisecondsPerRealMillisecond(1f);
-            if (baseline <= 0d) return 1f;
-            return Mathf.Max(0f, (float)(SimulationMillisecondsPerRealMillisecond(speed) / baseline));
+            // The clock intentionally uses legacy fast-forward rates (1 game
+            // minute / real second at 1x, one game hour at 2x, one game day
+            // at 3x). Per-frame behavior and movement use the selected mode
+            // itself; deriving this multiplier from clock units turns 2x into
+            // 60x and 3x into 1440x, causing massive repeated movement/ticks.
+            return NormalizeSpeed(speed);
         }
 
         public static double GameSecondsPerRealSecond(float speed)

@@ -130,7 +130,7 @@ namespace RatHabitat
             CreateDecorativeTunnel(femaleCageRoot, RatEnclosure.FemaleColony, "Peach Tunnel",
                 EnclosureSystem.PointInEnclosure(RatEnclosure.FemaleColony, -1.10f, 1.00f, 0.62f),
                 2.45f, 0.46f, new Color(0.97f, 0.60f, 0.42f));
-            CreateDecorativeTunnel(breedingCageRoot, RatEnclosure.Breeding, "Breeding Tunnel",
+            CreateDecorativeTunnel(breedingCageRoot, RatEnclosure.ForSale, "For Sale Shelter",
                 EnclosureSystem.PointInEnclosure(RatEnclosure.Breeding, 1.05f, -1.50f, 0.56f),
                 2.0f, 0.40f, new Color(0.86f, 0.45f, 0.62f));
             CreatePairingNest();
@@ -421,7 +421,8 @@ namespace RatHabitat
         {
             string signText = definition.enclosure == RatEnclosure.MaleColony ? "Males" :
                 definition.enclosure == RatEnclosure.FemaleColony ? "Females" :
-                definition.enclosure == RatEnclosure.Nursery ? "Nursery" : "Breeding";
+                definition.enclosure == RatEnclosure.Nursery ? "Nursery" :
+                definition.enclosure == RatEnclosure.ForSale ? "For Sale" : "Breeding";
             if (definition.enclosure == RatEnclosure.Pairing) signText = "Pairing Habitat";
             float signHeight = 1.82f;
             // Every player-facing sign uses the same plaque dimensions as the
