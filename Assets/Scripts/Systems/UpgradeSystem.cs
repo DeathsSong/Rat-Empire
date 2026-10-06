@@ -13,6 +13,7 @@ namespace RatHabitat
             if (save == null) return;
             if (save.colonyCapacityUpgradeLevel < 0) save.colonyCapacityUpgradeLevel = 0;
             if (save.storeQualityUpgradeLevel < 0) save.storeQualityUpgradeLevel = 0;
+            if (save.pairingHabitatCapacityUpgradeLevel < 0) save.pairingHabitatCapacityUpgradeLevel = 0;
         }
 
         public static int StoreQualityCap(ColonySaveData save)
@@ -42,6 +43,14 @@ namespace RatHabitat
             return GameConfig.BaseColonyCapacity + level * GameConfig.ColonyCapacityUpgradeStep;
         }
 
+        public static int PairingHabitatCapacity(ColonySaveData save)
+        {
+            EnsureState(save);
+            int level = save == null ? 0 : save.pairingHabitatCapacityUpgradeLevel;
+            return GameConfig.BasePairingHabitatCapacity +
+                level * GameConfig.PairingHabitatCapacityUpgradeStep;
+        }
+
         public static int StoreQualityUpgradeCost(ColonySaveData save)
         {
             EnsureState(save);
@@ -54,6 +63,14 @@ namespace RatHabitat
             EnsureState(save);
             int level = save == null ? 0 : save.colonyCapacityUpgradeLevel;
             return GameConfig.ColonyCapacityUpgradeBaseCost + level * GameConfig.ColonyCapacityUpgradeCostStep;
+        }
+
+        public static int PairingHabitatCapacityUpgradeCost(ColonySaveData save)
+        {
+            EnsureState(save);
+            int level = save == null ? 0 : save.pairingHabitatCapacityUpgradeLevel;
+            return GameConfig.PairingHabitatCapacityUpgradeBaseCost +
+                level * GameConfig.PairingHabitatCapacityUpgradeCostStep;
         }
 
         public static bool PurchaseStoreQualityUpgrade(ColonySaveData save, out int newCap)
@@ -77,6 +94,18 @@ namespace RatHabitat
             save.colonyCredits -= cost;
             save.colonyCapacityUpgradeLevel++;
             newCapacity = ColonyCapacity(save);
+            return true;
+        }
+
+        public static bool PurchasePairingHabitatCapacityUpgrade(ColonySaveData save, out int newCapacity)
+        {
+            newCapacity = PairingHabitatCapacity(save);
+            if (save == null) return false;
+            int cost = PairingHabitatCapacityUpgradeCost(save);
+            if (save.colonyCredits < cost) return false;
+            save.colonyCredits -= cost;
+            save.pairingHabitatCapacityUpgradeLevel++;
+            newCapacity = PairingHabitatCapacity(save);
             return true;
         }
     }

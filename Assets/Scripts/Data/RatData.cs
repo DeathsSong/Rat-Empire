@@ -478,6 +478,9 @@ namespace RatHabitat
         // to zero and are migrated safely by UpgradeSystem.
         public int colonyCapacityUpgradeLevel;
         public int storeQualityUpgradeLevel;
+        // Missing in older saves; zero means the original ten-occupant
+        // Pairing Habitat capacity.
+        public int pairingHabitatCapacityUpgradeLevel;
         public List<StoreRatListingData> storeRatListings = new List<StoreRatListingData>();
         // In-game timestamp for the next market refresh. This is deliberately
         // separate from real time so changing UI pages cannot reroll stock.

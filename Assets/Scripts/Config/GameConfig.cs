@@ -147,6 +147,11 @@ namespace RatHabitat
         // admission limit for that enclosure, separate from the overall
         // colony capacity and from breeding eligibility.
         public const int BasePairingHabitatCapacity = 10;
+        // Each purchase adds five occupant slots. Pricing follows the colony
+        // capacity upgrade's escalating $150 + $100 per level progression.
+        public const int PairingHabitatCapacityUpgradeStep = 5;
+        public const int PairingHabitatCapacityUpgradeBaseCost = 150;
+        public const int PairingHabitatCapacityUpgradeCostStep = 100;
         // A full-fertility female can carry a realistic 6-18 pinkie litter.
         // Lower fertility scales both limits down, with a successful
         // pregnancy always clamped to at least one pinkie.

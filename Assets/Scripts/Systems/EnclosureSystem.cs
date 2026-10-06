@@ -668,7 +668,8 @@ namespace RatHabitat
             if (required > Math.Max(0, pairingCapacity))
             {
                 reason = "For Sale birth needs " + required + "/" + Math.Max(0, pairingCapacity) +
-                    " Pairing Habitat spaces. Use “Move All Out of Pairing Habitat” to free space; " +
+                    " Pairing Habitat spaces. Purchase the Pairing Habitat Capacity upgrade in Upgrades " +
+                    "or use “Move All Out of Pairing Habitat” to free space; " +
                     "the pregnancy stays due and retries automatically.";
                 return false;
             }

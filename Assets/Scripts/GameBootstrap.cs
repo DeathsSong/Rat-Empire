@@ -335,8 +335,12 @@ namespace RatHabitat
         public bool GroupSellConfirmationPending { get { return groupSellConfirmationPending; } }
         public RatEnclosure GroupMoveConfirmationTarget { get { return groupMoveConfirmationTarget; } }
         public bool PairingMoveAllConfirmationPending { get { return pairingMoveAllConfirmationPending; } }
-        public int PairingHabitatCapacity { get { return GameConfig.BasePairingHabitatCapacity; } }
+        public int PairingHabitatCapacity { get { return UpgradeSystem.PairingHabitatCapacity(Save); } }
         public int PairingHabitatCount { get { return CountPairingHabitatRats(); } }
+        public int PairingHabitatCapacityUpgradeCost
+        {
+            get { return UpgradeSystem.PairingHabitatCapacityUpgradeCost(Save); }
+        }
         public int ForSaleHabitatCount { get { return EnclosureSystem.CountForSaleRats(Save); } }
         public int ForSaleHabitatCapacity { get { return UpgradeSystem.ColonyCapacity(Save); } }
         public float SimulationSpeed { get { return Save == null || Save.clock == null ? 1f : GrowthSystem.NormalizeSpeed(Save.clock.speed); } }
@@ -2411,10 +2415,10 @@ namespace RatHabitat
             }
 
             int pairingCount = CountPairingHabitatRats();
-            if (pairingCount >= GameConfig.BasePairingHabitatCapacity)
+            if (pairingCount >= PairingHabitatCapacity)
             {
                 StatusMessage = "Pairing Habitat is full (" + pairingCount + "/" +
-                    GameConfig.BasePairingHabitatCapacity + "). Move a rat out first.";
+                    PairingHabitatCapacity + "). Upgrade Pairing Habitat Capacity or move a rat out first.";
                 if (ui != null) ui.Refresh(true);
                 return;
             }
@@ -2848,13 +2852,12 @@ namespace RatHabitat
                 }
 
                 int requestedCount = currentPairingCount + incomingCount;
-                if (requestedCount > GameConfig.BasePairingHabitatCapacity)
+                if (requestedCount > PairingHabitatCapacity)
                 {
                     StatusMessage = "Pairing Habitat has " +
-                        (GameConfig.BasePairingHabitatCapacity - currentPairingCount) +
-                        " space" + (GameConfig.BasePairingHabitatCapacity - currentPairingCount == 1 ? string.Empty : "s") +
-                        " remaining (" + currentPairingCount + "/" +
-                        GameConfig.BasePairingHabitatCapacity + ").";
+                        Math.Max(0, PairingHabitatCapacity - currentPairingCount) +
+                        " spaces remaining (" + currentPairingCount + "/" +
+                        PairingHabitatCapacity + "). Upgrade Pairing Habitat Capacity or move rats out.";
                     if (ui != null) ui.Refresh(true);
                     return;
                 }
@@ -3118,6 +3121,26 @@ namespace RatHabitat
             int newCapacity;
             if (!UpgradeSystem.PurchaseColonyCapacityUpgrade(Save, out newCapacity)) return;
             StatusMessage = "Colony capacity upgraded to " + newCapacity + " rats.";
+            SaveSystem.Save(Save);
+            RefreshWorldAndUi(true);
+        }
+
+        public void PurchasePairingHabitatCapacityUpgrade()
+        {
+            if (Save == null) return;
+            UpgradeSystem.EnsureState(Save);
+            int cost = UpgradeSystem.PairingHabitatCapacityUpgradeCost(Save);
+            if (Save.colonyCredits < cost)
+            {
+                StatusMessage = "Not enough dollars. Pairing Habitat Capacity upgrade costs $" + cost + ".";
+                if (ui != null) ui.Refresh(false);
+                return;
+            }
+
+            int newCapacity;
+            if (!UpgradeSystem.PurchasePairingHabitatCapacityUpgrade(Save, out newCapacity)) return;
+            StatusMessage = "Pairing Habitat capacity upgraded to " + newCapacity +
+                " occupants. Existing residents were kept.";
             SaveSystem.Save(Save);
             RefreshWorldAndUi(true);
         }

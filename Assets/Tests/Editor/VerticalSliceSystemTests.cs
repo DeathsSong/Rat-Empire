@@ -920,6 +920,234 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void StoreMarketAndSellListingsUseIndependentScrollableViewports()
+        {
+            bool previousIgnoreFailingMessages = LogAssert.ignoreFailingMessages;
+            var gameObject = new GameObject("Store Scroll Test Game");
+            var canvasObject = new GameObject("Store Scroll Test Canvas", typeof(RectTransform), typeof(Canvas), typeof(GraphicRaycaster));
+            var eventSystemObject = new GameObject("Store Scroll Test EventSystem", typeof(EventSystem));
+            try
+            {
+                LogAssert.ignoreFailingMessages = true;
+
+                gameObject.SetActive(false);
+                GameBootstrap game = gameObject.AddComponent<GameBootstrap>();
+                ColonySaveData save = ColonyFactory.CreateNew(1000000L);
+                save.colonyCredits = 100000;
+                StoreRatListingData listingTemplate = save.storeRatListings[0];
+                for (int index = save.storeRatListings.Count; index < 10; index++)
+                {
+                    StoreRatListingData listing = JsonUtility.FromJson<StoreRatListingData>(
+                        JsonUtility.ToJson(listingTemplate));
+                    listing.id = "store-scroll-listing-" + index;
+                    listing.name = "Market Scroll Rat " + index;
+                    listing.price = 100;
+                    save.storeRatListings.Add(listing);
+                }
+
+                for (int index = 0; index < 10; index++)
+                {
+                    string ratId = "store-scroll-sell-rat-" + index;
+                    RatData rat = ColonyFactory.CreateRat(ratId, "Sell Scroll Rat " + index,
+                        index % 2 == 0 ? RatSex.Female : RatSex.Male, 1000000L, 1,
+                        GeneticsSystem.CreateFounder("B", "B", "C", "C", "D", "D", "s", "s"),
+                        new TraitData(20f, 30f, 30f), RatStage.Adult);
+                    MakeEligibleAdultForSale(rat);
+                    save.rats.Add(rat);
+                    save.ratIds.Add(ratId);
+                }
+                typeof(GameBootstrap).GetProperty("Save").GetSetMethod(true)
+                    .Invoke(game, new object[] { save });
+
+                Canvas canvas = canvasObject.GetComponent<Canvas>();
+                canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+                RectTransform canvasRect = canvasObject.GetComponent<RectTransform>();
+                canvasRect.sizeDelta = new Vector2(540f, 960f);
+                EventSystem eventSystem = eventSystemObject.GetComponent<EventSystem>();
+                eventSystem.enabled = true;
+
+                var pageObject = new GameObject("Store Scroll Test Page", typeof(RectTransform), typeof(ScrollRect));
+                pageObject.transform.SetParent(canvasObject.transform, false);
+                RectTransform pageRect = pageObject.GetComponent<RectTransform>();
+                pageRect.anchorMin = Vector2.zero;
+                pageRect.anchorMax = Vector2.one;
+                pageRect.offsetMin = Vector2.zero;
+                pageRect.offsetMax = new Vector2(0f, -154f);
+                ScrollRect pageScroll = pageObject.GetComponent<ScrollRect>();
+                var pageViewportObject = new GameObject("Store Scroll Test Page Viewport", typeof(RectTransform), typeof(Image), typeof(RectMask2D));
+                pageViewportObject.transform.SetParent(pageObject.transform, false);
+                RectTransform pageViewport = pageViewportObject.GetComponent<RectTransform>();
+                pageViewport.anchorMin = Vector2.zero;
+                pageViewport.anchorMax = Vector2.one;
+                pageViewport.offsetMin = Vector2.zero;
+                pageViewport.offsetMax = Vector2.zero;
+                var pageContentObject = new GameObject("Store Scroll Test Page Content", typeof(RectTransform),
+                    typeof(VerticalLayoutGroup), typeof(ContentSizeFitter));
+                pageContentObject.transform.SetParent(pageViewport, false);
+                RectTransform pageContent = pageContentObject.GetComponent<RectTransform>();
+                pageContent.anchorMin = new Vector2(0f, 1f);
+                pageContent.anchorMax = new Vector2(1f, 1f);
+                pageContent.pivot = new Vector2(0.5f, 1f);
+                pageContent.sizeDelta = Vector2.zero;
+                VerticalLayoutGroup pageLayout = pageContentObject.GetComponent<VerticalLayoutGroup>();
+                pageLayout.childControlWidth = true;
+                pageLayout.childControlHeight = true;
+                pageLayout.childForceExpandWidth = true;
+                pageLayout.childForceExpandHeight = false;
+                pageContentObject.GetComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+                pageScroll.viewport = pageViewport;
+                pageScroll.content = pageContent;
+                pageScroll.vertical = true;
+
+                VerticalSliceUI ui = canvasObject.AddComponent<VerticalSliceUI>();
+                SetPrivateField(ui, "game", game);
+                SetPrivateField(ui, "content", pageContent);
+                Type mainPanelType = typeof(VerticalSliceUI).GetNestedType(
+                    "MainPanel", System.Reflection.BindingFlags.NonPublic);
+                Type storeCategoryType = typeof(VerticalSliceUI).GetNestedType(
+                    "StoreCategory", System.Reflection.BindingFlags.NonPublic);
+                SetPrivateField(ui, "pageScroll", pageScroll);
+                Assert.IsNotNull(mainPanelType);
+                Assert.IsNotNull(storeCategoryType);
+                SetPrivateField(ui, "activeMainPanel", System.Enum.Parse(mainPanelType, "Store"));
+                var rebuild = typeof(VerticalSliceUI).GetMethod(
+                    "RebuildContent", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Assert.IsNotNull(rebuild);
+
+                rebuild.Invoke(ui, null);
+                Canvas.ForceUpdateCanvases();
+                LayoutRebuilder.ForceRebuildLayoutImmediate(pageContent);
+                Canvas.ForceUpdateCanvases();
+
+                Assert.IsFalse(pageScroll.enabled,
+                    "Store controls remain fixed while the dedicated market list owns vertical gestures.");
+                ScrollRect marketScroll = GetPrivateField<ScrollRect>(ui, "storeRatListScroll");
+                AssertStoreListCanScrollAndKeepButtons(marketScroll, eventSystem, "BUY", 10);
+                Assert.Greater(marketScroll.content.rect.height, marketScroll.viewport.rect.height,
+                    "The full market listing content must exceed the viewport for an upgraded market.");
+
+                marketScroll.verticalNormalizedPosition = 0f;
+                Canvas.ForceUpdateCanvases();
+                Assert.Less(marketScroll.verticalNormalizedPosition, 0.01f,
+                    "The last Buy listing must be reachable at the bottom of the list.");
+                var resetList = typeof(VerticalSliceUI).GetMethod(
+                    "ResetStoreRatListToTop", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Assert.IsNotNull(resetList);
+                resetList.Invoke(ui, null);
+                Assert.Greater(marketScroll.verticalNormalizedPosition, 0.99f,
+                    "The explicit list reset must run after its content layout and reach the true top.");
+
+                // A normal game-clock refresh must update live Store labels
+                // without replacing the nested list while the player is
+                // reading or dragging it. This was the browser failure mode:
+                // the global UI signature changes each simulation second.
+                SetPrivateField(ui, "ready", true);
+                marketScroll.verticalNormalizedPosition = 0.45f;
+                Canvas.ForceUpdateCanvases();
+                float preservedStorePosition = marketScroll.verticalNormalizedPosition;
+                string previousUiSignature = game.UiSignature;
+                SetPrivateField(ui, "lastSignature", previousUiSignature);
+                save.clock.gameTimeMs += 5000L;
+                Assert.AreNotEqual(previousUiSignature, game.UiSignature,
+                    "The fixture must represent a clock-only UI signature change.");
+                ui.Refresh(false);
+                Assert.AreSame(marketScroll, GetPrivateField<ScrollRect>(ui, "storeRatListScroll"),
+                    "A clock-only refresh must preserve the Store ScrollRect and its active drag target.");
+                Assert.AreEqual(preservedStorePosition, marketScroll.verticalNormalizedPosition, 0.01f,
+                    "Clock-only refreshes must not reset or jump the listing position.");
+
+                SetPrivateField(ui, "storeCategory", System.Enum.Parse(storeCategoryType, "Sell"));
+                rebuild.Invoke(ui, null);
+                Canvas.ForceUpdateCanvases();
+                LayoutRebuilder.ForceRebuildLayoutImmediate(pageContent);
+                Canvas.ForceUpdateCanvases();
+                ScrollRect sellScroll = GetPrivateField<ScrollRect>(ui, "storeRatListScroll");
+                AssertStoreListCanScrollAndKeepButtons(sellScroll, eventSystem, "SELL", 12);
+                Assert.Greater(sellScroll.content.rect.height, sellScroll.viewport.rect.height,
+                    "The Sell list uses the same scrollable viewport with a long eligible-rat roster.");
+
+                Transform sellFilters = pageContent.Find("Rat Market/Sell Rat Filters");
+                Assert.IsNotNull(sellFilters);
+                foreach (Button filterButton in sellFilters.GetComponentsInChildren<Button>(true))
+                {
+                    Assert.IsTrue(filterButton.interactable);
+                    Assert.AreNotSame(sellScroll.gameObject,
+                        ExecuteEvents.GetEventHandler<IDragHandler>(filterButton.gameObject),
+                        "Filter controls stay outside the rat-list drag surface.");
+                }
+            }
+            finally
+            {
+                LogAssert.ignoreFailingMessages = previousIgnoreFailingMessages;
+                Object.DestroyImmediate(gameObject);
+                Object.DestroyImmediate(canvasObject);
+                Object.DestroyImmediate(eventSystemObject);
+            }
+        }
+
+        private static void AssertStoreListCanScrollAndKeepButtons(ScrollRect scroll,
+            EventSystem eventSystem, string buttonLabel, int expectedRows)
+        {
+            Assert.IsNotNull(scroll, "The market category must have its own ScrollRect.");
+            Assert.IsTrue(scroll.vertical);
+            Assert.IsFalse(scroll.horizontal);
+            Assert.IsNotNull(scroll.content);
+            Assert.AreEqual(expectedRows, scroll.content.childCount,
+                "Every market/sell rat must be represented inside the same scrolling content.");
+            Assert.IsNotNull(scroll.viewport.GetComponent<RectMask2D>());
+            Assert.IsTrue(scroll.viewport.GetComponent<Image>().raycastTarget,
+                "The list viewport must receive mouse-wheel and touch/mouse drag gestures.");
+
+            foreach (Transform row in scroll.content)
+            {
+                Button action = row.GetComponentInChildren<Button>(true);
+                Assert.IsNotNull(action, buttonLabel + " action button must exist on every row.");
+                Assert.IsTrue(action.interactable, buttonLabel + " action button must remain enabled.");
+                Assert.AreSame(action.gameObject,
+                    ExecuteEvents.GetEventHandler<IPointerClickHandler>(action.gameObject),
+                    buttonLabel + " taps must resolve to the actual row button.");
+                Assert.AreSame(scroll.gameObject,
+                    ExecuteEvents.GetEventHandler<IDragHandler>(action.gameObject),
+                    buttonLabel + " mouse/touch drags over a row must resolve to the list ScrollRect.");
+                Assert.AreSame(scroll.gameObject,
+                    ExecuteEvents.GetEventHandler<IScrollHandler>(action.gameObject),
+                    buttonLabel + " wheel scrolling over a row must resolve to the list ScrollRect.");
+            }
+
+            // Exercise the ordinary ScrollRect pointer path with both a mouse
+            // pointer and a touch-style pointer ID, without invoking the
+            // destructive Buy/Sell button callbacks in this layout test.
+            Vector3[] corners = new Vector3[4];
+            scroll.viewport.GetWorldCorners(corners);
+            Vector2 start = RectTransformUtility.WorldToScreenPoint(null, (corners[0] + corners[2]) * 0.5f);
+            int[] pointerIds = { -1, 7 };
+            foreach (int pointerId in pointerIds)
+            {
+                scroll.verticalNormalizedPosition = 1f;
+                Canvas.ForceUpdateCanvases();
+                Vector2 before = scroll.content.anchoredPosition;
+                var pointer = new PointerEventData(eventSystem)
+                {
+                    pointerId = pointerId,
+                    position = start,
+                    pressPosition = start,
+                    button = PointerEventData.InputButton.Left,
+                };
+                GameObject dragOwner = ExecuteEvents.GetEventHandler<IDragHandler>(scroll.content.GetChild(0).gameObject);
+                Assert.AreSame(scroll.gameObject, dragOwner);
+                pointer.pointerDrag = dragOwner;
+                Assert.IsTrue(ExecuteEvents.Execute(dragOwner, pointer, ExecuteEvents.initializePotentialDrag));
+                Assert.IsTrue(ExecuteEvents.Execute(dragOwner, pointer, ExecuteEvents.beginDragHandler));
+                pointer.position = start + new Vector2(0f, -180f);
+                pointer.delta = new Vector2(0f, -180f);
+                Assert.IsTrue(ExecuteEvents.Execute(dragOwner, pointer, ExecuteEvents.dragHandler));
+                Assert.Greater(Mathf.Abs(scroll.content.anchoredPosition.y - before.y), 1f,
+                    buttonLabel + " list must respond to vertical mouse/touch dragging.");
+                ExecuteEvents.Execute(dragOwner, pointer, ExecuteEvents.endDragHandler);
+            }
+        }
+
+        [Test]
         public void FavoriteStatusDoesNotChangeSaleEligibilityOrPrice()
         {
             ColonySaveData save = ColonyFactory.CreateNew(1000000L);
@@ -1678,43 +1906,211 @@ namespace RatHabitat.Tests
             float threeX = GrowthSystem.SimulationBehaviorDeltaSeconds(realFrameSeconds);
             GrowthSystem.SetRuntimeSpeed(1f);
 
-            Assert.AreEqual(oneX * 2f, twoX, 0.00001f,
-                "2x should advance moment-to-moment rat behavior twice as quickly as 1x.");
-            Assert.AreEqual(oneX * 3f, threeX, 0.00001f,
-                "3x should advance moment-to-moment rat behavior three times as quickly as 1x.");
+            Assert.AreEqual(1f, GrowthSystem.SimulationMultiplierForSpeed(1f), 0.00001f,
+                "1x is the baseline game-clock movement rate.");
+            Assert.AreEqual(60f, GrowthSystem.SimulationMultiplierForSpeed(2f), 0.0001f,
+                "2x movement must use the same rate ratio as the clock: one game hour per real second.");
+            Assert.AreEqual(1440f, GrowthSystem.SimulationMultiplierForSpeed(3f), 0.001f,
+                "3x movement must use the same rate ratio as the clock: one game day per real second.");
+            Assert.AreEqual(oneX * 60f, twoX, 0.0001f,
+                "2x advances one game hour per real second, 60 times the 1x rate.");
+            Assert.AreEqual(oneX * 1440f, threeX, 0.001f,
+                "3x advances one game day per real second, 1,440 times the 1x rate.");
         }
 
         [Test]
         public void WorldMovementStepProducesProportionalTravelTimes()
         {
-            const float distance = 6f;
             const float baseWorldSpeed = 0.75f;
             const float realFrameSeconds = 0.037f;
             const int frameCount = 180;
+            Vector3 target = new Vector3(100000f, 0f, 0f);
+            GameObject[] roots = new GameObject[3];
 
             float[] travelled = new float[3];
-            for (int speedIndex = 0; speedIndex < travelled.Length; speedIndex++)
+            try
             {
-                float speed = speedIndex + 1f;
-                GrowthSystem.SetRuntimeSpeed(speed);
-                for (int frame = 0; frame < frameCount; frame++)
+                for (int speedIndex = 0; speedIndex < travelled.Length; speedIndex++)
                 {
-                    travelled[speedIndex] += GrowthSystem.SimulationMovementStep(
-                        baseWorldSpeed, realFrameSeconds);
+                    roots[speedIndex] = new GameObject("world movement " + (speedIndex + 1) + "x");
+                    float speed = speedIndex + 1f;
+                    GrowthSystem.SetRuntimeSpeed(speed);
+                    for (int frame = 0; frame < frameCount; frame++)
+                    {
+                        float frameSimulationDelta = GrowthSystem.SimulationMovementDeltaSeconds(realFrameSeconds);
+                        float movementBudget = GrowthSystem.SimulationMovementTimeBudget(frameSimulationDelta);
+                        Vector3 previous = roots[speedIndex].transform.position;
+                        roots[speedIndex].transform.position = GrowthSystem.SimulationMovementTargetPosition(
+                            previous, target, baseWorldSpeed, frameSimulationDelta, ref movementBudget);
+                        travelled[speedIndex] += Vector3.Distance(
+                            previous, roots[speedIndex].transform.position);
+                    }
                 }
+
+                Assert.AreEqual(travelled[0] * 60f, travelled[1], 0.02f,
+                    "2x Transform travel must match the clock's 60x game-time rate in equal real time.");
+                Assert.AreEqual(travelled[0] * 1440f, travelled[2], 0.5f,
+                    "3x Transform travel must match the clock's 1,440x game-time rate in equal real time.");
+
+                Assert.That(roots[0].transform.position.x, Is.EqualTo(travelled[0]).Within(0.0001f));
+                Assert.That(roots[1].transform.position.x, Is.EqualTo(travelled[1]).Within(0.0001f));
+                Assert.That(roots[2].transform.position.x, Is.EqualTo(travelled[2]).Within(0.0001f));
             }
-            GrowthSystem.SetRuntimeSpeed(1f);
+            finally
+            {
+                GrowthSystem.SetRuntimeSpeed(1f);
+                for (int index = 0; index < roots.Length; index++)
+                    if (roots[index] != null) UnityEngine.Object.DestroyImmediate(roots[index]);
+            }
+        }
 
-            Assert.AreEqual(travelled[0] * 2f, travelled[1], 0.0001f,
-                "2x world-space travel must cover twice the distance in the same real time.");
-            Assert.AreEqual(travelled[0] * 3f, travelled[2], 0.0001f,
-                "3x world-space travel must cover three times the distance in the same real time.");
+        [TestCase(1f, 2f)]
+        [TestCase(2f, 3f)]
+        [TestCase(3f, 1f)]
+        public void RatWorldTransformTakesSpeedChangesImmediately(float startingSpeed, float nextSpeed)
+        {
+            const float baseWorldSpeed = 0.75f;
+            const float realFrameSeconds = 1f / 60f;
+            const int framesPerSegment = 12;
+            const long startTimestamp = 5000000L;
+            Vector3 target = new Vector3(10000f, 0f, 0f);
+            GameObject root = new GameObject("speed transition rat root");
+            ColonySaveData save = ColonyFactory.CreateNew(startTimestamp);
+            save.clock.gameTimeMs = GameConfig.StartGameTimeMs;
+            save.clock.lastRealTimestamp = startTimestamp;
+            save.clock.speed = startingSpeed;
 
-            float oneXDuration = distance / baseWorldSpeed;
-            float twoXDuration = distance / (baseWorldSpeed * 2f);
-            float threeXDuration = distance / (baseWorldSpeed * 3f);
-            Assert.AreEqual(oneXDuration * 0.5f, twoXDuration, 0.0001f);
-            Assert.AreEqual(oneXDuration / 3f, threeXDuration, 0.0001f);
+            try
+            {
+                GrowthSystem.SetSimulationPaused(false);
+                GrowthSystem.SetRuntimeSpeed(startingSpeed);
+                float startingX = root.transform.position.x;
+                for (int frame = 0; frame < framesPerSegment; frame++)
+                    ApplyWorldMovementFrame(root.transform, target, baseWorldSpeed, realFrameSeconds);
+                float firstSegmentDistance = root.transform.position.x - startingX;
+                float startingMultiplier = GrowthSystem.SimulationMultiplierForSpeed(startingSpeed);
+
+                long switchTimestamp = startTimestamp + (long)Math.Round(
+                    framesPerSegment * realFrameSeconds * 1000f);
+                Assert.IsTrue(GrowthSystem.ChangeSpeedAtTimestamp(
+                    save, nextSpeed, switchTimestamp));
+                Vector3 positionAtSwitch = root.transform.position;
+                Assert.AreEqual(startingX + firstSegmentDistance, positionAtSwitch.x, 0.0001f,
+                    "Changing speed must not move or reset the rat at the switch boundary.");
+                for (int frame = 0; frame < framesPerSegment; frame++)
+                {
+                    Vector3 previous = root.transform.position;
+                    ApplyWorldMovementFrame(root.transform, target, baseWorldSpeed, realFrameSeconds);
+                    Assert.LessOrEqual(
+                        Vector3.Distance(previous, root.transform.position),
+                        baseWorldSpeed * GrowthSystem.SimulationMultiplierForSpeed(nextSpeed) * realFrameSeconds + 0.0001f,
+                        "A speed change must not teleport the rat or apply a multiplier more than once.");
+                }
+
+                float nextSegmentDistance = root.transform.position.x - positionAtSwitch.x;
+                Assert.AreEqual(baseWorldSpeed * startingMultiplier * framesPerSegment * realFrameSeconds,
+                    firstSegmentDistance, 0.0001f, "The first segment must use only its selected speed.");
+                Assert.AreEqual(baseWorldSpeed * GrowthSystem.SimulationMultiplierForSpeed(nextSpeed) * framesPerSegment * realFrameSeconds,
+                    nextSegmentDistance, 0.0001f, "The next segment must use the new speed immediately.");
+                Assert.Less(root.transform.position.x, target.x,
+                    "The rat must continue toward the same distant world-space target after switching speeds.");
+            }
+            finally
+            {
+                GrowthSystem.SetRuntimeSpeed(1f);
+                GrowthSystem.SetSimulationPaused(false);
+                UnityEngine.Object.DestroyImmediate(root);
+            }
+        }
+
+        [TestCase(1f)]
+        [TestCase(2f)]
+        [TestCase(3f)]
+        public void SlowRenderedFramesRetainFullMovementTime(float speed)
+        {
+            const float baseWorldSpeed = 0.75f;
+            const float realFrameSeconds = 0.25f;
+            GameObject root = new GameObject("slow-frame rat root");
+            Vector3 target = new Vector3(10000f, 0f, 0f);
+
+            try
+            {
+                GrowthSystem.SetSimulationPaused(false);
+                GrowthSystem.SetRuntimeSpeed(speed);
+                ApplyWorldMovementFrame(root.transform, target, baseWorldSpeed, realFrameSeconds);
+
+                Assert.AreEqual(baseWorldSpeed * GrowthSystem.SimulationMultiplierForSpeed(speed) * realFrameSeconds,
+                    root.transform.position.x, 0.0001f,
+                    "A slow WebGL frame must not discard movement time or weaken the selected speed multiplier.");
+            }
+            finally
+            {
+                GrowthSystem.SetRuntimeSpeed(1f);
+                GrowthSystem.SetSimulationPaused(false);
+                UnityEngine.Object.DestroyImmediate(root);
+            }
+        }
+
+        [Test]
+        public void WorldMovementRetainsSpeedWhenBehaviorWorkIsCapped()
+        {
+            const float baseWorldSpeed = 0.75f;
+            const float realFrameSeconds = 1.2f;
+            Vector3 target = new Vector3(10000f, 0f, 0f);
+            GameObject[] roots = new GameObject[3];
+            float[] distances = new float[3];
+
+            try
+            {
+                GrowthSystem.SetSimulationPaused(false);
+                GrowthSystem.SetBehaviorParticipantCount(20);
+                for (int speedIndex = 0; speedIndex < roots.Length; speedIndex++)
+                {
+                    roots[speedIndex] = new GameObject("capped behavior movement " + (speedIndex + 1) + "x");
+                    GrowthSystem.SetRuntimeSpeed(speedIndex + 1f);
+                    float simulationDelta = GrowthSystem.SimulationMovementDeltaSeconds(realFrameSeconds);
+                    int behaviorSteps = GrowthSystem.BeginBehaviorUpdate(simulationDelta);
+                    float movementStepDelta = simulationDelta / behaviorSteps;
+                    float movementBudget = GrowthSystem.SimulationMovementTimeBudget(simulationDelta);
+
+                    Assert.LessOrEqual(behaviorSteps, 3,
+                        "Twenty rats must remain within the shared 64-step behavior-work cap.");
+                    for (int step = 0; step < behaviorSteps; step++)
+                    {
+                        Vector3 previous = roots[speedIndex].transform.position;
+                        roots[speedIndex].transform.position = GrowthSystem.SimulationMovementTargetPosition(
+                            previous, target, baseWorldSpeed, movementStepDelta, ref movementBudget);
+                    }
+                    distances[speedIndex] = roots[speedIndex].transform.position.x;
+                    Assert.AreEqual(baseWorldSpeed * simulationDelta, distances[speedIndex], 0.0001f,
+                        "The bounded decision-step count must not discard any current-frame world movement time.");
+                }
+
+                Assert.AreEqual(distances[0] * 60f, distances[1], 0.02f,
+                    "Work-capped 2x movement must retain the 60x clock rate.");
+                Assert.AreEqual(distances[0] * 1440f, distances[2], 0.5f,
+                    "Work-capped 3x movement must retain the 1,440x clock rate.");
+            }
+            finally
+            {
+                GrowthSystem.SetRuntimeSpeed(1f);
+                GrowthSystem.SetSimulationPaused(false);
+                GrowthSystem.SetBehaviorParticipantCount(1);
+                for (int index = 0; index < roots.Length; index++)
+                    if (roots[index] != null) UnityEngine.Object.DestroyImmediate(roots[index]);
+            }
+        }
+
+        private static void ApplyWorldMovementFrame(
+            Transform root,
+            Vector3 target,
+            float baseWorldSpeed,
+            float realDeltaSeconds)
+        {
+            float simulationDelta = GrowthSystem.SimulationMovementDeltaSeconds(realDeltaSeconds);
+            float movementBudget = GrowthSystem.SimulationMovementTimeBudget(simulationDelta);
+            root.position = GrowthSystem.SimulationMovementTargetPosition(
+                root.position, target, baseWorldSpeed, simulationDelta, ref movementBudget);
         }
 
         [Test]
@@ -1748,14 +2144,15 @@ namespace RatHabitat.Tests
                             baseWorldSpeed, realFrameSeconds);
                     }
 
+                    float multiplier = GrowthSystem.SimulationMultiplierForSpeed(segmentSpeeds[segment]);
                     Assert.AreEqual(
-                        baseWorldSpeed * segmentSpeeds[segment], segmentDistance, 0.0001f,
+                        baseWorldSpeed * multiplier, segmentDistance, 0.0001f,
                         "A speed transition must affect only the current interval and must not compound movement speed.");
                     totalDistance += segmentDistance;
                 }
 
-                Assert.AreEqual(baseWorldSpeed * 7f, totalDistance, 0.0002f,
-                    "One real second at 1x, 2x, 3x, then 1x must total seven baseline-seconds of travel.");
+                Assert.AreEqual(baseWorldSpeed * 1502f, totalDistance, 0.001f,
+                    "One real second at 1x, 2x, 3x, then 1x must total 1,502 baseline-seconds of travel.");
             }
             finally
             {
@@ -1797,22 +2194,22 @@ namespace RatHabitat.Tests
                         "Backlog steps must not produce movement beyond the current frame's scaled delta.");
                 }
 
-                Assert.AreEqual(measuredFrameDistances[0] * 2f, measuredFrameDistances[1], 0.0001f);
-                Assert.AreEqual(measuredFrameDistances[0] * 3f, measuredFrameDistances[2], 0.0001f);
+                Assert.AreEqual(measuredFrameDistances[0] * 60f, measuredFrameDistances[1], 0.0001f);
+                Assert.AreEqual(measuredFrameDistances[0] * 1440f, measuredFrameDistances[2], 0.001f);
 
                 GrowthSystem.SetRuntimeSpeed(3f);
                 float longFrameSimulationDelta = GrowthSystem.SimulationBehaviorDeltaSeconds(1f);
-                float cappedBudget = GrowthSystem.SimulationMovementTimeBudget(longFrameSimulationDelta);
-                float cappedDistance = 0f;
+                float longFrameBudget = GrowthSystem.SimulationMovementTimeBudget(longFrameSimulationDelta);
+                float longFrameDistance = 0f;
                 for (int catchUpStep = 0; catchUpStep < 12; catchUpStep++)
                 {
-                    cappedDistance += GrowthSystem.SimulationMovementStep(
-                        baseWorldSpeed, longFrameSimulationDelta, ref cappedBudget);
+                    longFrameDistance += GrowthSystem.SimulationMovementStep(
+                        baseWorldSpeed, longFrameSimulationDelta, ref longFrameBudget);
                 }
                 Assert.AreEqual(
-                    baseWorldSpeed * GrowthSystem.MaximumVisualMovementRealDeltaSeconds * 3f,
-                    cappedDistance, 0.0001f,
-                    "A long frame is capped to the configured visual movement interval at each speed.");
+                    baseWorldSpeed * longFrameSimulationDelta,
+                    longFrameDistance, 0.0001f,
+                    "A long frame uses its full selected-speed movement interval exactly once.");
             }
             finally
             {
@@ -2320,6 +2717,87 @@ namespace RatHabitat.Tests
             Assert.IsTrue(UpgradeSystem.PurchaseColonyCapacityUpgrade(save, out nextCapacity));
             Assert.AreEqual(GameConfig.BaseColonyCapacity + GameConfig.ColonyCapacityUpgradeStep, nextCapacity);
             Assert.AreEqual(25, UpgradeSystem.ColonyCapacity(save));
+        }
+
+        [Test]
+        public void PairingHabitatCapacityDefaultsToTenAndUpgradeAddsFiveWithEscalatingCost()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            Assert.AreEqual(10, UpgradeSystem.PairingHabitatCapacity(save));
+            Assert.AreEqual(150, UpgradeSystem.PairingHabitatCapacityUpgradeCost(save));
+
+            int originalRatCount = save.rats.Count;
+            save.colonyCredits = 10000;
+            int capacity;
+            Assert.IsTrue(UpgradeSystem.PurchasePairingHabitatCapacityUpgrade(save, out capacity));
+            Assert.AreEqual(15, capacity);
+            Assert.AreEqual(250, UpgradeSystem.PairingHabitatCapacityUpgradeCost(save));
+            Assert.IsTrue(UpgradeSystem.PurchasePairingHabitatCapacityUpgrade(save, out capacity));
+            Assert.AreEqual(20, capacity);
+            Assert.AreEqual(350, UpgradeSystem.PairingHabitatCapacityUpgradeCost(save));
+            Assert.AreEqual(originalRatCount, save.rats.Count,
+                "Increasing capacity must not remove or recreate current colony members.");
+        }
+
+        [Test]
+        public void PairingHabitatCapacityUpgradeAndResidentsPersistThroughSaveLoad()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            save.colonyCredits = 10000;
+            save.rats[0].enclosure = RatEnclosure.Pairing;
+            save.rats[0].pairingHabitatAssigned = true;
+            RatData pinkie = CreateSaleTestRat(save, "capacity-persist-pinkie", RatSex.Female,
+                1f, RatStage.Pinkie);
+            pinkie.enclosure = RatEnclosure.Pairing;
+            pinkie.pairingHabitatAssigned = true;
+
+            int capacity;
+            Assert.IsTrue(UpgradeSystem.PurchasePairingHabitatCapacityUpgrade(save, out capacity));
+            Assert.AreEqual(15, capacity);
+            string json = SaveSystem.ToJson(save);
+            ColonySaveData loaded = SaveSystem.FromJson(json);
+
+            Assert.IsNotNull(loaded);
+            Assert.AreEqual(1, loaded.pairingHabitatCapacityUpgradeLevel);
+            Assert.AreEqual(15, UpgradeSystem.PairingHabitatCapacity(loaded));
+            Assert.AreEqual(save.rats.Count, loaded.rats.Count);
+            Assert.IsNotNull(loaded.rats.Find(rat => rat.id == pinkie.id));
+            Assert.AreEqual(RatEnclosure.Pairing, loaded.rats.Find(rat => rat.id == pinkie.id).enclosure);
+            Assert.AreEqual(2, loaded.rats.FindAll(rat => rat.enclosure == RatEnclosure.Pairing).Count,
+                "Both an adult and a pinkie occupy a persisted Pairing Habitat slot.");
+        }
+
+        [Test]
+        public void LegacySaveWithoutPairingCapacityUpgradeMigratesWithoutLosingRats()
+        {
+            var save = ColonyFactory.CreateNew(1000000L);
+            RatData pinkie = CreateSaleTestRat(save, "legacy-capacity-pinkie", RatSex.Male,
+                1f, RatStage.Pinkie);
+            pinkie.enclosure = RatEnclosure.Pairing;
+            pinkie.pairingHabitatAssigned = true;
+            int originalRatCount = save.rats.Count;
+            var originalIds = new HashSet<string>();
+            foreach (RatData rat in save.rats) originalIds.Add(rat.id);
+
+            string json = SaveSystem.ToJson(save);
+            const string field = "\"pairingHabitatCapacityUpgradeLevel\"";
+            int fieldIndex = json.IndexOf(field, StringComparison.Ordinal);
+            Assert.GreaterOrEqual(fieldIndex, 0, "The current save must serialize its upgrade level.");
+            int lineStart = json.LastIndexOf('\n', fieldIndex);
+            lineStart = lineStart < 0 ? 0 : lineStart + 1;
+            int lineEnd = json.IndexOf('\n', fieldIndex);
+            if (lineEnd < 0) lineEnd = json.Length;
+            string legacyJson = json.Remove(lineStart, lineEnd - lineStart);
+
+            ColonySaveData migrated = SaveSystem.FromJson(legacyJson);
+            Assert.IsNotNull(migrated);
+            Assert.AreEqual(0, migrated.pairingHabitatCapacityUpgradeLevel);
+            Assert.AreEqual(10, UpgradeSystem.PairingHabitatCapacity(migrated));
+            Assert.AreEqual(originalRatCount, migrated.rats.Count);
+            Assert.AreEqual(originalRatCount, migrated.ratIds.Count);
+            Assert.IsNotNull(migrated.rats.Find(rat => rat.id == pinkie.id));
+            foreach (RatData rat in migrated.rats)
+                Assert.IsTrue(originalIds.Contains(rat.id), "Legacy migration must preserve every rat ID.");
         }
 
         [Test]
@@ -2903,8 +3381,11 @@ namespace RatHabitat.Tests
             };
             fullSave.pregnancies.Add(blockedPregnancy);
             int originalRatCount = fullSave.rats.Count;
-            Assert.IsFalse(EnclosureSystem.TryPrepareForSaleBirth(fullSave, fullMother, blockedPregnancy, 10,
+            Assert.IsFalse(EnclosureSystem.TryPrepareForSaleBirth(fullSave, fullMother, blockedPregnancy,
+                UpgradeSystem.PairingHabitatCapacity(fullSave),
                 out movedFamily, out reason));
+            StringAssert.Contains("12/10 Pairing Habitat spaces", reason);
+            StringAssert.Contains("Pairing Habitat Capacity", reason);
             StringAssert.Contains("Move All Out of Pairing Habitat", reason);
             StringAssert.Contains("retries automatically", reason);
             Assert.AreEqual(EventLogPolicy.Birth,
@@ -2912,7 +3393,88 @@ namespace RatHabitat.Tests
                 "A capacity-blocked birth must become a player-visible Birth event.");
             Assert.AreEqual("pending", blockedPregnancy.status);
             Assert.AreEqual(RatEnclosure.ForSale, fullMother.enclosure);
+            Assert.AreEqual(8, fullSave.rats.FindAll(rat => rat.enclosure == RatEnclosure.Pairing).Count,
+                "A blocked transfer must not partially move the mother or litter into a full habitat.");
             Assert.AreEqual(originalRatCount, fullSave.rats.Count);
+        }
+
+        [Test]
+        public void PairingCapacityUpgradeAllowsAtomicMotherAndEntireLitterTransfer()
+        {
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            ColonySaveData save = CreateEmptySaleTestSave(now);
+            for (int index = 0; index < 8; index++)
+            {
+                RatData occupant = CreateSaleTestRat(save, "capacity-transfer-occupant-" + index,
+                    index % 2 == 0 ? RatSex.Male : RatSex.Female, 100f, RatStage.Adult);
+                occupant.enclosure = RatEnclosure.Pairing;
+                occupant.pairingHabitatAssigned = true;
+            }
+
+            RatData mother = CreateSaleTestRat(save, "capacity-transfer-mother", RatSex.Female,
+                100f, RatStage.Adult);
+            mother.enclosure = RatEnclosure.ForSale;
+            const string litterId = "capacity-transfer-litter";
+            var litter = new LitterData
+            {
+                id = litterId,
+                motherId = mother.id,
+                size = 3,
+                pupIds = new List<string>(),
+            };
+            for (int index = 0; index < 3; index++)
+            {
+                RatData pup = CreateSaleTestRat(save, "capacity-transfer-pup-" + index,
+                    index % 2 == 0 ? RatSex.Male : RatSex.Female, 1f, RatStage.Pinkie);
+                pup.motherId = mother.id;
+                pup.litterId = litterId;
+                pup.enclosure = RatEnclosure.ForSale;
+                litter.pupIds.Add(pup.id);
+            }
+            save.litters.Add(litter);
+            var pregnancy = new PregnancyData
+            {
+                id = "capacity-transfer-pregnancy",
+                motherId = mother.id,
+                litterId = litterId,
+                status = "pending",
+                birthCommitState = 1,
+                expectedLitterSize = 3,
+            };
+            save.pregnancies.Add(pregnancy);
+            int originalRatCount = save.rats.Count;
+
+            List<RatData> movedFamily;
+            string reason;
+            Assert.IsFalse(EnclosureSystem.TryPrepareForSaleBirth(save, mother, pregnancy,
+                UpgradeSystem.PairingHabitatCapacity(save), out movedFamily, out reason));
+            Assert.AreEqual(0, movedFamily.Count);
+            Assert.AreEqual(RatEnclosure.ForSale, mother.enclosure);
+            Assert.AreEqual(3, save.rats.FindAll(rat => rat.stage == RatStage.Pinkie &&
+                rat.motherId == mother.id && rat.enclosure == RatEnclosure.ForSale).Count);
+
+            save.colonyCredits = 1000;
+            int upgradedCapacity;
+            Assert.IsTrue(UpgradeSystem.PurchasePairingHabitatCapacityUpgrade(save, out upgradedCapacity));
+            Assert.AreEqual(15, upgradedCapacity);
+            Assert.IsTrue(EnclosureSystem.TryPrepareForSaleBirth(save, mother, pregnancy,
+                upgradedCapacity, out movedFamily, out reason), reason);
+
+            Assert.AreEqual(4, movedFamily.Count, "The mother and all three pinkies move as one family.");
+            Assert.AreEqual(RatEnclosure.Pairing, mother.enclosure);
+            Assert.AreEqual(3, save.rats.FindAll(rat => rat.stage == RatStage.Pinkie &&
+                rat.motherId == mother.id && rat.enclosure == RatEnclosure.Pairing).Count);
+            Assert.AreEqual(12, save.rats.FindAll(rat => rat.enclosure == RatEnclosure.Pairing).Count);
+            Assert.AreEqual(0, save.rats.FindAll(rat => rat.enclosure == RatEnclosure.ForSale).Count);
+            Assert.AreEqual(originalRatCount, save.rats.Count,
+                "Transfer and upgrade must neither duplicate nor delete rats.");
+            Assert.AreEqual("pending", pregnancy.status,
+                "The transfer preserves the pregnancy record for the normal retry/finish path.");
+
+            EnclosureSystem.RecalculateAssignments(save);
+            Assert.AreEqual(RatEnclosure.Pairing, mother.enclosure);
+            Assert.AreEqual(3, save.rats.FindAll(rat => rat.stage == RatStage.Pinkie &&
+                rat.motherId == mother.id && rat.enclosure == RatEnclosure.Pairing).Count);
         }
 
         private static ColonySaveData CreateEmptySaleTestSave(long gameTime)
@@ -3361,6 +3923,16 @@ namespace RatHabitat.Tests
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
             Assert.IsNotNull(field, "Expected private field '" + fieldName + "'.");
             field.SetValue(target, value);
+        }
+
+        private static T GetPrivateField<T>(object target, string fieldName)
+        {
+            Assert.IsNotNull(target);
+            var field = target.GetType().GetField(
+                fieldName,
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.IsNotNull(field, "Expected private field '" + fieldName + "'.");
+            return (T)field.GetValue(target);
         }
 
         private static void AssertDeveloperCoat(

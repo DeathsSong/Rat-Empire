@@ -116,6 +116,13 @@ namespace RatHabitat
         private bool rosterRefreshDeferred;
         private bool rosterRefreshDeferredForce;
         private ScrollRect storeRatListScroll;
+        private string storeRatListStructureSignature;
+        private bool storeRatListResetRequested;
+        private bool storeRatListRefreshDeferred;
+        private bool storeRatListRefreshDeferredForce;
+        private Text storeWalletLabel;
+        private Text storeRestockLabel;
+        private Text storeListingCountLabel;
         private ScrollRect familyTreeScroll;
         private ScrollRect ratProfileScroll;
         private RectTransform familyTreeViewport;
@@ -1140,6 +1147,39 @@ namespace RatHabitat
                 }
             }
 
+            // Store content includes a nested ScrollRect just like My Rats.
+            // The global UI signature changes with every game-clock second,
+            // but the market cards do not. Recreating the cards on those
+            // unrelated ticks destroys an active drag and makes the listing
+            // area appear non-scrollable on touch devices. Keep the list
+            // hierarchy stable unless the actual displayed market data has
+            // changed; wallet/countdown labels and affordability are updated
+            // in place.
+            if (!force && activeMainPanel == MainPanel.Store && storeRatListScroll != null)
+            {
+                string currentStoreStructureSignature = BuildActiveStoreListStructureSignature();
+                if (string.Equals(currentStoreStructureSignature, storeRatListStructureSignature,
+                    StringComparison.Ordinal))
+                {
+                    storeRatListRefreshDeferred = false;
+                    storeRatListRefreshDeferredForce = false;
+                    lastSignature = signature;
+                    RefreshLiveStorePanelValues();
+                    RefreshTopNavigationState();
+                    return;
+                }
+
+                // A real roster/market transition may still happen during a
+                // finger drag or its inertial tail. Let the gesture finish
+                // before replacing the nested ScrollRect hierarchy.
+                if (IsStoreRatListMoving())
+                {
+                    storeRatListRefreshDeferred = true;
+                    storeRatListRefreshDeferredForce |= force;
+                    return;
+                }
+            }
+
             // Do not destroy the profile ScrollRect while Unity is processing
             // a drag or its inertial tail. Defer the data refresh until the
             // gesture settles; otherwise a harmless clock/activity update can
@@ -1192,6 +1232,7 @@ namespace RatHabitat
             float previousMateNormalized = mateListScroll == null ? 1f : mateListScroll.verticalNormalizedPosition;
             float previousRosterNormalized = ratRosterScroll == null ? 1f : ratRosterScroll.verticalNormalizedPosition;
             float previousStoreNormalized = storeRatListScroll == null ? 1f : storeRatListScroll.verticalNormalizedPosition;
+            string previousStoreStructureSignature = storeRatListStructureSignature;
             try
             {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
@@ -1243,7 +1284,16 @@ namespace RatHabitat
                     ? BuildRosterContentSignature()
                     : null;
             }
-            if (storeRatListScroll != null) storeRatListScroll.verticalNormalizedPosition = previousStoreNormalized;
+            if (storeRatListScroll != null)
+            {
+                bool storeListStructureChanged = !string.Equals(previousStoreStructureSignature,
+                    storeRatListStructureSignature, StringComparison.Ordinal);
+                if (storeRatListResetRequested || storeListStructureChanged)
+                    ResetStoreRatListToTop();
+                else
+                    storeRatListScroll.verticalNormalizedPosition = previousStoreNormalized;
+            }
+            storeRatListResetRequested = false;
             if (ratProfileScroll != null && ratProfileScrollRatId == (game.SelectedRat == null ? string.Empty : game.SelectedRat.id))
                 ratProfileScroll.verticalNormalizedPosition = ratProfileScrollNormalized;
             RefreshLiveRatProfile();
@@ -1721,7 +1771,19 @@ namespace RatHabitat
             }
             if (settingsViewport != null)
             {
-                float viewportHeight = Mathf.Min(760f, Mathf.Max(360f, safeRoot.rect.height - 40f));
+                // Settings is a scroll panel below the fixed navigation, not a
+                // vertically centered modal. Anchoring its top to the Safe
+                // Area keeps the title and first row from sitting underneath
+                // the higher-sorting header Canvas on short/mobile screens.
+                Vector2 safeTopCenter = new Vector2(
+                    (safeRoot.anchorMin.x + safeRoot.anchorMax.x) * 0.5f,
+                    safeRoot.anchorMax.y);
+                settingsViewport.anchorMin = safeTopCenter;
+                settingsViewport.anchorMax = safeTopCenter;
+                settingsViewport.pivot = new Vector2(0.5f, 1f);
+                settingsViewport.anchoredPosition = new Vector2(0f, -HeaderHeight - 8f);
+                float availableBelowHeader = safeRoot.rect.height - HeaderHeight - 24f;
+                float viewportHeight = Mathf.Min(760f, Mathf.Max(180f, availableBelowHeader));
                 settingsViewport.sizeDelta = new Vector2(modalWidth, viewportHeight);
             }
             if (contentLayout != null)
@@ -1803,9 +1865,13 @@ namespace RatHabitat
             // list remains usable on phone layouts without clipping the
             // lower controls. The modal blocker still covers the full screen.
             settingsViewport = CreateRect("Settings Viewport", settingsOverlay);
-            settingsViewport.anchorMin = new Vector2(0.5f, 0.5f);
-            settingsViewport.anchorMax = new Vector2(0.5f, 0.5f);
-            settingsViewport.pivot = new Vector2(0.5f, 0.5f);
+            Vector2 safeTopCenter = new Vector2(
+                (safeRoot.anchorMin.x + safeRoot.anchorMax.x) * 0.5f,
+                safeRoot.anchorMax.y);
+            settingsViewport.anchorMin = safeTopCenter;
+            settingsViewport.anchorMax = safeTopCenter;
+            settingsViewport.pivot = new Vector2(0.5f, 1f);
+            settingsViewport.anchoredPosition = new Vector2(0f, -HeaderHeight - 8f);
             var viewportImage = settingsViewport.gameObject.AddComponent<Image>();
             viewportImage.color = new Color(0f, 0f, 0f, 0f);
             viewportImage.raycastTarget = true;
@@ -2930,7 +2996,15 @@ namespace RatHabitat
 
             activeMainPanel = samePanel ? MainPanel.None : panel;
             if (panel == MainPanel.Store && !samePanel)
+            {
                 storeSellFilterState.ResetForSellPanelOpen();
+                storeRatListResetRequested = true;
+                if (pageScroll != null)
+                {
+                    pageScroll.StopMovement();
+                    pageScroll.verticalNormalizedPosition = 1f;
+                }
+            }
             // Apply the new input ownership before rebuilding the page. This
             // removes the previous page blocker and clears its pointer state
             // in the same transition that changes the authoritative tab, so
@@ -3284,6 +3358,13 @@ namespace RatHabitat
                 bool force = rosterRefreshDeferredForce;
                 rosterRefreshDeferred = false;
                 rosterRefreshDeferredForce = false;
+                Refresh(force);
+            }
+            if (storeRatListRefreshDeferred && !IsStoreRatListMoving())
+            {
+                bool force = storeRatListRefreshDeferredForce;
+                storeRatListRefreshDeferred = false;
+                storeRatListRefreshDeferredForce = false;
                 Refresh(force);
             }
             if (profileRefreshDeferred && !IsRatProfileScrollMoving())
@@ -3867,6 +3948,13 @@ namespace RatHabitat
             rosterRefreshDeferred = false;
             rosterRefreshDeferredForce = false;
             ratProfileScroll = null;
+            storeRatListScroll = null;
+            storeRatListStructureSignature = null;
+            storeWalletLabel = null;
+            storeRestockLabel = null;
+            storeListingCountLabel = null;
+            storeRatListRefreshDeferred = false;
+            storeRatListRefreshDeferredForce = false;
             liveProfileRatId = null;
             liveProfileActivityText = null;
             liveProfileAgeText = null;
@@ -3927,12 +4015,14 @@ namespace RatHabitat
                 // enabled creates a nested-drag race where the page consumes
                 // the pointer before the tree can pan.
                 bool familyTreeOwnsGestures = activeMainPanel == MainPanel.FamilyTree;
-                pageScroll.enabled = !familyTreeOwnsGestures;
+                bool storeListOwnsGestures = activeMainPanel == MainPanel.Store;
+                bool nestedPageOwnsGestures = familyTreeOwnsGestures || storeListOwnsGestures;
+                pageScroll.enabled = !nestedPageOwnsGestures;
                 pageScroll.horizontal = false;
-                pageScroll.vertical = !familyTreeOwnsGestures &&
+                pageScroll.vertical = !nestedPageOwnsGestures &&
                     !(activeMainPanel == MainPanel.None &&
                         (selectedRat != null || selectedObject != null));
-                if (familyTreeOwnsGestures) pageScroll.StopMovement();
+                if (nestedPageOwnsGestures) pageScroll.StopMovement();
             }
             RatData profileRat = string.IsNullOrEmpty(familyTreeSubjectId)
                 ? selectedRat
@@ -4002,8 +4092,10 @@ namespace RatHabitat
 
             StoreSystem.EnsureStoreState(game.Save);
             var card = CreateCard("Rat Market");
-            AddText(card, "Wallet: $" + game.Save.colonyCredits.ToString("N0"), 17,
+            storeWalletLabel = AddText(card, "Wallet: $" + game.Save.colonyCredits.ToString("N0"), 17,
                 new Color(1f, 0.83f, 0.42f), TextAnchor.UpperLeft);
+            BindLiveText(storeWalletLabel, () => "Wallet: $" + game.Save.colonyCredits.ToString("N0"));
+            BindLiveAction(RefreshLiveStorePurchaseButtons);
             var categoryRow = CreateRect("Store Categories", card);
             var categoryLayout = categoryRow.gameObject.AddComponent<HorizontalLayoutGroup>();
             categoryLayout.spacing = 5f;
@@ -4029,24 +4121,27 @@ namespace RatHabitat
                 return;
             }
 
-            AddText(card, StoreSystem.GetRestockLabel(game.Save, game.GameTime), 14,
+            storeRestockLabel = AddText(card, StoreSystem.GetRestockLabel(game.Save, game.GameTime), 14,
                 new Color(0.68f, 0.84f, 0.78f), TextAnchor.UpperLeft);
-            AddText(card, "Listings: " + game.Save.storeRatListings.Count + " / " +
-                UpgradeSystem.StoreListingCount(game.Save) + " (capacity increases on the next restock)", 13,
+            BindLiveText(storeRestockLabel, () => StoreSystem.GetRestockLabel(game.Save, game.GameTime));
+            storeListingCountLabel = AddText(card, BuildStoreListingCountLabel(), 13,
                 new Color(0.68f, 0.84f, 0.78f), TextAnchor.UpperLeft);
+            BindLiveText(storeListingCountLabel, BuildStoreListingCountLabel);
             AddText(card, "Low-level adult rats for your colony. Each listing keeps its coat, markings, stats, and price until purchased.",
                 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
 
+            storeRatListStructureSignature = BuildStorePurchaseListSignature();
+            RectTransform listContent = CreateStoreRatListContent(card, "Store Rat List");
             if (game.Save.storeRatListings == null || game.Save.storeRatListings.Count == 0)
             {
-                AddText(card, "The market is sold out. New supplies can be added here later.",
+                AddTextTo(listContent, "The market is sold out. New supplies can be added here later.",
                     16, new Color(0.95f, 0.76f, 0.42f), TextAnchor.UpperLeft);
                 return;
             }
 
             foreach (var listing in game.Save.storeRatListings)
             {
-                AddStoreListingCard(card, listing);
+                AddStoreListingCard(listContent, listing);
             }
         }
 
@@ -4072,6 +4167,22 @@ namespace RatHabitat
                 canBuyCapacity, game.PurchaseColonyCapacityUpgrade,
                 new Color(0.16f, 0.40f, 0.34f), 58f);
 
+            int pairingCapacity = game.PairingHabitatCapacity;
+            int pairingCost = game.PairingHabitatCapacityUpgradeCost;
+            AddText(card, "Pairing Habitat Capacity", 16, Color.white, TextAnchor.UpperLeft);
+            AddText(card, "Pairing Habitat: " + game.PairingHabitatCount + " / " + pairingCapacity,
+                14, new Color(0.78f, 0.88f, 0.82f), TextAnchor.UpperLeft);
+            AddText(card, "Next upgrade: +" + GameConfig.PairingHabitatCapacityUpgradeStep +
+                " occupants (" + (pairingCapacity + GameConfig.PairingHabitatCapacityUpgradeStep) +
+                " total). Every rat and pinkie counts as one.", 13,
+                new Color(0.76f, 0.86f, 0.80f), TextAnchor.UpperLeft);
+            bool canBuyPairingCapacity = game.Save.colonyCredits >= pairingCost;
+            AddButtonTo(card, canBuyPairingCapacity
+                    ? "Increase Pairing Habitat Capacity\n$" + pairingCost
+                    : "Increase Pairing Habitat Capacity\nNeed $" + pairingCost,
+                canBuyPairingCapacity, game.PurchasePairingHabitatCapacityUpgrade,
+                new Color(0.20f, 0.38f, 0.36f), 58f);
+
             AddText(card, "Store quality cap: " + game.StoreQualityCap, 16,
                 Color.white, TextAnchor.UpperLeft);
             AddText(card, "Next cap " + (game.StoreQualityCap + GameConfig.StoreQualityUpgradeStep) +
@@ -4096,6 +4207,7 @@ namespace RatHabitat
             if (category == StoreCategory.Sell && storeCategory != StoreCategory.Sell)
                 storeSellFilterState.ResetForSellPanelOpen();
             storeCategory = category;
+            storeRatListResetRequested = true;
             // Store categories are page-level controls. Always bring the
             // category bar back into view before rebuilding so a Sell list
             // cannot leave the Buy control above the current scroll position.
@@ -4111,8 +4223,14 @@ namespace RatHabitat
         private void OpenStoreForRatManagement(string ratId, bool euthanize)
         {
             storeCategory = euthanize ? StoreCategory.Euthanize : StoreCategory.Sell;
+            storeRatListResetRequested = true;
             if (!euthanize) storeSellFilterState.ResetForSellPanelOpen();
             activeMainPanel = MainPanel.Store;
+            if (pageScroll != null)
+            {
+                pageScroll.StopMovement();
+                pageScroll.verticalNormalizedPosition = 1f;
+            }
             if (game != null) game.SelectRatFromRoster(ratId);
             if (game != null)
             {
@@ -4180,15 +4298,11 @@ namespace RatHabitat
                 storeSellFilterState.Selected == filter) return;
 
             storeSellFilterState.Select(filter);
+            storeRatListResetRequested = true;
             if (pageScroll != null)
             {
                 pageScroll.StopMovement();
                 pageScroll.verticalNormalizedPosition = 1f;
-            }
-            if (storeRatListScroll != null)
-            {
-                storeRatListScroll.StopMovement();
-                storeRatListScroll.verticalNormalizedPosition = 1f;
             }
             lastSignature = string.Empty;
             Refresh(true);
@@ -4211,16 +4325,66 @@ namespace RatHabitat
         private void AddStoreManagedRatRows(RectTransform parent, bool euthanize,
             IList<RatData> filteredSellableRats = null)
         {
-            var listRoot = CreateRect("Store Rat List", parent);
+            IList<RatData> displayRats = euthanize
+                ? game.Save.rats
+                : filteredSellableRats ?? StoreSystem.GetSellableRats(
+                    game.Save, game.GameTime, storeSellFilterState.Selected);
+            storeRatListStructureSignature = BuildStoreManagedListSignature(euthanize, displayRats);
+            RectTransform listContent = CreateStoreRatListContent(parent, "Store Rat List");
+
+            if (displayRats == null || displayRats.Count == 0)
+            {
+                string emptyMessage = euthanize
+                    ? "No active colony rats."
+                    : storeSellFilterState.Selected == StoreSellFilter.Favorites
+                        ? "No favorite rats are currently eligible for sale."
+                        : storeSellFilterState.Selected == StoreSellFilter.Males
+                            ? "No eligible male rats are currently available for sale."
+                            : storeSellFilterState.Selected == StoreSellFilter.Females
+                                ? "No eligible female rats are currently available for sale."
+                                : "No rats are currently eligible for sale.";
+                AddTextTo(listContent, emptyMessage, 14,
+                    new Color(1f, 0.72f, 0.42f), TextAnchor.UpperLeft);
+                return;
+            }
+
+            foreach (var rat in displayRats)
+            {
+                if (rat == null) continue;
+                string ratId = rat.id;
+                bool canSell = euthanize || game.CanSellRat(rat);
+                string action = euthanize
+                    ? "EUTHANIZE\n$" + GameConfig.EuthanasiaCostDollars
+                    : canSell ? "SELL\n$" + game.SellValue(rat) : "SELL\nUnavailable";
+                AddStoreRatCard(listContent, rat, action,
+                    euthanize ? new Color(0.55f, 0.16f, 0.13f) :
+                        canSell ? new Color(0.22f, 0.42f, 0.28f) : new Color(0.25f, 0.29f, 0.29f),
+                    () =>
+                    {
+                        if (euthanize) OpenStoreForRatManagement(ratId, true);
+                        else game.RequestSellRat(ratId);
+                    },
+                    !euthanize && canSell && game.IsSellConfirmationFor(ratId),
+                    canSell,
+                    !euthanize);
+            }
+        }
+
+        private RectTransform CreateStoreRatListContent(RectTransform parent, string listName)
+        {
+            var listRoot = CreateRect(listName, parent);
             var listImage = listRoot.gameObject.AddComponent<Image>();
             UiStyle.ApplyRounded(listImage, new Color(0.04f, 0.10f, 0.13f, 0.82f), false);
-            // This list owns the touch/drag gesture. The old Store cards were
-            // decorative and non-raycast, so scrolling over them fell through
-            // to the habitat instead of reaching a ScrollRect.
-            listImage.raycastTarget = true;
+            // The viewport below is the raycastable drag surface. Keeping the
+            // container graphic non-raycast preserves normal child-button taps.
+            listImage.raycastTarget = false;
             var listElement = listRoot.gameObject.AddComponent<LayoutElement>();
-            listElement.preferredHeight = 430f;
-            listElement.minHeight = 260f;
+            float pageHeight = pageScroll != null && pageScroll.viewport != null
+                ? pageScroll.viewport.rect.height
+                : ReferenceHeight - PageTopInset;
+            if (pageHeight <= 1f) pageHeight = ReferenceHeight - PageTopInset;
+            listElement.preferredHeight = Mathf.Clamp(pageHeight - 250f, 180f, 430f);
+            listElement.minHeight = listElement.preferredHeight;
 
             var list = listRoot.gameObject.AddComponent<ScrollRect>();
             storeRatListScroll = list;
@@ -4256,45 +4420,171 @@ namespace RatHabitat
             contentFitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
             list.content = listContent;
 
-            IList<RatData> displayRats = euthanize
-                ? game.Save.rats
-                : filteredSellableRats ?? StoreSystem.GetSellableRats(
-                    game.Save, game.GameTime, storeSellFilterState.Selected);
-            if (displayRats == null || displayRats.Count == 0)
+            return listContent;
+        }
+
+        private string BuildStorePurchaseListSignature()
+        {
+            var signature = new System.Text.StringBuilder(128);
+            signature.Append("buy:").Append(game.Save.storeRestockCycle).Append(':')
+                .Append(game.Save.storeRatListings == null ? 0 : game.Save.storeRatListings.Count).Append(':')
+                .Append(game.StoreQualityCap).Append(':').Append(game.StoreListingCapacity).Append(':');
+            if (game.Save.storeRatListings != null)
             {
-                string emptyMessage = euthanize
-                    ? "No active colony rats."
-                    : storeSellFilterState.Selected == StoreSellFilter.Favorites
-                        ? "No favorite rats are currently eligible for sale."
-                        : storeSellFilterState.Selected == StoreSellFilter.Males
-                            ? "No eligible male rats are currently available for sale."
-                            : storeSellFilterState.Selected == StoreSellFilter.Females
-                                ? "No eligible female rats are currently available for sale."
-                                : "No rats are currently eligible for sale.";
-                AddTextTo(listContent, emptyMessage, 14,
-                    new Color(1f, 0.72f, 0.42f), TextAnchor.UpperLeft);
-                return;
-            }
-            foreach (var rat in displayRats)
-            {
-                if (rat == null) continue;
-                string ratId = rat.id;
-                bool canSell = euthanize || game.CanSellRat(rat);
-                string action = euthanize
-                    ? "EUTHANIZE\n$" + GameConfig.EuthanasiaCostDollars
-                    : canSell ? "SELL\n$" + game.SellValue(rat) : "SELL\nUnavailable";
-                AddStoreRatCard(listContent, rat, action,
-                    euthanize ? new Color(0.55f, 0.16f, 0.13f) :
-                        canSell ? new Color(0.22f, 0.42f, 0.28f) : new Color(0.25f, 0.29f, 0.29f),
-                    () =>
+                for (int index = 0; index < game.Save.storeRatListings.Count; index++)
+                {
+                    StoreRatListingData listing = game.Save.storeRatListings[index];
+                    if (listing == null) continue;
+                    signature.Append(listing.id).Append(',').Append(listing.price).Append(',')
+                        .Append(listing.name).Append(',').Append(listing.sex).Append(',')
+                        .Append(listing.markingFamily).Append(',').Append(listing.coatColorVariant).Append(',')
+                        .Append(listing.coatTone.ToString("R")).Append(',');
+                    TraitData traits = listing.traits;
+                    if (traits != null)
+                        signature.Append(traits.size.ToString("R")).Append(',')
+                            .Append(traits.health.ToString("R")).Append(',')
+                            .Append(traits.fertility.ToString("R"));
+                    if (listing.genotype != null && listing.genotype.loci != null)
                     {
-                        if (euthanize) OpenStoreForRatManagement(ratId, true);
-                        else game.RequestSellRat(ratId);
-                    },
-                    !euthanize && canSell && game.IsSellConfirmationFor(ratId),
-                    canSell,
-                    !euthanize);
+                        for (int locusIndex = 0; locusIndex < listing.genotype.loci.Count; locusIndex++)
+                        {
+                            LocusData locus = listing.genotype.loci[locusIndex];
+                            if (locus != null)
+                                signature.Append(',').Append(locus.locus).Append(':')
+                                    .Append(locus.firstAllele).Append('/').Append(locus.secondAllele);
+                        }
+                    }
+                    signature.Append(';');
+                }
             }
+            return signature.ToString();
+        }
+
+        private string BuildActiveStoreListStructureSignature()
+        {
+            if (game == null || game.Save == null) return string.Empty;
+            if (storeCategory == StoreCategory.Buy) return BuildStorePurchaseListSignature();
+            if (storeCategory == StoreCategory.Sell)
+            {
+                IList<RatData> sellable = StoreSystem.GetSellableRats(
+                    game.Save, game.GameTime, storeSellFilterState.Selected);
+                return BuildStoreManagedListSignature(false, sellable);
+            }
+
+            string signature = BuildStoreManagedListSignature(true, game.Save.rats);
+            return signature + ":selected=" + (game.SelectedRat == null ? string.Empty : game.SelectedRat.id) +
+                ":confirm=" + (game.EuthanizeConfirmationPending ? "1" : "0") +
+                ":warning=" + game.SelectedRatRemovalWarning;
+        }
+
+        private string BuildStoreManagedListSignature(bool euthanize, IList<RatData> rats)
+        {
+            var signature = new System.Text.StringBuilder(128);
+            signature.Append(euthanize ? "euth:" : "sell:")
+                .Append((int)storeSellFilterState.Selected).Append(':');
+            if (rats != null)
+            {
+                for (int index = 0; index < rats.Count; index++)
+                {
+                    RatData rat = rats[index];
+                    if (rat == null) continue;
+                    signature.Append(rat.id).Append(',').Append(rat.stage).Append(',')
+                        .Append(rat.sex).Append(',').Append(rat.isFavorite ? '1' : '0').Append(',')
+                        .Append(rat.name).Append(',').Append(rat.enclosure).Append(',')
+                        .Append(game.CanSellRat(rat) ? '1' : '0').Append(',')
+                        .Append(euthanize ? 0 : game.SellValue(rat)).Append(',')
+                        .Append(game.IsSellConfirmationFor(rat.id) ? '1' : '0').Append(',');
+                    PhenotypeData phenotype = rat.phenotype;
+                    if (phenotype != null)
+                        signature.Append(phenotype.furRevealed ? '1' : '0').Append(',')
+                            .Append(phenotype.coatColorLabel).Append(',').Append(phenotype.markingsLabel);
+                    TraitData traits = rat.traits;
+                    if (traits != null)
+                        signature.Append(',').Append(traits.size.ToString("R"))
+                            .Append(',').Append(traits.health.ToString("R"))
+                            .Append(',').Append(traits.fertility.ToString("R"));
+                    signature.Append(';');
+                }
+            }
+            return signature.ToString();
+        }
+
+        private string BuildStoreListingCountLabel()
+        {
+            int count = game.Save.storeRatListings == null ? 0 : game.Save.storeRatListings.Count;
+            return "Listings: " + count + " / " + UpgradeSystem.StoreListingCount(game.Save) +
+                " (capacity increases on the next restock)";
+        }
+
+        private void RefreshLiveStorePanelValues()
+        {
+            if (storeWalletLabel != null)
+            {
+                string wallet = "Wallet: $" + game.Save.colonyCredits.ToString("N0");
+                if (storeWalletLabel.text != wallet) storeWalletLabel.text = wallet;
+            }
+            if (storeRestockLabel != null)
+            {
+                string restock = StoreSystem.GetRestockLabel(game.Save, game.GameTime);
+                if (storeRestockLabel.text != restock) storeRestockLabel.text = restock;
+            }
+            if (storeListingCountLabel != null)
+            {
+                string count = BuildStoreListingCountLabel();
+                if (storeListingCountLabel.text != count) storeListingCountLabel.text = count;
+            }
+            RefreshLiveStorePurchaseButtons();
+        }
+
+        private void RefreshLiveStorePurchaseButtons()
+        {
+            if (game == null || game.Save == null || storePurchaseButtons.Count == 0) return;
+            foreach (KeyValuePair<string, Button> entry in storePurchaseButtons)
+            {
+                Button button = entry.Value;
+                if (button == null) continue;
+                StoreRatListingData listing = StoreSystem.FindListing(game.Save, entry.Key);
+                if (listing == null) continue;
+                bool canBuy = game.Save.colonyCredits >= listing.price;
+                if (button.interactable != canBuy &&
+                    !(storePurchaseInProgress && storePurchaseListingId == entry.Key))
+                    button.interactable = canBuy;
+            }
+        }
+
+        private bool IsStoreRatListMoving()
+        {
+            if (storeRatListScroll == null || !storeRatListScroll.isActiveAndEnabled) return false;
+            if (Mathf.Abs(storeRatListScroll.velocity.y) > 1.5f) return true;
+            if (Input.GetMouseButton(0) && IsPointerOverStoreRatList(Input.mousePosition)) return true;
+            for (int index = 0; index < Input.touchCount; index++)
+            {
+                Touch touch = Input.GetTouch(index);
+                if (touch.phase != TouchPhase.Ended && touch.phase != TouchPhase.Canceled &&
+                    IsPointerOverStoreRatList(touch.position)) return true;
+            }
+            return false;
+        }
+
+        private bool IsPointerOverStoreRatList(Vector2 screenPoint)
+        {
+            if (storeRatListScroll == null || !storeRatListScroll.isActiveAndEnabled) return false;
+            RectTransform viewport = storeRatListScroll.viewport != null
+                ? storeRatListScroll.viewport
+                : storeRatListScroll.transform as RectTransform;
+            return viewport != null && RectTransformUtility.RectangleContainsScreenPoint(viewport, screenPoint, null);
+        }
+
+        private void ResetStoreRatListToTop()
+        {
+            if (storeRatListScroll == null) return;
+            storeRatListScroll.StopMovement();
+            if (storeRatListScroll.content != null)
+                LayoutRebuilder.ForceRebuildLayoutImmediate(storeRatListScroll.content);
+            if (storeRatListScroll.viewport != null)
+                LayoutRebuilder.ForceRebuildLayoutImmediate(storeRatListScroll.viewport);
+            Canvas.ForceUpdateCanvases();
+            storeRatListScroll.verticalNormalizedPosition = 1f;
         }
 
         private void AddStoreRatCard(Transform parent, RatData rat, string actionLabel, Color actionColor,
@@ -4522,7 +4812,7 @@ namespace RatHabitat
             var card = CreateCard(game.HabitatPageLabel);
             AddText(card, "Swipe left or right to move between full-size habitats.",
                 13, new Color(0.78f, 0.9f, 0.82f), TextAnchor.UpperLeft);
-            AddText(card, "Pairing Habitat: " + game.PairingHabitatCount + " / " + game.PairingHabitatCapacity + " spaces",
+            AddText(card, "Pairing Habitat: " + game.PairingHabitatCount + " / " + game.PairingHabitatCapacity + " occupants",
                 13, new Color(1f, 0.84f, 0.52f), TextAnchor.UpperLeft);
 
             var pagerRow = CreateRect("Habitat Pager Controls", card);

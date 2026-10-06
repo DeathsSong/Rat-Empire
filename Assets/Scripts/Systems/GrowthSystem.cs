@@ -11,10 +11,9 @@ namespace RatHabitat
     /// </summary>
     public static class GrowthSystem
     {
-        // Presentation behavior consumes the normalized 1x/2x/3x multiplier.
-        // The game clock intentionally keeps its existing stepped fast-forward
-        // conversion below; rat movement, animation, and action timers use the
-        // presentation multiplier exactly once and never alter the clock rate.
+        // Rat movement and time-based presentation use the same rate as the
+        // authoritative clock: 1 in-game minute/sec at 1x, 1 hour/sec at 2x,
+        // and 1 day/sec at 3x. The clock-rate ratio is applied once to real dt.
         private static float runtimeSimulationSpeed = 1f;
         private static bool simulationPaused;
         private static float lastMovementRealDeltaSeconds;
@@ -45,10 +44,6 @@ namespace RatHabitat
         // Biological deadlines and the authoritative game clock are timestamp
         // driven elsewhere; older missed movement/idle steps are compressed.
         public const float MaximumBehaviorBacklogSeconds = 12f;
-        // Presentation movement may use only the current frame's simulated
-        // interval. A long frame is capped to avoid visible teleports while
-        // behavior timers continue catching up in bounded steps.
-        public const float MaximumVisualMovementRealDeltaSeconds = 0.1f;
         public const float MaximumAnimationPlaybackMultiplier = 12f;
 
         public static float RuntimeSimulationSpeed { get { return simulationPaused ? 0f : runtimeSimulationSpeed; } }
@@ -278,9 +273,9 @@ namespace RatHabitat
 
         /// <summary>
         /// Converts a rat's authored world-space speed into one frame's
-        /// distance. This is the single path used by every position-writing
-        /// movement step, so 2x and 3x change actual travel time rather than
-        /// only Animator playback.
+        /// distance using the clock-rate ratio exactly once. At the current
+        /// clock settings, 2x is 60 times and 3x is 1,440 times the 1x world
+        /// movement rate, rather than merely changing Animator playback.
         /// </summary>
         public static float SimulationMovementStep(float baseWorldSpeed, float realDeltaSeconds)
         {
@@ -308,26 +303,46 @@ namespace RatHabitat
         }
 
         /// <summary>
-        /// Returns the scaled movement time available in the current rendered
-        /// frame. It deliberately does not include previously accumulated AI
-        /// catch-up time, which must never become extra distance after a speed
-        /// change. The cap only affects visual movement after a long frame.
+        /// Calculates one clamped world-space movement position using the
+        /// same already-scaled frame budget consumed by live rat movement.
+        /// Keeping this primitive shared lets tests verify Transform distance,
+        /// not merely the clock multiplier in isolation.
+        /// </summary>
+        public static Vector3 SimulationMovementTargetPosition(
+            Vector3 currentPosition,
+            Vector3 targetPosition,
+            float baseWorldSpeed,
+            float simulationDeltaSeconds,
+            ref float visualMovementTimeBudgetSeconds)
+        {
+            float distance = SimulationMovementStep(
+                baseWorldSpeed, simulationDeltaSeconds, ref visualMovementTimeBudgetSeconds);
+            return Vector3.MoveTowards(currentPosition, targetPosition, distance);
+        }
+
+        /// <summary>
+        /// Returns the complete scaled movement time available in the current
+        /// rendered frame. AI catch-up backlog is deliberately excluded so a
+        /// speed change cannot turn old decisions into a movement jump, but
+        /// elapsed time in a slow rendered frame is never discarded. Spatial
+        /// movement callers use MoveTowards and enclosure clamps to remain
+        /// bounded.
         /// </summary>
         public static float SimulationMovementTimeBudget(float currentFrameSimulationDeltaSeconds)
         {
             if (simulationPaused || currentFrameSimulationDeltaSeconds <= 0f) return 0f;
-            float maximumScaledDelta = MaximumVisualMovementRealDeltaSeconds * RuntimeSimulationMultiplier;
-            return Mathf.Min(currentFrameSimulationDeltaSeconds, maximumScaledDelta);
+            return currentFrameSimulationDeltaSeconds;
         }
 
         public static float SimulationMultiplierForSpeed(float speed)
         {
-            // The clock intentionally uses legacy fast-forward rates (1 game
-            // minute / real second at 1x, one game hour at 2x, one game day
-            // at 3x). Per-frame behavior and movement use the selected mode
-            // itself; deriving this multiplier from clock units turns 2x into
-            // 60x and 3x into 1440x, causing massive repeated movement/ticks.
-            return NormalizeSpeed(speed);
+            // Keep world movement aligned with the clock's actual fast-forward
+            // contract, not the button labels: 2x advances 60 times and 3x
+            // advances 1,440 times as much game time as 1x.
+            double baselineRate = SimulationMillisecondsPerRealMillisecond(1f);
+            if (baselineRate <= 0d) return 1f;
+            return Mathf.Max(0f, (float)(
+                SimulationMillisecondsPerRealMillisecond(speed) / baselineRate));
         }
 
         public static double GameSecondsPerRealSecond(float speed)

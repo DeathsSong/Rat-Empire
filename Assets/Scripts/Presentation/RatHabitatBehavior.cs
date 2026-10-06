@@ -736,10 +736,11 @@ namespace RatHabitat
                     simulationSteps * GrowthSystem.MaximumBehaviorStepSeconds);
             pendingBehaviorTimeSeconds = Mathf.Max(0f, pendingBehaviorTimeSeconds - processedDeltaTime);
             float stepDeltaTime = simulationSteps <= 0 ? 0f : processedDeltaTime / simulationSteps;
-            // Catch-up behavior time may be processed in several bounded
-            // simulation steps, but it must not become extra world movement.
-            // Share only this rendered frame's scaled movement-time budget
-            // across every route/state update for this rat.
+            // Decision/timer work stays bounded by processedDeltaTime. Split
+            // this rendered frame's full scaled movement interval across the
+            // bounded substeps so the work cap cannot silently discard world
+            // travel or convert old decision backlog into extra movement.
+            float movementStepDeltaTime = simulationSteps <= 0 ? 0f : deltaTime / simulationSteps;
             float visualMovementTimeBudgetSeconds =
                 GrowthSystem.SimulationMovementTimeBudget(deltaTime);
             ApplySimulationAnimationSpeed();
@@ -792,13 +793,13 @@ namespace RatHabitat
                 behaviorClockSeconds += stepDeltaTime;
                 if (birthApproachActive)
                 {
-                    UpdateBirthApproach(stepDeltaTime, ref visualMovementTimeBudgetSeconds);
+                    UpdateBirthApproach(movementStepDeltaTime, ref visualMovementTimeBudgetSeconds);
                     continue;
                 }
                 if (pairingApproachActive)
                 {
                     if (pairingInteractionActive) UpdatePairingInteraction(stepDeltaTime);
-                    else UpdatePairingApproach(stepDeltaTime, ref visualMovementTimeBudgetSeconds);
+                    else UpdatePairingApproach(movementStepDeltaTime, ref visualMovementTimeBudgetSeconds);
                     continue;
                 }
 
@@ -813,7 +814,8 @@ namespace RatHabitat
                     case RatBehaviorState.Wander:
                     case RatBehaviorState.WalkToTarget:
                     case RatBehaviorState.Run:
-                        UpdateTravel(stepDeltaTime, ref visualMovementTimeBudgetSeconds);
+                        UpdateTravel(stepDeltaTime, movementStepDeltaTime,
+                            ref visualMovementTimeBudgetSeconds);
                         break;
                     case RatBehaviorState.Investigate:
                         UpdateInvestigation(stepDeltaTime);
@@ -1105,7 +1107,10 @@ namespace RatHabitat
             }
         }
 
-        private void UpdateTravel(float deltaTime, ref float visualMovementTimeBudgetSeconds)
+        private void UpdateTravel(
+            float deltaTime,
+            float movementDeltaTime,
+            ref float visualMovementTimeBudgetSeconds)
         {
             travelTimer += deltaTime;
             Vector3 toTarget = targetPosition - transform.position;
@@ -1157,8 +1162,6 @@ namespace RatHabitat
                 return;
             }
 
-            Vector3 direction = toTarget.normalized;
-
             // The inspected prefab has Apply Root Motion disabled. If a future
             // imported controller enables it, code movement stops here so the
             // animator remains the sole source of translation.
@@ -1168,12 +1171,10 @@ namespace RatHabitat
                 // Use the selected simulation delta for the real position
                 // write, but clamp the step so a 2x/3x frame can never jump
                 // past the destination and start oscillating around it.
-                float step = GrowthSystem.SimulationMovementStep(
-                    movementSpeed, deltaTime, ref visualMovementTimeBudgetSeconds);
-                Vector3 nextPosition = Vector3.MoveTowards(
-                    transform.position,
-                    targetPosition,
-                    step);
+                Vector3 nextPosition = GrowthSystem.SimulationMovementTargetPosition(
+                    transform.position, targetPosition, movementSpeed,
+                    movementDeltaTime, ref visualMovementTimeBudgetSeconds);
+                float step = Vector3.Distance(transform.position, nextPosition);
                 transform.position = MoveTowardAvoidingNest(transform.position, nextPosition, step);
             }
             spacingTimer -= deltaTime;
@@ -1184,11 +1185,13 @@ namespace RatHabitat
             }
         }
 
-        private void UpdatePairingApproach(float deltaTime, ref float visualMovementTimeBudgetSeconds)
+        private void UpdatePairingApproach(
+            float movementDeltaTime,
+            ref float visualMovementTimeBudgetSeconds)
         {
-            FacePairingPoint(deltaTime);
+            FacePairingPoint(movementDeltaTime);
             float remainingStep = GrowthSystem.SimulationMovementStep(
-                movementSpeed, deltaTime, ref visualMovementTimeBudgetSeconds);
+                movementSpeed, movementDeltaTime, ref visualMovementTimeBudgetSeconds);
             int waypointGuard = 0;
             while (remainingStep > 0.0001f && !pairingApproachArrived && waypointGuard++ < 8)
             {
@@ -1229,11 +1232,13 @@ namespace RatHabitat
             }
         }
 
-        private void UpdateBirthApproach(float deltaTime, ref float visualMovementTimeBudgetSeconds)
+        private void UpdateBirthApproach(
+            float movementDeltaTime,
+            ref float visualMovementTimeBudgetSeconds)
         {
             if (birthApproachArrived)
             {
-                FaceBirthNest(deltaTime);
+                FaceBirthNest(movementDeltaTime);
                 return;
             }
 
@@ -1252,17 +1257,17 @@ namespace RatHabitat
             if (distance <= ArrivalDistance)
             {
                 birthApproachArrived = true;
-                FaceBirthNest(deltaTime);
+                FaceBirthNest(movementDeltaTime);
                 return;
             }
 
             Vector3 direction = toTarget / Mathf.Max(0.0001f, distance);
             Quaternion facing = RotationFacingWorldDirection(direction);
             transform.rotation = Quaternion.RotateTowards(
-                transform.rotation, facing, MovementTurnSpeed * Mathf.Max(0f, deltaTime));
-            float step = GrowthSystem.SimulationMovementStep(
-                movementSpeed, deltaTime, ref visualMovementTimeBudgetSeconds);
-            Vector3 next = Vector3.MoveTowards(transform.position, destination, step);
+                transform.rotation, facing, MovementTurnSpeed * Mathf.Max(0f, movementDeltaTime));
+            Vector3 next = GrowthSystem.SimulationMovementTargetPosition(
+                transform.position, destination, movementSpeed,
+                movementDeltaTime, ref visualMovementTimeBudgetSeconds);
             // The mother is the only adult allowed to use the nest during this
             // explicit route. Keep every movement step inside cage bounds and
             // project it into the safe inner caregiver area.
@@ -1279,7 +1284,7 @@ namespace RatHabitat
                 new Vector3(destination.x, 0f, destination.z)) <= ArrivalDistance)
             {
                 birthApproachArrived = true;
-                FaceBirthNest(deltaTime);
+                FaceBirthNest(movementDeltaTime);
             }
         }
 

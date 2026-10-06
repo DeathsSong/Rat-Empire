@@ -59,9 +59,11 @@ namespace RatHabitat
             bool changed = false;
             int capacityLevelBefore = save.colonyCapacityUpgradeLevel;
             int qualityLevelBefore = save.storeQualityUpgradeLevel;
+            int pairingCapacityLevelBefore = save.pairingHabitatCapacityUpgradeLevel;
             UpgradeSystem.EnsureState(save);
             changed |= capacityLevelBefore != save.colonyCapacityUpgradeLevel ||
-                qualityLevelBefore != save.storeQualityUpgradeLevel;
+                qualityLevelBefore != save.storeQualityUpgradeLevel ||
+                pairingCapacityLevelBefore != save.pairingHabitatCapacityUpgradeLevel;
             changed |= NormalizeDisplayNames(save);
             if (save.rats != null)
             {
