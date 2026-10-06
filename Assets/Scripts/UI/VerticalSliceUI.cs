@@ -98,6 +98,7 @@ namespace RatHabitat
         private RectTransform namingCard;
         private RectTransform namingContent;
         private ScrollRect namingScroll;
+        private LayoutElement namingScrollLayout;
         private Text namingStatusText;
         private bool namingOpen;
         private readonly Dictionary<string, InputField> pendingNamingInputs = new Dictionary<string, InputField>();
@@ -1763,7 +1764,7 @@ namespace RatHabitat
                 eventLogCard.anchoredPosition = new Vector2(0f, -HeaderHeight - 8f);
             }
             if (renameCard != null) renameCard.sizeDelta = new Vector2(modalWidth, 0f);
-            if (namingCard != null) namingCard.sizeDelta = new Vector2(modalWidth, 0f);
+            ApplyPendingNamingCardLayout(modalWidth);
             if (developerToolsViewport != null)
             {
                 float viewportHeight = Mathf.Min(720f, Mathf.Max(360f, safeRoot.rect.height - 40f));
@@ -1791,6 +1792,31 @@ namespace RatHabitat
                 int margin = Mathf.Max((int)MinimumSideMargin, Mathf.RoundToInt(sideMargin));
                 contentLayout.padding.left = margin;
                 contentLayout.padding.right = margin;
+            }
+        }
+
+        private void ApplyPendingNamingCardLayout(float modalWidth)
+        {
+            if (namingCard == null || safeRoot == null) return;
+
+            // Keep the naming modal below the fixed navigation and inside the
+            // device safe area. Its card has a fixed viewport-sized frame;
+            // only the newborn rows scroll, while the header and actions stay
+            // anchored and available for large litters.
+            Vector2 safeTopCenter = new Vector2(
+                (safeRoot.anchorMin.x + safeRoot.anchorMax.x) * 0.5f,
+                safeRoot.anchorMax.y);
+            namingCard.anchorMin = safeTopCenter;
+            namingCard.anchorMax = safeTopCenter;
+            namingCard.pivot = new Vector2(0.5f, 1f);
+            namingCard.anchoredPosition = new Vector2(0f, -HeaderHeight - 8f);
+            float availableBelowHeader = Mathf.Max(1f, safeRoot.rect.height - HeaderHeight - 24f);
+            namingCard.sizeDelta = new Vector2(modalWidth, availableBelowHeader);
+            if (namingScrollLayout != null)
+            {
+                const float fixedContentHeight = 32f + 44f + 28f + 44f + 36f + 36f;
+                namingScrollLayout.preferredHeight = Mathf.Clamp(
+                    availableBelowHeader - fixedContentHeight, 1f, 330f);
             }
         }
 
@@ -1962,8 +1988,16 @@ namespace RatHabitat
         private void BuildPendingNamingPopup()
         {
             namingOverlay = CreateModalOverlay("Newborn Naming Modal", new Color(0.01f, 0.03f, 0.04f, 0.80f), out namingCard);
-            AddText(namingCard, "Name the new pinkies", 22, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
-            AddText(namingCard, "The game is paused while you name this litter. Each pup needs its own name.", 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
+            ContentSizeFitter cardFitter = namingCard.GetComponent<ContentSizeFitter>();
+            if (cardFitter != null) cardFitter.verticalFit = ContentSizeFitter.FitMode.Unconstrained;
+            Text title = AddText(namingCard, "Name the new pinkies", 22, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft);
+            title.fontStyle = FontStyle.Bold;
+            LayoutElement titleLayout = title.GetComponent<LayoutElement>();
+            titleLayout.minHeight = titleLayout.preferredHeight = 32f;
+            Text instructions = AddText(namingCard, "The game is paused while you name this litter. Each pup needs its own name.", 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
+            LayoutElement instructionsLayout = instructions.GetComponent<LayoutElement>();
+            instructionsLayout.minHeight = 34f;
+            instructionsLayout.preferredHeight = 44f;
             var scrollObject = new GameObject("Newborn Naming Scroll");
             scrollObject.transform.SetParent(namingCard, false);
             namingScroll = scrollObject.AddComponent<ScrollRect>();
@@ -1972,9 +2006,10 @@ namespace RatHabitat
             namingScroll.movementType = ScrollRect.MovementType.Clamped;
             namingScroll.inertia = true;
             namingScroll.scrollSensitivity = 30f;
-            var scrollLayout = scrollObject.AddComponent<LayoutElement>();
-            scrollLayout.preferredHeight = 330f;
-            scrollLayout.minHeight = 180f;
+            namingScrollLayout = scrollObject.AddComponent<LayoutElement>();
+            namingScrollLayout.preferredHeight = 330f;
+            namingScrollLayout.minHeight = 1f;
+            namingScrollLayout.flexibleHeight = 0f;
             var scrollRect = scrollObject.GetComponent<RectTransform>();
             var viewport = CreateRect("Newborn Naming Viewport", scrollRect);
             viewport.anchorMin = Vector2.zero;
@@ -2002,7 +2037,14 @@ namespace RatHabitat
             namingScroll.viewport = viewport;
             namingScroll.content = namingContent;
             namingStatusText = AddText(namingCard, string.Empty, 12, new Color(1f, 0.63f, 0.42f), TextAnchor.UpperLeft);
+            LayoutElement statusLayout = namingStatusText.GetComponent<LayoutElement>();
+            statusLayout.minHeight = 18f;
+            statusLayout.preferredHeight = 28f;
             RectTransform actions = CreateRect("Newborn Naming Actions", namingCard);
+            LayoutElement actionsLayout = actions.gameObject.AddComponent<LayoutElement>();
+            actionsLayout.minHeight = 44f;
+            actionsLayout.preferredHeight = 44f;
+            actionsLayout.flexibleHeight = 0f;
             var actionLayout = actions.gameObject.AddComponent<HorizontalLayoutGroup>();
             actionLayout.spacing = 8f;
             actionLayout.childControlWidth = true;
@@ -2341,9 +2383,13 @@ namespace RatHabitat
                 rowLayout.childForceExpandWidth = false;
                 Text label = AddTextTo(row, ColonyFactory.DisplayName(pup), 13, Color.white, TextAnchor.MiddleLeft);
                 var labelLayout = label.gameObject.AddComponent<LayoutElement>();
+                labelLayout.minWidth = 90f;
                 labelLayout.preferredWidth = 105f;
                 InputField input = AddInputFieldTo(row, pup.name, 44f, false);
-                input.GetComponent<LayoutElement>().flexibleWidth = 1f;
+                LayoutElement inputLayout = input.GetComponent<LayoutElement>();
+                inputLayout.minWidth = 0f;
+                inputLayout.preferredWidth = 0f;
+                inputLayout.flexibleWidth = 1f;
                 pendingNamingInputs[pup.id] = input;
                 string pupId = pup.id;
                 AddDiceButtonTo(row, () =>
@@ -6594,8 +6640,12 @@ namespace RatHabitat
             const float rosterPortraitSize = 80f;
             const float headerHeight = 124f;
             var headerElement = header.gameObject.AddComponent<LayoutElement>();
-            headerElement.preferredHeight = headerHeight;
             headerElement.minHeight = headerHeight;
+            // Keep the familiar compact card height, but let the header grow
+            // to the preferred height of wrapped text on narrow screens. A
+            // fixed preferred height clips long age/stats and pregnancy rows.
+            var headerFitter = header.gameObject.AddComponent<ContentSizeFitter>();
+            headerFitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
 
             var portraitRoot = CreateRect("My Rats Portrait", header.transform);
             var portraitLayout = portraitRoot.gameObject.AddComponent<LayoutElement>();
@@ -6629,10 +6679,10 @@ namespace RatHabitat
 
             Text nameText = AddTextTo(infoRoot, BuildRatRosterName(rat, selected), 15, Color.white, TextAnchor.MiddleLeft);
             BindLiveText(nameText, () => BuildRatRosterName(rat, selected));
-            Text ageText = AddTextTo(infoRoot, BuildRatRosterAge(rat), 13, Color.white, TextAnchor.MiddleLeft);
-            BindLiveText(ageText, () => BuildRatRosterAge(rat));
-            Text stageText = AddTextTo(infoRoot, BuildRatRosterStage(rat), 13, Color.white, TextAnchor.MiddleLeft);
-            BindLiveText(stageText, () => BuildRatRosterStage(rat));
+            Text ageStageText = AddTextTo(infoRoot, BuildRatRosterAgeStage(rat), 13, Color.white, TextAnchor.MiddleLeft);
+            BindLiveText(ageStageText, () => BuildRatRosterAgeStage(rat));
+            Text statsText = AddTextTo(infoRoot, BuildRatRosterStats(rat), 13, Color.white, TextAnchor.MiddleLeft);
+            BindLiveText(statsText, () => BuildRatRosterStats(rat));
             PregnancyData pregnancy = FindPregnancyForFemale(rat);
             if (pregnancy != null)
             {
@@ -6710,17 +6760,22 @@ namespace RatHabitat
         private string BuildRatRosterName(RatData rat, bool selected)
         {
             if (rat == null) return string.Empty;
-            return (selected ? "✓ " : string.Empty) + ColonyFactory.DisplayName(rat);
+            return (selected ? "✓ " : string.Empty) + ColonyFactory.DisplayName(rat) + "  •  " + SexLabel(rat.sex);
         }
 
-        private static string BuildRatRosterAge(RatData rat)
+        private static string BuildRatRosterAgeStage(RatData rat)
         {
-            return rat == null ? string.Empty : "Age: " + GrowthSystem.FormatAge(rat.ageDays);
+            return rat == null
+                ? string.Empty
+                : "Age: " + GrowthSystem.FormatAge(rat.ageDays) + " - " + GrowthSystem.StageLabel(GrowthSystem.StageForAge(rat));
         }
 
-        private static string BuildRatRosterStage(RatData rat)
+        private static string BuildRatRosterStats(RatData rat)
         {
-            return rat == null ? string.Empty : "Stage: " + GrowthSystem.StageLabel(rat.stage);
+            if (rat == null) return string.Empty;
+            TraitData traits = rat.traits ?? new TraitData();
+            return "Size " + traits.size.ToString("0") + " • Health " + traits.health.ToString("0") +
+                " • Fertility " + traits.fertility.ToString("0");
         }
 
         private string BuildRatRosterAvailability(RatData rat)

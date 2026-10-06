@@ -108,6 +108,11 @@ namespace RatHabitat
         {
             ClearPendingSaveQueue();
         }
+
+        // Narrow persistence seam for tests that need to verify save ordering.
+        // When set, tests receive the in-memory save without touching the
+        // editor user's persistentDataPath or browser storage.
+        public static Func<ColonySaveData, string, bool> SaveInterceptorForTests;
 #endif
 
         public static ColonySaveData LoadOrCreate()
@@ -257,6 +262,10 @@ namespace RatHabitat
         public static bool Save(ColonySaveData save, [CallerMemberName] string source = null)
         {
             if (save == null) return false;
+#if UNITY_EDITOR
+            if (SaveInterceptorForTests != null)
+                return SaveInterceptorForTests(save, source ?? "Save");
+#endif
             if (saveInProgress) return true;
 
             bool saved = PersistImmediately(save, source ?? "Save");

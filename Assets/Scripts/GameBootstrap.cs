@@ -136,6 +136,12 @@ namespace RatHabitat
         private bool cameraFollowSelectedRat;
         private Coroutine pairingCheckRoutine;
         private PairingApproachRuntime pairingApproach;
+        private bool pairingHeaderRefreshPending;
+        private float pairingHeaderRefreshDueAt;
+        private float pairingRetryNotBeforeRealtime;
+        private const float PairingHeaderRefreshDelaySeconds = 0.25f;
+        private const float PairingRouteRetryBaseDelaySeconds = 0.25f;
+        private const float PairingRouteRetryMaxDelaySeconds = 2f;
         private const int MaximumEventLogEntries = 10;
         // Generated profile buttons can be rebuilt while the same pointer-up
         // event is still being processed. Keep the explicit move action from
@@ -990,6 +996,18 @@ namespace RatHabitat
                     continue;
                 }
 
+                // At 3x, a 30-game-second retry interval is shorter than one
+                // rendered frame. After a failed physical route this can
+                // retry once per frame, repeating route planning, logging,
+                // saving, and UI work. Keep the game timestamp due, but back
+                // off route failures in real time instead of hot-looping.
+                float retryWait = pairingRetryNotBeforeRealtime - Time.realtimeSinceStartup;
+                if (retryWait > 0f)
+                {
+                    yield return new WaitForSecondsRealtime(Mathf.Min(retryWait, 0.25f));
+                    continue;
+                }
+
                 EnsurePairingCheckScheduled();
                 long remainingGameMs = Save.pairingNextCheckGameTime - GameTime;
                 if (remainingGameMs > 0L)
@@ -1025,8 +1043,8 @@ namespace RatHabitat
                 // browser storage for a no-op attempt.
                 if (approachStarted)
                 {
-                    RefreshWorldAndUi(false);
-                    SaveSystem.Save(Save);
+                    QueuePairingHeaderRefresh();
+                    SaveSystem.QueueSave(Save, "GameBootstrap.PairingCheckLoop/approach-started");
                 }
             }
         }
@@ -1199,7 +1217,7 @@ namespace RatHabitat
                     // Keep the state in each rat's activity history, but do
                     // not promote the ordinary interaction to the global
                     // top-right event log/live banner.
-                    SaveSystem.Save(Save);
+                    SaveSystem.QueueSave(Save, "GameBootstrap.UpdatePairingApproach/interaction-started");
                     return;
                 }
 
@@ -1391,9 +1409,14 @@ namespace RatHabitat
                 RatData failedFemale = cancelledFemale;
                 string diagnosticRat = failedFemale != null ? ColonyFactory.DisplayName(failedFemale) :
                     (failedMale != null ? ColonyFactory.DisplayName(failedMale) : failedApproach.femaleId);
-                Debug.Log("[Rat Habitat] " + diagnosticRat + " route recovery: " + failureText);
+                bool exhaustedRouteRetries = pairingRouteRetryCount > MaximumPairingRouteRetries;
+                if (pairingRouteRetryCount == 1 || exhaustedRouteRetries)
+                    Debug.Log("[Rat Habitat] " + diagnosticRat + " route recovery: " + failureText);
                 StatusMessage = diagnosticRat + " route recovery — nest blocked";
-                if (pairingRouteRetryCount > MaximumPairingRouteRetries)
+                int retryExponent = Mathf.Clamp(pairingRouteRetryCount - 1, 0, 3);
+                float retryDelay = Mathf.Min(PairingRouteRetryMaxDelaySeconds,
+                    PairingRouteRetryBaseDelaySeconds * Mathf.Pow(2f, retryExponent));
+                if (exhaustedRouteRetries)
                 {
                     if (rats != null && rats.TryGetRatBehavior(failedApproach.maleId, out maleBehavior))
                         maleBehavior.RecoverAtSafeOpenFloor();
@@ -1403,7 +1426,9 @@ namespace RatHabitat
                     pairingRouteRetryCount = 0;
                     pairingFailedMaleTarget = Vector3.zero;
                     pairingFailedFemaleTarget = Vector3.zero;
+                    retryDelay = PairingRouteRetryMaxDelaySeconds;
                 }
+                pairingRetryNotBeforeRealtime = Time.realtimeSinceStartup + retryDelay;
             }
             Save.pairingNextCheckGameTime = GameTime + GameConfig.PairingCheckIntervalMs;
             if (!routeFailure)
@@ -1412,8 +1437,20 @@ namespace RatHabitat
                 // transitions, not route errors or player-facing events.
                 StatusMessage = string.Empty;
             }
-            RefreshWorldAndUi(false);
-            SaveSystem.Save(Save);
+            QueuePairingHeaderRefresh();
+            SaveSystem.QueueSave(Save, "GameBootstrap.CancelPairingApproach");
+        }
+
+        private void QueuePairingHeaderRefresh()
+        {
+            // Pairing changes do not alter the colony roster; the two
+            // behaviors own their visuals directly. Refresh only the small
+            // header/status area, never re-render all rats and rebuild the
+            // complete UI for a route retry.
+            if (pairingHeaderRefreshPending) return;
+            pairingHeaderRefreshPending = true;
+            pairingHeaderRefreshDueAt = Time.realtimeSinceStartup +
+                PairingHeaderRefreshDelaySeconds;
         }
 
         private static string FormatPairingEligibilityCancellation(string reason)
@@ -1763,6 +1800,13 @@ namespace RatHabitat
                 wakeLockPollTimer = 0.5f;
             }
             if (Save == null) return;
+
+            if (pairingHeaderRefreshPending &&
+                Time.realtimeSinceStartup >= pairingHeaderRefreshDueAt)
+            {
+                pairingHeaderRefreshPending = false;
+                if (ui != null) ui.RefreshHeader();
+            }
 
             // Service one coalesced colony save at a bounded cadence. The
             // queued save stores the latest live Save reference, so multiple
@@ -4430,8 +4474,11 @@ namespace RatHabitat
             if (Save == null || PendingNamingLitter == null) return false;
             Save.pendingNamingLitterIds.Remove(PendingNamingLitter.id);
             Save.clock.lastRealTimestamp = GameConfig.NowMs();
+            // Persist every validated player-entered name and the cleared
+            // naming queue before releasing the modal pause. If storage fails,
+            // leave the colony paused so the player can retry safely.
+            if (!SaveSystem.Save(Save)) return false;
             GrowthSystem.SetSimulationPaused(HasPendingLitterNaming || WelcomePopupPending);
-            SaveSystem.Save(Save);
             if (ui != null)
             {
                 if (HasPendingLitterNaming) ui.OpenPendingLitterNaming();

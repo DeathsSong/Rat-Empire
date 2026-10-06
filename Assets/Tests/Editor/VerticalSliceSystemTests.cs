@@ -321,7 +321,7 @@ namespace RatHabitat.Tests
                 GrowthSystem.BeginBehaviorUpdate(0.01f); // establish this frame's diagnostic window
                 int beforeTwenty = GrowthSystem.LastSimulationStepCount;
                 for (int rat = 0; rat < 20; rat++)
-                    Assert.AreEqual(GrowthSystem.MaximumTotalBehaviorStepsPerFrame / 20,
+                    Assert.AreEqual(3,
                         GrowthSystem.BeginBehaviorUpdate(120f, "twenty-rat-" + rat));
                 Assert.LessOrEqual(GrowthSystem.LastSimulationStepCount - beforeTwenty,
                     GrowthSystem.MaximumTotalBehaviorStepsPerFrame,
@@ -335,7 +335,7 @@ namespace RatHabitat.Tests
                 GrowthSystem.SetBehaviorParticipantCount(40);
                 int beforeForty = GrowthSystem.LastSimulationStepCount;
                 for (int rat = 0; rat < 40; rat++)
-                    Assert.AreEqual(Mathf.Max(1, GrowthSystem.MaximumTotalBehaviorStepsPerFrame / 40),
+                    Assert.AreEqual(1,
                         GrowthSystem.BeginBehaviorUpdate(120f, "forty-rat-" + rat));
                 Assert.LessOrEqual(GrowthSystem.LastSimulationStepCount - beforeForty,
                     GrowthSystem.MaximumTotalBehaviorStepsPerFrame);
@@ -365,8 +365,9 @@ namespace RatHabitat.Tests
                 int returnedSteps = GrowthSystem.BeginBehaviorUpdate(2.1f, "counter-semantics-rat");
 
                 Assert.AreEqual(3, returnedSteps);
-                Assert.AreEqual(3, GrowthSystem.LastSimulationStepCount - stepsBefore,
-                    "Simulation steps are bounded substeps, not an alternate rat-call counter.");
+                Assert.AreEqual(3,
+                    GrowthSystem.LastSimulationStepCount - stepsBefore,
+                    "Large elapsed intervals use only the rat's share of the fixed colony-wide work budget.");
                 Assert.AreEqual(1, GrowthSystem.LastBehaviorUpdateCount - updatesBefore,
                     "Rat behavior updates count invocations.");
                 Assert.AreEqual(0, GrowthSystem.LastRepeatedBehaviorUpdateCount - repeatsBefore,
@@ -695,6 +696,48 @@ namespace RatHabitat.Tests
             rat.ageDays = Mathf.Max(GameConfig.PupSaleMinimumAgeDays + 1f, 60f);
         }
 
+        [TestCase(2f, RatSex.Female, 425f, "Age: 2 days - Pinkie")]
+        [TestCase(44f, RatSex.Female, 425f, "Age: 1 month, 2 weeks - Young Rat")]
+        [TestCase(210f, RatSex.Female, 425f, "Age: 7 months - Adult")]
+        [TestCase(425f, RatSex.Female, 425f, "Age: 1 year, 2 months - Elderly")]
+        public void MyRatsRosterShowsAgeAndAuthoritativeStageOnOneLine(
+            float ageDays, RatSex sex, float breedingEndAgeDays, string expected)
+        {
+            var rat = new RatData
+            {
+                id = "roster-age-stage-test",
+                name = "Roster Test",
+                sex = sex,
+                ageDays = ageDays,
+                breedingEndAgeDays = breedingEndAgeDays,
+                // Deliberately stale: the roster must derive stage from the
+                // authoritative individualized age rules, not this label.
+                stage = RatStage.Pinkie,
+            };
+            var formatter = typeof(VerticalSliceUI).GetMethod(
+                "BuildRatRosterAgeStage",
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+
+            Assert.IsNotNull(formatter);
+            Assert.AreEqual(expected, formatter.Invoke(null, new object[] { rat }));
+        }
+
+        [Test]
+        public void MyRatsRosterFormatsStatsDirectlyAsTheSecondSummaryLine()
+        {
+            var rat = new RatData
+            {
+                id = "roster-stats-test",
+                traits = new TraitData(32f, 29f, 28f),
+            };
+            var formatter = typeof(VerticalSliceUI).GetMethod(
+                "BuildRatRosterStats",
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+
+            Assert.IsNotNull(formatter);
+            Assert.AreEqual("Size 32 • Health 29 • Fertility 28", formatter.Invoke(null, new object[] { rat }));
+        }
+
         [Test]
         public void MyRatsMixedGrowthStagesShareOneScrollableRosterContent()
         {
@@ -733,6 +776,11 @@ namespace RatHabitat.Tests
                         stage);
                     save.rats.Add(rat);
                 }
+                // Give one summary a deliberately long age string and stale
+                // saved stage so this same list test covers wrapping and the
+                // authoritative stage formatter on a narrow phone layout.
+                save.rats[0].ageDays = 10000f;
+                save.rats[0].breedingEndAgeDays = 425f;
                 typeof(GameBootstrap).GetProperty("Save").GetSetMethod(true).Invoke(game, new object[] { save });
 
                 Canvas canvas = canvasObject.GetComponent<Canvas>();
@@ -775,6 +823,20 @@ namespace RatHabitat.Tests
                 Assert.IsNotNull(rosterScroll.content);
                 Assert.AreEqual(save.rats.Count, rosterScroll.content.childCount,
                     "Pinkies, young rats, and adults must all create rows in the same content transform.");
+                RectTransform firstRow = rosterScroll.content.GetChild(0) as RectTransform;
+                RectTransform firstHeader = firstRow == null ? null : firstRow.GetChild(0) as RectTransform;
+                RectTransform firstInfo = firstHeader == null ? null : firstHeader.Find("My Rats Basic Information") as RectTransform;
+                Assert.IsNotNull(firstInfo);
+                Text[] summaryLines = firstInfo.GetComponentsInChildren<Text>(true);
+                Assert.GreaterOrEqual(summaryLines.Length, 4);
+                StringAssert.Contains(ColonyFactory.DisplayName(save.rats[0]), summaryLines[0].text,
+                    "The roster preserves the same resolved display name as the colony data.");
+                StringAssert.Contains("Female", summaryLines[0].text,
+                    "Sex stays visible alongside the rat name after the compact layout change.");
+                Assert.AreEqual("Age: 27 years, 4 months - Elderly", summaryLines[1].text,
+                    "A stale saved stage must not override the rat's current age and individualized cutoff.");
+                Assert.AreEqual("Size 10 • Health 20 • Fertility 30", summaryLines[2].text,
+                    "Stats immediately follow the combined age/stage line.");
                 Assert.IsNotNull(rosterScroll.viewport.GetComponent<RectMask2D>());
                 Assert.IsTrue(rosterScroll.viewport.GetComponent<Image>().raycastTarget,
                     "The roster viewport must be a valid EventSystem hit surface.");
@@ -837,6 +899,13 @@ namespace RatHabitat.Tests
                 finalizeLayout.Invoke(ui, new object[] { 1f });
                 Assert.Greater(rosterScroll.content.rect.height, rosterScroll.viewport.rect.height,
                     "Mixed-stage row layout must produce a scrollable content extent.");
+
+                canvasRect.sizeDelta = new Vector2(320f, 640f);
+                Canvas.ForceUpdateCanvases();
+                LayoutRebuilder.ForceRebuildLayoutImmediate(rosterScroll.content);
+                Canvas.ForceUpdateCanvases();
+                Assert.GreaterOrEqual(firstHeader.rect.height, firstInfo.rect.height + 13f,
+                    "The card header must expand around wrapped long-age/stats text instead of clipping it on mobile.");
 
                 // Follow the actual EventSystem route at a point over the
                 // mixed-stage list. The top hit may be a row Graphic, but its
@@ -1556,6 +1625,180 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void NewbornNamingModalKeepsOnlyRowsScrollableForSmallAndLargeLitters()
+        {
+            Func<ColonySaveData, string, bool> priorSaveInterceptor = SaveSystem.SaveInterceptorForTests;
+            var gameObject = new GameObject("Pinkie Naming Modal Test Game");
+            var canvasObject = new GameObject("Pinkie Naming Modal Test Canvas", typeof(RectTransform),
+                typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
+            var eventSystemObject = new GameObject("Pinkie Naming Modal Test EventSystem", typeof(EventSystem));
+            try
+            {
+                SaveSystem.SaveInterceptorForTests = (save, source) => true;
+                gameObject.SetActive(false);
+                GameBootstrap game = gameObject.AddComponent<GameBootstrap>();
+                ColonySaveData save = CreatePendingNamingTestSave(1);
+                typeof(GameBootstrap).GetProperty("Save").GetSetMethod(true).Invoke(game, new object[] { save });
+
+                Canvas canvas = canvasObject.GetComponent<Canvas>();
+                canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+                CanvasScaler scaler = canvasObject.GetComponent<CanvasScaler>();
+                scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+                scaler.referenceResolution = new Vector2(540f, 960f);
+                scaler.matchWidthOrHeight = 1f;
+                canvasObject.GetComponent<RectTransform>().sizeDelta = new Vector2(540f, 960f);
+                eventSystemObject.GetComponent<EventSystem>().enabled = true;
+
+                VerticalSliceUI ui = canvasObject.AddComponent<VerticalSliceUI>();
+                SetPrivateField(ui, "game", game);
+                SetPrivateField(ui, "canvas", canvas);
+                SetPrivateField(ui, "namingOpen", true);
+                RectTransform safeRoot = new GameObject("Test Safe Area", typeof(RectTransform))
+                    .GetComponent<RectTransform>();
+                safeRoot.SetParent(canvasObject.transform, false);
+                safeRoot.anchorMin = Vector2.zero;
+                safeRoot.anchorMax = Vector2.one;
+                safeRoot.offsetMin = Vector2.zero;
+                safeRoot.offsetMax = Vector2.zero;
+                SetPrivateField(ui, "safeRoot", safeRoot);
+
+                var buildPopup = typeof(VerticalSliceUI).GetMethod(
+                    "BuildPendingNamingPopup", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                var refreshPopup = typeof(VerticalSliceUI).GetMethod(
+                    "RefreshPendingNamingPopup", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public);
+                var applyResponsiveLayout = typeof(VerticalSliceUI).GetMethod(
+                    "ApplyResponsiveLayout", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Assert.IsNotNull(buildPopup);
+                Assert.IsNotNull(refreshPopup);
+                Assert.IsNotNull(applyResponsiveLayout);
+                buildPopup.Invoke(ui, null);
+                Canvas.ForceUpdateCanvases();
+                applyResponsiveLayout.Invoke(ui, null);
+
+                int[] litterSizes = { 1, 5, 9, 12 };
+                foreach (int litterSize in litterSizes)
+                {
+                    save = CreatePendingNamingTestSave(litterSize);
+                    typeof(GameBootstrap).GetProperty("Save").GetSetMethod(true).Invoke(game, new object[] { save });
+                    refreshPopup.Invoke(ui, null);
+                    Canvas.ForceUpdateCanvases();
+
+                    RectTransform namingCard = GetPrivateField<RectTransform>(ui, "namingCard");
+                    ScrollRect scroll = GetPrivateField<ScrollRect>(ui, "namingScroll");
+                    RectTransform namingContent = GetPrivateField<RectTransform>(ui, "namingContent");
+                    Assert.IsNotNull(namingCard);
+                    Assert.IsNotNull(scroll);
+                    Assert.AreEqual(litterSize, namingContent.childCount,
+                        "Every pup gets one row for a litter of " + litterSize + ".");
+                    Assert.IsTrue(scroll.vertical);
+                    Assert.IsFalse(scroll.horizontal);
+                    Assert.AreSame(namingCard, scroll.transform.parent,
+                        "Only the pinkie rows live inside the modal ScrollRect.");
+                    Assert.AreEqual(namingCard, namingCard.Find("Newborn Naming Actions").parent,
+                        "The footer remains fixed outside the scroll viewport.");
+                    Assert.AreEqual(namingCard, namingCard.Find("Text").parent,
+                        "The modal title remains fixed outside the scroll viewport.");
+
+                    LayoutRebuilder.ForceRebuildLayoutImmediate(namingCard);
+                    LayoutRebuilder.ForceRebuildLayoutImmediate(scroll.content);
+                    Canvas.ForceUpdateCanvases();
+                    if (litterSize >= 9)
+                        Assert.Greater(scroll.content.rect.height, scroll.viewport.rect.height,
+                            "Large litters must scroll within the fixed row viewport.");
+
+                    Vector3[] cardCorners = new Vector3[4];
+                    namingCard.GetWorldCorners(cardCorners);
+                    float cardTopLocalY = safeRoot.InverseTransformPoint(cardCorners[1]).y;
+                    float cardBottomLocalY = safeRoot.InverseTransformPoint(cardCorners[0]).y;
+                    Assert.LessOrEqual(cardTopLocalY, safeRoot.rect.height * 0.5f - 158f + 0.5f,
+                        "The dialog starts below the 150-unit fixed navigation header.");
+                    Assert.GreaterOrEqual(cardBottomLocalY, -safeRoot.rect.height - 0.5f,
+                        "The dialog and fixed footer remain inside the safe-area bottom edge.");
+
+                    for (int rowIndex = 0; rowIndex < litterSize; rowIndex++)
+                    {
+                        RectTransform row = namingContent.GetChild(rowIndex) as RectTransform;
+                        InputField input = row.GetComponentInChildren<InputField>(true);
+                        Button randomize = row.GetComponentInChildren<Button>(true);
+                        Assert.IsNotNull(input);
+                        Assert.IsNotNull(randomize);
+                        LayoutElement inputLayout = input.GetComponent<LayoutElement>();
+                        LayoutElement randomizeLayout = randomize.GetComponent<LayoutElement>();
+                        Assert.AreEqual(1f, inputLayout.flexibleWidth, 0.001f,
+                            "The input must take only the space left after label and fixed-width dice button.");
+                        Assert.AreEqual(44f, randomizeLayout.minWidth, 0.001f);
+                        Assert.AreEqual(44f, randomizeLayout.preferredWidth, 0.001f);
+                        Assert.Greater(input.GetComponent<RectTransform>().rect.width, 0f);
+                        Assert.GreaterOrEqual(randomize.transform.position.y,
+                            row.position.y - row.rect.height * 0.5f - 1f);
+                        Assert.LessOrEqual(randomize.transform.position.y,
+                            row.position.y + row.rect.height * 0.5f + 1f);
+
+                        randomize.onClick.Invoke();
+                        RatData pup = save.rats.Find(candidate => candidate != null && candidate.id == row.name.Substring("Newborn Name ".Length));
+                        Assert.IsNotNull(pup);
+                        Assert.AreEqual(pup.name, input.text,
+                            "The per-row randomizer updates both the saved pending pup and its input.");
+                    }
+
+                    RectTransform actions = namingCard.Find("Newborn Naming Actions") as RectTransform;
+                    Button[] footerButtons = actions.GetComponentsInChildren<Button>(true);
+                    Assert.AreEqual(2, footerButtons.Length);
+                    Assert.IsTrue(footerButtons[0].interactable);
+                    Assert.IsTrue(footerButtons[1].interactable);
+                    StringAssert.Contains("Randomize All", footerButtons[0].GetComponentInChildren<Text>().text);
+                    StringAssert.Contains("Continue", footerButtons[1].GetComponentInChildren<Text>().text);
+                    if (litterSize == 12)
+                    {
+                        footerButtons[0].onClick.Invoke();
+                        foreach (RatData pup in game.PendingNamingPups)
+                            Assert.IsFalse(string.IsNullOrWhiteSpace(pup.name),
+                                "Randomize All keeps every large-litter name populated.");
+                    }
+                }
+            }
+            finally
+            {
+                SaveSystem.SaveInterceptorForTests = priorSaveInterceptor;
+                Object.DestroyImmediate(gameObject);
+                Object.DestroyImmediate(canvasObject);
+                Object.DestroyImmediate(eventSystemObject);
+            }
+        }
+
+        private static ColonySaveData CreatePendingNamingTestSave(int litterSize)
+        {
+            ColonySaveData save = ColonyFactory.CreateNew(1000000L);
+            RatData mother = save.rats.Find(rat => rat != null && rat.sex == RatSex.Female);
+            RatData father = save.rats.Find(rat => rat != null && rat.sex == RatSex.Male);
+            var litter = new LitterData
+            {
+                id = "naming-test-litter-" + litterSize,
+                motherId = mother == null ? string.Empty : mother.id,
+                fatherId = father == null ? string.Empty : father.id,
+                size = litterSize,
+                birthTimestamp = save.clock.gameTimeMs,
+            };
+            for (int index = 0; index < litterSize; index++)
+            {
+                string id = "naming-test-pup-" + litterSize + "-" + index;
+                RatData pup = ColonyFactory.CreateRat(id, "Test Pup " + index,
+                    index % 2 == 0 ? RatSex.Female : RatSex.Male,
+                    save.clock.gameTimeMs, 1,
+                    GeneticsSystem.CreateFounder("B", "B", "C", "C", "D", "D", "s", "s"),
+                    new TraitData(10f, 10f, 10f), RatStage.Pinkie);
+                pup.motherId = litter.motherId;
+                pup.fatherId = litter.fatherId;
+                pup.litterId = litter.id;
+                save.rats.Add(pup);
+                litter.pupIds.Add(pup.id);
+            }
+            save.litters.Add(litter);
+            save.pendingNamingLitterIds.Add(litter.id);
+            return save;
+        }
+
+        [Test]
         public void NewGameFoundersUseAbsoluteBeginnerStats()
         {
             var save = ColonyFactory.CreateNew(1000000L);
@@ -1907,11 +2150,11 @@ namespace RatHabitat.Tests
             GrowthSystem.SetRuntimeSpeed(1f);
 
             Assert.AreEqual(1f, GrowthSystem.SimulationMultiplierForSpeed(1f), 0.00001f,
-                "1x is the baseline game-clock movement rate.");
+                "1x is the baseline calendar rate.");
             Assert.AreEqual(60f, GrowthSystem.SimulationMultiplierForSpeed(2f), 0.0001f,
-                "2x movement must use the same rate ratio as the clock: one game hour per real second.");
+                "2x advances the calendar by one game hour per real second.");
             Assert.AreEqual(1440f, GrowthSystem.SimulationMultiplierForSpeed(3f), 0.001f,
-                "3x movement must use the same rate ratio as the clock: one game day per real second.");
+                "3x advances the calendar by one game day per real second.");
             Assert.AreEqual(oneX * 60f, twoX, 0.0001f,
                 "2x advances one game hour per real second, 60 times the 1x rate.");
             Assert.AreEqual(oneX * 1440f, threeX, 0.001f,
@@ -1947,10 +2190,10 @@ namespace RatHabitat.Tests
                     }
                 }
 
-                Assert.AreEqual(travelled[0] * 60f, travelled[1], 0.02f,
-                    "2x Transform travel must match the clock's 60x game-time rate in equal real time.");
-                Assert.AreEqual(travelled[0] * 1440f, travelled[2], 0.5f,
-                    "3x Transform travel must match the clock's 1,440x game-time rate in equal real time.");
+                Assert.AreEqual(travelled[0] * GrowthSystem.SimulationMultiplierForSpeed(2f), travelled[1], 0.02f,
+                    "2x Transform travel must match the 60x game-time fast-forward rate.");
+                Assert.AreEqual(travelled[0] * GrowthSystem.SimulationMultiplierForSpeed(3f), travelled[2], 0.05f,
+                    "3x Transform travel must match the 1,440x game-time fast-forward rate.");
 
                 Assert.That(roots[0].transform.position.x, Is.EqualTo(travelled[0]).Within(0.0001f));
                 Assert.That(roots[1].transform.position.x, Is.EqualTo(travelled[1]).Within(0.0001f));
@@ -1961,6 +2204,155 @@ namespace RatHabitat.Tests
                 GrowthSystem.SetRuntimeSpeed(1f);
                 for (int index = 0; index < roots.Length; index++)
                     if (roots[index] != null) UnityEngine.Object.DestroyImmediate(roots[index]);
+            }
+        }
+
+        [Test]
+        public void MovingColoniesWithPinkiesKeepFastForwardMovementAndBoundedBehaviorWork()
+        {
+            const float baseWorldSpeed = 0.75f;
+            const float realFrameSeconds = 1f / 60f;
+            const int frameCount = 120;
+            int[] colonySizes = { 10, 20, 30 };
+            int[] pinkieCounts = { 3, 5, 7 };
+
+            try
+            {
+                for (int colonyIndex = 0; colonyIndex < colonySizes.Length; colonyIndex++)
+                {
+                    int ratCount = colonySizes[colonyIndex];
+                    int pinkieCount = pinkieCounts[colonyIndex];
+                    int movingRatCount = ratCount - pinkieCount;
+                    GameObject[] roots = new GameObject[movingRatCount];
+                    string[] behaviorIds = new string[movingRatCount];
+                    float[] travelBySpeed = new float[3];
+                    float[] averageFrameMs = new float[3];
+                    float[] worstFrameMs = new float[3];
+
+                    try
+                    {
+                        for (int ratIndex = 0; ratIndex < movingRatCount; ratIndex++)
+                        {
+                            roots[ratIndex] = new GameObject("moving colony " + ratCount + " rat " + ratIndex);
+                            behaviorIds[ratIndex] = "perf-" + ratCount + "-" + ratIndex;
+                        }
+
+                        GrowthSystem.SetBehaviorParticipantCount(movingRatCount);
+                        for (int speedIndex = 0; speedIndex < 3; speedIndex++)
+                        {
+                            GrowthSystem.SetRuntimeSpeed(speedIndex + 1f);
+                            long scenarioTicks = 0L;
+                            long worstFrameTicks = 0L;
+                            for (int frame = 0; frame < frameCount; frame++)
+                            {
+                                GrowthSystem.ResetBehaviorDiagnosticsForTests();
+                                long frameStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                                float movementDelta = GrowthSystem.SimulationMovementDeltaSeconds(realFrameSeconds);
+                                for (int ratIndex = 0; ratIndex < movingRatCount; ratIndex++)
+                                {
+                                    int ratSteps = GrowthSystem.BeginBehaviorUpdate(
+                                        movementDelta, behaviorIds[ratIndex]);
+                                    float movementStepDelta = ratSteps <= 0
+                                        ? 0f
+                                        : movementDelta / ratSteps;
+                                    float movementBudget = GrowthSystem.SimulationMovementTimeBudget(movementDelta);
+                                    for (int step = 0; step < ratSteps; step++)
+                                    {
+                                        Vector3 previous = roots[ratIndex].transform.position;
+                                        roots[ratIndex].transform.position = GrowthSystem.SimulationMovementTargetPosition(
+                                            previous, previous + Vector3.right * 10000f,
+                                            baseWorldSpeed, movementStepDelta, ref movementBudget);
+                                        travelBySpeed[speedIndex] += Vector3.Distance(
+                                            previous, roots[ratIndex].transform.position);
+                                    }
+                                }
+                                long frameTicks = System.Diagnostics.Stopwatch.GetTimestamp() - frameStart;
+                                scenarioTicks += frameTicks;
+                                if (frameTicks > worstFrameTicks) worstFrameTicks = frameTicks;
+                                Assert.LessOrEqual(GrowthSystem.LastSimulationStepCount,
+                                    GrowthSystem.MaximumTotalBehaviorStepsPerFrame,
+                                    "All rats together must remain within the fixed catch-up work budget.");
+                            }
+
+                            averageFrameMs[speedIndex] = (float)RuntimePerformanceDiagnostics.TicksToMilliseconds(
+                                scenarioTicks) / frameCount;
+                            worstFrameMs[speedIndex] = (float)RuntimePerformanceDiagnostics.TicksToMilliseconds(
+                                worstFrameTicks);
+                        }
+
+                        Assert.AreEqual(travelBySpeed[0] * GrowthSystem.SimulationMultiplierForSpeed(2f), travelBySpeed[1], 0.002f,
+                            ratCount + " total rats (" + pinkieCount + " pinkies): 2x Transform travel follows the 60x clock rate.");
+                        Assert.AreEqual(travelBySpeed[0] * GrowthSystem.SimulationMultiplierForSpeed(3f), travelBySpeed[2], 0.01f,
+                            ratCount + " total rats (" + pinkieCount + " pinkies): 3x Transform travel follows the 1,440x clock rate.");
+                        for (int speedIndex = 0; speedIndex < 3; speedIndex++)
+                        {
+                            Assert.Less(averageFrameMs[speedIndex], 16.7f,
+                                ratCount + " rat movement + bounded behavior work averages below one 60 Hz frame budget.");
+                            Assert.Less(worstFrameMs[speedIndex], 100f,
+                                "The movement benchmark must not create a long catch-up frame.");
+                        }
+                    }
+                    finally
+                    {
+                        for (int ratIndex = 0; ratIndex < roots.Length; ratIndex++)
+                            if (roots[ratIndex] != null) Object.DestroyImmediate(roots[ratIndex]);
+                    }
+                }
+            }
+            finally
+            {
+                GrowthSystem.SetBehaviorParticipantCount(1);
+                GrowthSystem.SetRuntimeSpeed(1f);
+                GrowthSystem.SetSimulationPaused(false);
+            }
+        }
+
+        [Test]
+        public void WorldSpaceMovementSpeedChangesTakeEffectImmediatelyWithoutTeleporting()
+        {
+            const float baseWorldSpeed = 0.75f;
+            const float realFrameSeconds = 1f / 60f;
+            const int framesPerSegment = 60;
+            float[] speeds = { 1f, 2f, 3f, 1f };
+            GameObject[] roots = new GameObject[20];
+
+            try
+            {
+                for (int index = 0; index < roots.Length; index++)
+                    roots[index] = new GameObject("speed transition rat " + index);
+
+                for (int segment = 0; segment < speeds.Length; segment++)
+                {
+                    GrowthSystem.SetRuntimeSpeed(speeds[segment]);
+                    float segmentTravel = 0f;
+                    for (int frame = 0; frame < framesPerSegment; frame++)
+                    {
+                        float movementDelta = GrowthSystem.SimulationMovementDeltaSeconds(realFrameSeconds);
+                        for (int index = 0; index < roots.Length; index++)
+                        {
+                            Vector3 before = roots[index].transform.position;
+                            float movementBudget = GrowthSystem.SimulationMovementTimeBudget(movementDelta);
+                            roots[index].transform.position = GrowthSystem.SimulationMovementTargetPosition(
+                                before, before + Vector3.right * 100000f, baseWorldSpeed,
+                                movementDelta, ref movementBudget);
+                            float stepDistance = Vector3.Distance(before, roots[index].transform.position);
+                            float frameRateMultiplier = GrowthSystem.SimulationMultiplierForSpeed(speeds[segment]);
+                            Assert.LessOrEqual(stepDistance, baseWorldSpeed * frameRateMultiplier * realFrameSeconds + 0.0001f,
+                                "A speed change may not teleport any rat beyond that frame's game-time movement budget.");
+                            segmentTravel += stepDistance;
+                        }
+                    }
+
+                    Assert.AreEqual(roots.Length * baseWorldSpeed *
+                        GrowthSystem.SimulationMultiplierForSpeed(speeds[segment]), segmentTravel, 0.002f,
+                        "World-space positions must immediately follow the selected calendar fast-forward rate.");
+                }
+            }
+            finally
+            {
+                GrowthSystem.SetRuntimeSpeed(1f);
+                for (int index = 0; index < roots.Length; index++)
+                    if (roots[index] != null) Object.DestroyImmediate(roots[index]);
             }
         }
 
@@ -2004,13 +2396,14 @@ namespace RatHabitat.Tests
                     Assert.LessOrEqual(
                         Vector3.Distance(previous, root.transform.position),
                         baseWorldSpeed * GrowthSystem.SimulationMultiplierForSpeed(nextSpeed) * realFrameSeconds + 0.0001f,
-                        "A speed change must not teleport the rat or apply a multiplier more than once.");
+                        "A speed change must not teleport the rat beyond one frame of game-time travel or apply the multiplier twice.");
                 }
 
                 float nextSegmentDistance = root.transform.position.x - positionAtSwitch.x;
                 Assert.AreEqual(baseWorldSpeed * startingMultiplier * framesPerSegment * realFrameSeconds,
                     firstSegmentDistance, 0.0001f, "The first segment must use only its selected speed.");
-                Assert.AreEqual(baseWorldSpeed * GrowthSystem.SimulationMultiplierForSpeed(nextSpeed) * framesPerSegment * realFrameSeconds,
+                Assert.AreEqual(baseWorldSpeed * GrowthSystem.SimulationMultiplierForSpeed(nextSpeed) *
+                    framesPerSegment * realFrameSeconds,
                     nextSegmentDistance, 0.0001f, "The next segment must use the new speed immediately.");
                 Assert.Less(root.transform.position.x, target.x,
                     "The rat must continue toward the same distant world-space target after switching speeds.");
@@ -2041,7 +2434,7 @@ namespace RatHabitat.Tests
 
                 Assert.AreEqual(baseWorldSpeed * GrowthSystem.SimulationMultiplierForSpeed(speed) * realFrameSeconds,
                     root.transform.position.x, 0.0001f,
-                    "A slow WebGL frame must not discard movement time or weaken the selected speed multiplier.");
+                    "A slow WebGL frame must not discard movement time or weaken the selected game-time multiplier.");
             }
             finally
             {
@@ -2086,10 +2479,10 @@ namespace RatHabitat.Tests
                         "The bounded decision-step count must not discard any current-frame world movement time.");
                 }
 
-                Assert.AreEqual(distances[0] * 60f, distances[1], 0.02f,
-                    "Work-capped 2x movement must retain the 60x clock rate.");
-                Assert.AreEqual(distances[0] * 1440f, distances[2], 0.5f,
-                    "Work-capped 3x movement must retain the 1,440x clock rate.");
+                Assert.AreEqual(distances[0] * GrowthSystem.SimulationMultiplierForSpeed(2f), distances[1], 0.02f,
+                    "Behavior work caps must not alter the 60x world movement rate at 2x.");
+                Assert.AreEqual(distances[0] * GrowthSystem.SimulationMultiplierForSpeed(3f), distances[2], 0.05f,
+                    "Behavior work caps must not alter the 1,440x world movement rate at 3x.");
             }
             finally
             {
@@ -2098,6 +2491,53 @@ namespace RatHabitat.Tests
                 GrowthSystem.SetBehaviorParticipantCount(1);
                 for (int index = 0; index < roots.Length; index++)
                     if (roots[index] != null) UnityEngine.Object.DestroyImmediate(roots[index]);
+            }
+        }
+
+        [Test]
+        public void PendingLitterNamesArePersistedBeforeSimulationUnpauses()
+        {
+            Func<ColonySaveData, string, bool> priorSaveInterceptor = SaveSystem.SaveInterceptorForTests;
+            string savedJson = null;
+            bool savingWhilePaused = false;
+            GameObject gameObject = new GameObject("Pending Name Save Ordering Test");
+            try
+            {
+                SaveSystem.SaveInterceptorForTests = (currentSave, source) =>
+                {
+                    savingWhilePaused = GrowthSystem.SimulationPaused;
+                    savedJson = SaveSystem.ToJson(currentSave);
+                    return true;
+                };
+                gameObject.SetActive(false);
+                GameBootstrap game = gameObject.AddComponent<GameBootstrap>();
+                ColonySaveData save = CreatePendingNamingTestSave(1);
+                // The welcome popup independently owns a pause on fresh saves;
+                // this test isolates the completed naming-modal transition.
+                save.welcomePopupPending = false;
+                typeof(GameBootstrap).GetProperty("Save").GetSetMethod(true).Invoke(game, new object[] { save });
+                RatData pup = game.PendingNamingPups[0];
+                GrowthSystem.SetSimulationPaused(true);
+
+                string error;
+                Assert.IsTrue(game.TryRenamePendingPup(pup.id, "Persisted Name", out error), error);
+                Assert.IsTrue(game.ApprovePendingLitterNames());
+                Assert.IsTrue(savingWhilePaused,
+                    "The validated names and cleared naming queue must be passed to storage while still paused.");
+                Assert.IsFalse(GrowthSystem.SimulationPaused,
+                    "The pause is released only after the updated save has been written.");
+
+                ColonySaveData persisted = SaveSystem.FromJson(savedJson);
+                RatData persistedPup = BreedingSystem.FindRat(persisted, pup.id);
+                Assert.IsNotNull(persistedPup);
+                Assert.AreEqual("Persisted Name", persistedPup.name);
+                Assert.IsFalse(persisted.pendingNamingLitterIds.Contains(pup.litterId));
+            }
+            finally
+            {
+                SaveSystem.SaveInterceptorForTests = priorSaveInterceptor;
+                GrowthSystem.SetSimulationPaused(false);
+                Object.DestroyImmediate(gameObject);
             }
         }
 
@@ -2114,7 +2554,7 @@ namespace RatHabitat.Tests
         }
 
         [Test]
-        public void MovementSpeedTransitionsRemainLinearAndDoNotCompound()
+        public void MovementSpeedTransitionsFollowCalendarFastForwardAndDoNotCompound()
         {
             const float baseWorldSpeed = 0.75f;
             const float realFrameSeconds = 1f / 60f;
@@ -2147,12 +2587,15 @@ namespace RatHabitat.Tests
                     float multiplier = GrowthSystem.SimulationMultiplierForSpeed(segmentSpeeds[segment]);
                     Assert.AreEqual(
                         baseWorldSpeed * multiplier, segmentDistance, 0.0001f,
-                        "A speed transition must affect only the current interval and must not compound movement speed.");
+                        "A speed transition must affect only the current interval and must not compound the game-time multiplier.");
                     totalDistance += segmentDistance;
                 }
 
-                Assert.AreEqual(baseWorldSpeed * 1502f, totalDistance, 0.001f,
-                    "One real second at 1x, 2x, 3x, then 1x must total 1,502 baseline-seconds of travel.");
+                float expectedTotalMultiplier = 0f;
+                for (int index = 0; index < segmentSpeeds.Length; index++)
+                    expectedTotalMultiplier += GrowthSystem.SimulationMultiplierForSpeed(segmentSpeeds[index]);
+                Assert.AreEqual(baseWorldSpeed * expectedTotalMultiplier, totalDistance, 0.001f,
+                    "Each real-time segment must use exactly its corresponding game-time multiplier.");
             }
             finally
             {
@@ -2175,7 +2618,7 @@ namespace RatHabitat.Tests
                 {
                     GrowthSystem.SetRuntimeSpeed(speedIndex + 1f);
                     float currentFrameSimulationDelta =
-                        GrowthSystem.SimulationBehaviorDeltaSeconds(realFrameSeconds);
+                        GrowthSystem.SimulationMovementDeltaSeconds(realFrameSeconds);
                     float movementBudget = GrowthSystem.SimulationMovementTimeBudget(
                         currentFrameSimulationDelta);
 
@@ -2194,11 +2637,13 @@ namespace RatHabitat.Tests
                         "Backlog steps must not produce movement beyond the current frame's scaled delta.");
                 }
 
-                Assert.AreEqual(measuredFrameDistances[0] * 60f, measuredFrameDistances[1], 0.0001f);
-                Assert.AreEqual(measuredFrameDistances[0] * 1440f, measuredFrameDistances[2], 0.001f);
+                Assert.AreEqual(measuredFrameDistances[0] * GrowthSystem.SimulationMultiplierForSpeed(2f),
+                    measuredFrameDistances[1], 0.0001f);
+                Assert.AreEqual(measuredFrameDistances[0] * GrowthSystem.SimulationMultiplierForSpeed(3f),
+                    measuredFrameDistances[2], 0.0001f);
 
                 GrowthSystem.SetRuntimeSpeed(3f);
-                float longFrameSimulationDelta = GrowthSystem.SimulationBehaviorDeltaSeconds(1f);
+                float longFrameSimulationDelta = GrowthSystem.SimulationMovementDeltaSeconds(1f);
                 float longFrameBudget = GrowthSystem.SimulationMovementTimeBudget(longFrameSimulationDelta);
                 float longFrameDistance = 0f;
                 for (int catchUpStep = 0; catchUpStep < 12; catchUpStep++)

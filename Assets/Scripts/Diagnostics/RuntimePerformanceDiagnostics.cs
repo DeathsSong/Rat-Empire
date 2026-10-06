@@ -46,6 +46,8 @@ namespace RatHabitat
         NursingUpdate,
         SaveStorage,
         SaveExport,
+        WorldMovementIntegration,
+        RatSpacing,
         Count,
     }
 
@@ -101,6 +103,9 @@ namespace RatHabitat
         public float SimulationMaintenanceMs;
         public float UiRefreshMs;
         public float RatAiMovementMs;
+        public float RatTargetSelectionMs;
+        public float WorldMovementIntegrationMs;
+        public float RatSpacingMs;
         public float AnimationMs;
         public float GroundingBoundsMs;
         public float RatPresentationMs;
@@ -154,6 +159,8 @@ namespace RatHabitat
             "Rat Empire/Measured/Nursing Update",
             "Rat Empire/Measured/Save Storage",
             "Rat Empire/Measured/Log Export",
+            "Rat Empire/Measured/World Movement Integration",
+            "Rat Empire/Measured/Rat Spacing",
         };
         private static readonly long[] WindowTicks = new long[(int)PerformanceProbeArea.Count];
         private static readonly long[] MaxTicks = new long[(int)PerformanceProbeArea.Count];
@@ -385,6 +392,9 @@ namespace RatHabitat
             TrackWorstSubsystem("Simulation", sample.SimulationMs);
             TrackWorstSubsystem("UI refresh", sample.UiRefreshMs);
             TrackWorstSubsystem("Rat AI/movement", sample.RatAiMovementMs);
+            TrackWorstSubsystem("Rat target selection", sample.RatTargetSelectionMs);
+            TrackWorstSubsystem("World movement integration", sample.WorldMovementIntegrationMs);
+            TrackWorstSubsystem("Rat spacing", sample.RatSpacingMs);
             TrackWorstSubsystem("Animation", sample.AnimationMs);
             TrackWorstSubsystem("Grounding/bounds", sample.GroundingBoundsMs);
             TrackWorstSubsystem("Rat presentation/rendering", sample.RatPresentationMs);
@@ -489,6 +499,9 @@ namespace RatHabitat
                 UiRefreshMs = WindowMilliseconds(PerformanceProbeArea.UiRefresh),
                 RatAiMovementMs = WindowMilliseconds(PerformanceProbeArea.RatBehaviorUpdate) +
                     WindowMilliseconds(PerformanceProbeArea.RatBehaviorLateUpdate),
+                RatTargetSelectionMs = WindowMilliseconds(PerformanceProbeArea.RatDestinationSelection),
+                WorldMovementIntegrationMs = WindowMilliseconds(PerformanceProbeArea.WorldMovementIntegration),
+                RatSpacingMs = WindowMilliseconds(PerformanceProbeArea.RatSpacing),
                 AnimationMs = animationMs,
                 GroundingBoundsMs = WindowMilliseconds(PerformanceProbeArea.GroundingAndBounds),
                 RatPresentationMs = WindowMilliseconds(PerformanceProbeArea.RatPresenterLateUpdate) +
@@ -671,7 +684,7 @@ namespace RatHabitat
             }
             else
             {
-                ExportBuilder.AppendLine("record,severity,utc,game_day_time,speed,fps,avg_frame_ms,worst_frame_ms,cpu_main_ms,gpu_ms,unattributed_frame_gap_ms,browser_avg_frame_gap_ms,browser_worst_frame_gap_ms,browser_gap_within_unity_cpu_ms,browser_gap_outside_unity_cpu_ms,browser_frame_count,browser_telemetry_available,page_visible,page_focused,page_hidden_during_window,page_unfocused_during_window,long_task_api_available,long_task_count,long_task_total_ms,long_task_max_ms,gc_alloc_bytes,gc0,gc1,gc2,rats,pinkies,animators,renderers,ui_graphics,canvases,simulation_steps,simulation_probe_calls,rat_behavior_updates,repeated_rat_behavior_updates,simulation_ms,maintenance_ms,ui_refresh_ms,rat_ai_movement_ms,animation_ms,grounding_bounds_ms,presentation_ms,presentation_updates,save_storage_ms,save_storage_operations,serialized_data_bytes_total,serialized_data_bytes_max,save_queue_requests,save_queue_coalesced_requests,save_source,save_export_ms,save_export_operations,input_ms,panel");
+                ExportBuilder.AppendLine("record,severity,utc,game_day_time,speed,fps,avg_frame_ms,worst_frame_ms,cpu_main_ms,gpu_ms,unattributed_frame_gap_ms,browser_avg_frame_gap_ms,browser_worst_frame_gap_ms,browser_gap_within_unity_cpu_ms,browser_gap_outside_unity_cpu_ms,browser_frame_count,browser_telemetry_available,page_visible,page_focused,page_hidden_during_window,page_unfocused_during_window,long_task_api_available,long_task_count,long_task_total_ms,long_task_max_ms,gc_alloc_bytes,gc0,gc1,gc2,rats,pinkies,animators,renderers,ui_graphics,canvases,simulation_steps,simulation_probe_calls,rat_behavior_updates,repeated_rat_behavior_updates,simulation_ms,maintenance_ms,ui_refresh_ms,rat_ai_movement_ms,rat_target_selection_ms,world_movement_integration_ms,rat_spacing_ms,animation_ms,grounding_bounds_ms,presentation_ms,presentation_updates,save_storage_ms,save_storage_operations,serialized_data_bytes_total,serialized_data_bytes_max,save_queue_requests,save_queue_coalesced_requests,save_source,save_export_ms,save_export_operations,input_ms,panel");
             }
 
             for (int index = 0; index < sampleCount; index++)
@@ -867,6 +880,9 @@ namespace RatHabitat
                 .Append(" • AI/anim/ground ").Append(sample.RatAiMovementMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
                 .Append(sample.AnimationMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
                 .Append(sample.GroundingBoundsMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("ms")
+                .Append(" • target/move/spacing ").Append(sample.RatTargetSelectionMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(sample.WorldMovementIntegrationMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(sample.RatSpacingMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("ms")
                 .Append(" • present/input ").Append(sample.RatPresentationMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
                 .Append(sample.InputInteractionsMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("ms")
                 .Append(" • present updates ").Append(sample.RatPresentationUpdates)
@@ -921,6 +937,9 @@ namespace RatHabitat
                 .Append(sample.SimulationMaintenanceMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.UiRefreshMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.RatAiMovementMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.RatTargetSelectionMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.WorldMovementIntegrationMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.RatSpacingMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.AnimationMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.GroundingBoundsMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.RatPresentationMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
@@ -1031,6 +1050,8 @@ namespace RatHabitat
                 case PerformanceProbeArea.NursingUpdate: return "Nursing";
                 case PerformanceProbeArea.SaveStorage: return "Save/storage";
                 case PerformanceProbeArea.SaveExport: return "Log export";
+                case PerformanceProbeArea.WorldMovementIntegration: return "World movement";
+                case PerformanceProbeArea.RatSpacing: return "Rat spacing";
                 default: return "Unknown";
             }
         }
@@ -1352,8 +1373,11 @@ namespace RatHabitat
                         RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.NursingUpdate),
                     SimulationMaintenanceMs = game == null ? 0f : game.ConsumePerformanceMaintenanceWindowMs(),
                     UiRefreshMs = game == null ? 0f : game.ConsumePerformanceUiRefreshWindowMs(),
-                    RatAiMovementMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatBehaviorUpdate) +
-                        RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatBehaviorLateUpdate),
+                RatAiMovementMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatBehaviorUpdate) +
+                    RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatBehaviorLateUpdate),
+                RatTargetSelectionMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatDestinationSelection),
+                WorldMovementIntegrationMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.WorldMovementIntegration),
+                RatSpacingMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatSpacing),
                     AnimationMs = !animatorRecorder.Valid ? -1f : (float)(animatorWindowTotalNs / 1000000d),
                     GroundingBoundsMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.GroundingAndBounds),
                     RatPresentationMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatPresenterLateUpdate) +

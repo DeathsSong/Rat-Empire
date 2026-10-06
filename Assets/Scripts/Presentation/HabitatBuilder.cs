@@ -17,6 +17,8 @@ namespace RatHabitat
 
         private readonly Dictionary<string, GameObject> objectRoots = new Dictionary<string, GameObject>();
         private readonly Dictionary<string, HabitatObjectType> objectTypes = new Dictionary<string, HabitatObjectType>();
+        private readonly Dictionary<RatEnclosure, List<RatBehaviorTarget>> behaviorTargetsByEnclosure =
+            new Dictionary<RatEnclosure, List<RatBehaviorTarget>>();
         private readonly Dictionary<string, Vector3> markerPositionCache = new Dictionary<string, Vector3>();
         private readonly List<PlacedMarker> placedMarkers = new List<PlacedMarker>();
         private readonly Dictionary<HabitatObjectType, Material> markerMaterials = new Dictionary<HabitatObjectType, Material>();
@@ -117,6 +119,7 @@ namespace RatHabitat
         public void Build(ColonySaveData save)
         {
             if (built) return;
+            behaviorTargetsByEnclosure.Clear();
             built = true;
             placedMarkers.Clear();
             geometryRoot = new GameObject("Habitat Geometry").transform;
@@ -199,11 +202,31 @@ namespace RatHabitat
 
         public List<RatBehaviorTarget> GetBehaviorTargets(RatEnclosure enclosure)
         {
+            List<RatBehaviorTarget> cached;
+            if (behaviorTargetsByEnclosure.TryGetValue(enclosure, out cached)) return cached;
+
+            // Rat target selection runs frequently. Build one stable list per
+            // enclosure instead of allocating the all-target list, filtered
+            // list, zone list, and target objects again for every decision.
             var targets = new List<RatBehaviorTarget>();
-            foreach (var target in GetBehaviorTargets())
+            foreach (var item in objectRoots)
             {
-                if (target != null && EnclosureSystem.IsBehaviorPointAllowed(enclosure, target.position)) targets.Add(target);
+                if (item.Value == null) continue;
+                HabitatObjectType type;
+                if (!objectTypes.TryGetValue(item.Key, out type)) continue;
+                Vector3 position = GroundBehaviorPosition(item.Value.transform.position);
+                if (!EnclosureSystem.IsBehaviorPointAllowed(enclosure, position)) continue;
+                targets.Add(new RatBehaviorTarget
+                {
+                    id = item.Key,
+                    label = item.Value.name,
+                    kind = BehaviorKindFor(type),
+                    position = position,
+                });
             }
+
+            AddDecorativeTarget(targets, "Mint Tunnel", RatBehaviorTargetKind.Tunnel);
+            AddDecorativeTarget(targets, "Peach Tunnel", RatBehaviorTargetKind.Tunnel);
 
             // A zone always has local points even when the saved object layout
             // has no prop of a particular kind. These are behavior targets,
@@ -212,6 +235,13 @@ namespace RatHabitat
             {
                 if (target != null && EnclosureSystem.IsBehaviorPointAllowed(enclosure, target.position)) targets.Add(target);
             }
+            for (int index = targets.Count - 1; index >= 0; index--)
+            {
+                RatBehaviorTarget target = targets[index];
+                if (target == null || !EnclosureSystem.IsBehaviorPointAllowed(enclosure, target.position))
+                    targets.RemoveAt(index);
+            }
+            behaviorTargetsByEnclosure[enclosure] = targets;
             return targets;
         }
 

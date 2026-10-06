@@ -161,7 +161,7 @@ namespace RatHabitat
                     candidate.rat.stage == RatStage.Pinkie) continue;
 
                 return string.Format(
-                "Rat {0}: speed {1:0.#}x | movement multiplier {5:0.#}x | clock {4:0.###} real s/game h | actual {2:0.00} u/s | target {3:0.00} u/s | movement/animation/actions=simulation delta",
+                "Rat {0}: speed {1:0.#}x | movement multiplier {5:0.#}x | clock {4:0.###} real s/game h | actual {2:0.00} u/s | target {3:0.00} u/s | movement follows game-time fast-forward",
                 ColonyFactory.DisplayName(candidate.rat),
                     GrowthSystem.RuntimeSimulationSpeed,
                     candidate.ActualWorldMovementSpeed,
@@ -171,7 +171,7 @@ namespace RatHabitat
             }
 
             return string.Format(
-                "No moving rat sampled | speed {0:0.#}x | movement multiplier {2:0.#}x | clock {1:0.###} real s/game h | movement/animation/actions=simulation delta",
+                "No moving rat sampled | speed {0:0.#}x | movement multiplier {2:0.#}x | clock {1:0.###} real s/game h | movement follows game-time fast-forward",
                 GrowthSystem.RuntimeSimulationSpeed,
                 GrowthSystem.RealSecondsPerGameHour(GrowthSystem.RuntimeSimulationSpeed),
                 GrowthSystem.RuntimeSimulationMultiplier);
@@ -710,6 +710,9 @@ namespace RatHabitat
                 AuditAnimatorOnce();
             }
 
+            // Preserve the original contract: actual transform locomotion and
+            // rat timers consume the same fast-forward delta as the calendar.
+            // AI decisions are capped below; movement time is not.
             float deltaTime = GrowthSystem.SimulationBehaviorDeltaSeconds(Time.unscaledDeltaTime);
             if (deltaTime <= 0f)
             {
@@ -793,13 +796,24 @@ namespace RatHabitat
                 behaviorClockSeconds += stepDeltaTime;
                 if (birthApproachActive)
                 {
-                    UpdateBirthApproach(movementStepDeltaTime, ref visualMovementTimeBudgetSeconds);
+                    long movementSample = RuntimePerformanceDiagnostics.Begin(
+                        PerformanceProbeArea.WorldMovementIntegration);
+                    try { UpdateBirthApproach(movementStepDeltaTime, ref visualMovementTimeBudgetSeconds); }
+                    finally { RuntimePerformanceDiagnostics.End(
+                        PerformanceProbeArea.WorldMovementIntegration, movementSample); }
                     continue;
                 }
                 if (pairingApproachActive)
                 {
                     if (pairingInteractionActive) UpdatePairingInteraction(stepDeltaTime);
-                    else UpdatePairingApproach(movementStepDeltaTime, ref visualMovementTimeBudgetSeconds);
+                    else
+                    {
+                        long movementSample = RuntimePerformanceDiagnostics.Begin(
+                            PerformanceProbeArea.WorldMovementIntegration);
+                        try { UpdatePairingApproach(movementStepDeltaTime, ref visualMovementTimeBudgetSeconds); }
+                        finally { RuntimePerformanceDiagnostics.End(
+                            PerformanceProbeArea.WorldMovementIntegration, movementSample); }
+                    }
                     continue;
                 }
 
@@ -906,7 +920,7 @@ namespace RatHabitat
 
             Vector3 travelDirection = movementDelta.normalized;
             Quaternion desiredRotation = RotationFacingWorldDirection(travelDirection);
-            float deltaTime = GrowthSystem.SimulationBehaviorDeltaSeconds(Time.unscaledDeltaTime);
+            float deltaTime = GrowthSystem.SimulationMovementDeltaSeconds(Time.unscaledDeltaTime);
             if (deltaTime <= 0f) return false;
             transform.rotation = Quaternion.RotateTowards(transform.rotation, desiredRotation, MovementTurnSpeed * deltaTime);
             return true;
@@ -1171,13 +1185,27 @@ namespace RatHabitat
                 // Use the selected simulation delta for the real position
                 // write, but clamp the step so a 2x/3x frame can never jump
                 // past the destination and start oscillating around it.
-                Vector3 nextPosition = GrowthSystem.SimulationMovementTargetPosition(
-                    transform.position, targetPosition, movementSpeed,
-                    movementDeltaTime, ref visualMovementTimeBudgetSeconds);
-                float step = Vector3.Distance(transform.position, nextPosition);
-                transform.position = MoveTowardAvoidingNest(transform.position, nextPosition, step);
+                long movementSample = RuntimePerformanceDiagnostics.Begin(
+                    PerformanceProbeArea.WorldMovementIntegration);
+                try
+                {
+                    Vector3 nextPosition = GrowthSystem.SimulationMovementTargetPosition(
+                        transform.position, targetPosition, movementSpeed,
+                        movementDeltaTime, ref visualMovementTimeBudgetSeconds);
+                    float step = Vector3.Distance(transform.position, nextPosition);
+                    transform.position = MoveTowardAvoidingNest(transform.position, nextPosition, step);
+                }
+                finally
+                {
+                    RuntimePerformanceDiagnostics.End(
+                        PerformanceProbeArea.WorldMovementIntegration, movementSample);
+                }
             }
-            spacingTimer -= deltaTime;
+            // Pairwise soft-spacing is O(rats²). The simulation delta can be
+            // 1,440x real time, which otherwise forces this cosmetic pass on
+            // every rendered frame. Keep the correction responsive at normal
+            // speed but schedule it on a real-time interval at every speed.
+            spacingTimer -= Time.unscaledDeltaTime;
             if (spacingTimer <= 0f)
             {
                 spacingTimer = SpacingRefreshIntervalSeconds;
@@ -1504,6 +1532,19 @@ namespace RatHabitat
         }
 
         private void ResolveSpacing(float deltaTime)
+        {
+            long sample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.RatSpacing);
+            try
+            {
+                ResolveSpacingCore(deltaTime);
+            }
+            finally
+            {
+                RuntimePerformanceDiagnostics.End(PerformanceProbeArea.RatSpacing, sample);
+            }
+        }
+
+        private void ResolveSpacingCore(float deltaTime)
         {
             if (rat == null || rat.stage == RatStage.Pinkie) return;
             if (pairingApproachActive || birthApproachActive || nursingInteractionActive ||

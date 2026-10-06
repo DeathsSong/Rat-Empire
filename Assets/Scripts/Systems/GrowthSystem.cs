@@ -11,9 +11,9 @@ namespace RatHabitat
     /// </summary>
     public static class GrowthSystem
     {
-        // Rat movement and time-based presentation use the same rate as the
-        // authoritative clock: 1 in-game minute/sec at 1x, 1 hour/sec at 2x,
-        // and 1 day/sec at 3x. The clock-rate ratio is applied once to real dt.
+        // World locomotion, rat behavior, and the authoritative clock share
+        // the existing calendar fast-forward rate. The 2x/3x buttons are time
+        // multipliers, not merely linear movement multipliers.
         private static float runtimeSimulationSpeed = 1f;
         private static bool simulationPaused;
         private static float lastMovementRealDeltaSeconds;
@@ -33,8 +33,8 @@ namespace RatHabitat
 
         // A high-speed frame can represent many in-game seconds. Subdivide
         // behavior updates into bounded chunks so state transitions remain
-        // ordered without replaying every skipped render frame. Movement has a
-        // separate per-rat, current-frame time budget in RatHabitatBehavior.
+        // ordered without replaying every skipped render frame. Movement still
+        // consumes the full current-frame fast-forward delta below.
         public const float MaximumBehaviorStepSeconds = 1f;
         // Bound catch-up work across the entire colony, not independently for
         // every rat. Every rat still receives a behavior update each rendered
@@ -131,10 +131,10 @@ namespace RatHabitat
         }
 
         /// <summary>
-        /// Returns the exact simulation-time delta for presentation behavior.
-        /// Do not discard elapsed real time here: dropping a slow WebGL frame
-        /// makes world-space movement lag behind the accelerated game clock.
-        /// MoveTowards callers already clamp their spatial step at the target.
+        /// Returns world-space movement time for a real-time frame. Rat
+        /// movement follows the actual time fast-forward rate: 1x = 1x,
+        /// 2x = 60x, and 3x = 1,440x. This is the same single multiplier used
+        /// by the calendar; call sites must not apply another speed factor.
         /// </summary>
         public static float SimulationMovementDeltaSeconds(float realDeltaSeconds)
         {
@@ -147,10 +147,10 @@ namespace RatHabitat
 
         /// <summary>
         /// Starts one rat behavior update for the current rendered frame and
-        /// returns a bounded number of ordered simulation steps. The returned
-        /// steps cover the full elapsed simulation delta; if the frame was
-        /// unusually long, the excess is treated as compressed visual work
-        /// rather than replayed as thousands of intermediate animations.
+        /// returns a bounded number of ordered decision steps. High-speed
+        /// target selection and pairwise spacing are presentation work: do not
+        /// replay them many times per rat when the calendar clock advances by
+        /// minutes or days in one rendered frame.
         /// </summary>
         public static int BeginBehaviorUpdate(float simulationDeltaSeconds, string participantId = null)
         {
@@ -174,6 +174,9 @@ namespace RatHabitat
             // Keep at least one update per live rat. When the colony is smaller
             // than the total budget, divide it evenly so iteration order cannot
             // starve later rats of catch-up work.
+            // Share the fixed colony-wide work budget among active rats. This
+            // lets fast-forward movement cross several ordinary waypoints
+            // without replaying an unbounded number of AI decisions per rat.
             int perRatBudget = Mathf.Max(1, MaximumTotalBehaviorStepsPerFrame / behaviorParticipantCount);
             int steps = Mathf.Min(requested, perRatBudget);
             lastSimulationStepCount += steps;
@@ -264,8 +267,7 @@ namespace RatHabitat
         }
 #endif
 
-        // Timed behavior and movement share the same clock. Keep the older
-        // name as an alias for biological/presentation timers already using it.
+        // Movement and timed behavior share the same fast-forward interval.
         public static float SimulationBehaviorDeltaSeconds(float realDeltaSeconds)
         {
             return SimulationMovementDeltaSeconds(realDeltaSeconds);
@@ -273,9 +275,8 @@ namespace RatHabitat
 
         /// <summary>
         /// Converts a rat's authored world-space speed into one frame's
-        /// distance using the clock-rate ratio exactly once. At the current
-        /// clock settings, 2x is 60 times and 3x is 1,440 times the 1x world
-        /// movement rate, rather than merely changing Animator playback.
+        /// distance using the selected calendar fast-forward multiplier
+        /// exactly once. Do not multiply by RuntimeSimulationSpeed again.
         /// </summary>
         public static float SimulationMovementStep(float baseWorldSpeed, float realDeltaSeconds)
         {
@@ -336,9 +337,9 @@ namespace RatHabitat
 
         public static float SimulationMultiplierForSpeed(float speed)
         {
-            // Keep world movement aligned with the clock's actual fast-forward
-            // contract, not the button labels: 2x advances 60 times and 3x
-            // advances 1,440 times as much game time as 1x.
+            // Preserve legacy time buttons: 1x -> 1, 2x -> 60, 3x -> 1,440.
+            // This factor applies to world locomotion exactly once as well as
+            // calendar time; the UI labels select these rates.
             double baselineRate = SimulationMillisecondsPerRealMillisecond(1f);
             if (baselineRate <= 0d) return 1f;
             return Mathf.Max(0f, (float)(
@@ -388,17 +389,15 @@ namespace RatHabitat
 
         /// <summary>
         /// Converts a visible simulation mode into simulated milliseconds per
-        /// real millisecond. This is the single clock contract used by every
-        /// time-based system:
+        /// real millisecond for the authoritative calendar and biology:
         ///
         ///   1x = 1 in-game minute per real-world second
         ///   2x = 1 in-game hour per real-world second
         ///   3x = 1 in-game day per real-world second
         ///
-        /// Preserve these legacy fast-forward rates. Do not reinterpret the
-        /// clock as a linear 1x/2x/3x conversion, and do not add another clock
-        /// multiplier at call sites. Rat movement, animation, and action timers
-        /// use the separate RuntimeSimulationSpeed multiplier exactly once.
+        /// Preserve these calendar fast-forward rates for both the calendar
+        /// and rat world-space locomotion. This is the intended 1x/2x/3x
+        /// gameplay contract: 1, 60, and 1,440 times baseline.
         /// </summary>
         public static double SimulationMillisecondsPerRealMillisecond(float speed)
         {
