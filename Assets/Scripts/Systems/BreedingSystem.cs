@@ -7,6 +7,19 @@ namespace RatHabitat
 {
     public static class BreedingSystem
     {
+        // Reused indexes keep a reproductive-state refresh linear in the live
+        // colony plus its history. This refresh runs on the Unity main thread.
+        private static readonly Dictionary<string, PregnancyData> PendingPregnancyByMother =
+            new Dictionary<string, PregnancyData>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, PregnancyData> PendingPregnancyById =
+            new Dictionary<string, PregnancyData>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, long> LatestBirthByMother =
+            new Dictionary<string, long>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, string> MotherByLitterId =
+            new Dictionary<string, string>(StringComparer.Ordinal);
+        private static readonly HashSet<string> MothersWithDependentPinkies =
+            new HashSet<string>(StringComparer.Ordinal);
+
         /// <summary>
         /// Recovery timestamps are historical after the state has returned to
         /// fertile. Only a rat still in Recovery should wake the full colony
@@ -717,9 +730,22 @@ namespace RatHabitat
 
         public static bool RefreshReproductiveStates(ColonySaveData save, long gameTime)
         {
+            return RefreshReproductiveStates(save, gameTime, true);
+        }
+
+        /// <summary>
+        /// Reconciles current reproductive state. Finished birth transaction
+        /// repair is required after load, but not on routine runtime deadlines:
+        /// the birth transaction itself retries failures while the app is live.
+        /// Skipping the historical repair scan here avoids rescanning every
+        /// past litter and pup during ordinary maintenance.
+        /// </summary>
+        public static bool RefreshReproductiveStates(
+            ColonySaveData save, long gameTime, bool repairFinishedBirthTransactions)
+        {
             if (save == null) return false;
             save.EnsureLists();
-            bool changed = RepairBirthTransactions(save, gameTime);
+            bool changed = repairFinishedBirthTransactions && RepairBirthTransactions(save, gameTime);
             if (save.pregnancies != null)
             {
                 foreach (PregnancyData pregnancy in save.pregnancies)
@@ -727,13 +753,19 @@ namespace RatHabitat
                     if (pregnancy != null && EnsurePregnancyTiming(pregnancy)) changed = true;
                 }
             }
+
+            BuildReproductiveStateIndexes(save);
             foreach (var rat in save.rats)
             {
                 if (rat == null) continue;
                 if (ClearLegacyMalePregnancyState(save, rat)) changed = true;
                 GrowthSystem.EnsureBiologyDefaults(rat);
                 ReproductiveState oldState = rat.reproductiveState;
-                long migratedRecoveryDeadline = RecoveryDeadlineFromLatestLitter(save, rat.id);
+                long migratedRecoveryDeadline;
+                if (!LatestBirthByMother.TryGetValue(rat.id ?? string.Empty, out long latestBirth))
+                    latestBirth = 0L;
+                migratedRecoveryDeadline = latestBirth <= 0L ? 0L : latestBirth +
+                    (long)(GameConfig.RecoveryDays * GameConfig.GameDayMs);
                 if (rat.sex == RatSex.Female && migratedRecoveryDeadline > 0L &&
                     rat.recoveryUntil > migratedRecoveryDeadline &&
                     (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing ||
@@ -745,7 +777,16 @@ namespace RatHabitat
                     rat.recoveryUntil = migratedRecoveryDeadline;
                     changed = true;
                 }
-                PregnancyData pending = FindActivePregnancyForMother(save, rat);
+                PregnancyData pending = null;
+                if (rat.sex == RatSex.Female)
+                {
+                    if (!string.IsNullOrEmpty(rat.pregnancyId) &&
+                        PendingPregnancyById.TryGetValue(rat.pregnancyId, out PregnancyData idMatch) &&
+                        idMatch.motherId == rat.id)
+                        pending = idMatch;
+                    if (pending == null)
+                        PendingPregnancyByMother.TryGetValue(rat.id ?? string.Empty, out pending);
+                }
                 if (rat.sex == RatSex.Female)
                 {
                     if (pending != null && rat.pregnancyId != pending.id)
@@ -780,7 +821,7 @@ namespace RatHabitat
                     // nursing. If the last pinkie is removed or reaches Young,
                     // the mother exits nursing immediately and begins recovery
                     // instead of remaining stuck in Nursery on an old timer.
-                    bool stillNursing = EnclosureSystem.HasDependentPinkies(save, rat.id);
+                    bool stillNursing = MothersWithDependentPinkies.Contains(rat.id ?? string.Empty);
                     if (stillNursing)
                     {
                         rat.nursing = true;
@@ -822,6 +863,56 @@ namespace RatHabitat
             return changed;
         }
 
+        private static void BuildReproductiveStateIndexes(ColonySaveData save)
+        {
+            PendingPregnancyByMother.Clear();
+            PendingPregnancyById.Clear();
+            LatestBirthByMother.Clear();
+            MotherByLitterId.Clear();
+            MothersWithDependentPinkies.Clear();
+
+            if (save.litters != null)
+            {
+                foreach (LitterData litter in save.litters)
+                {
+                    if (litter == null || string.IsNullOrEmpty(litter.motherId)) continue;
+                    if (!string.IsNullOrEmpty(litter.id)) MotherByLitterId[litter.id] = litter.motherId;
+                    if (litter.birthTimestamp <= 0L) continue;
+                    if (!LatestBirthByMother.TryGetValue(litter.motherId, out long existingBirth) ||
+                        litter.birthTimestamp > existingBirth)
+                        LatestBirthByMother[litter.motherId] = litter.birthTimestamp;
+                }
+            }
+
+            if (save.pregnancies != null)
+            {
+                foreach (PregnancyData pregnancy in save.pregnancies)
+                {
+                    if (pregnancy == null || pregnancy.status != "pending") continue;
+                    if (!string.IsNullOrEmpty(pregnancy.id))
+                        PendingPregnancyById[pregnancy.id] = pregnancy;
+                    if (!string.IsNullOrEmpty(pregnancy.motherId) &&
+                        !PendingPregnancyByMother.ContainsKey(pregnancy.motherId))
+                        PendingPregnancyByMother[pregnancy.motherId] = pregnancy;
+                }
+            }
+
+            if (save.rats == null) return;
+            foreach (RatData pup in save.rats)
+            {
+                if (pup == null || pup.stage != RatStage.Pinkie) continue;
+                if (!string.IsNullOrEmpty(pup.motherId))
+                {
+                    MothersWithDependentPinkies.Add(pup.motherId);
+                    continue;
+                }
+
+                if (!string.IsNullOrEmpty(pup.litterId) &&
+                    MotherByLitterId.TryGetValue(pup.litterId, out string motherId))
+                    MothersWithDependentPinkies.Add(motherId);
+            }
+        }
+
         /// <summary>
         /// Repairs the one state that must never be silently accepted: a
         /// completed pregnancy with no durable litter. Older builds could
@@ -853,19 +944,6 @@ namespace RatHabitat
                 UnityEngine.Debug.LogWarning("[Rat Habitat] Reopened incomplete birth " + pregnancy.id + " at game time " + gameTime + ".");
             }
             return changed;
-        }
-
-        private static long RecoveryDeadlineFromLatestLitter(ColonySaveData save, string motherId)
-        {
-            if (save == null || save.litters == null || string.IsNullOrEmpty(motherId)) return 0L;
-            long latestBirth = 0L;
-            foreach (LitterData litter in save.litters)
-            {
-                if (litter == null || litter.motherId != motherId || litter.birthTimestamp <= latestBirth) continue;
-                latestBirth = litter.birthTimestamp;
-            }
-            return latestBirth <= 0L ? 0L : latestBirth +
-                (long)(GameConfig.RecoveryDays * GameConfig.GameDayMs);
         }
 
         public static List<RatData> GetEligibleMates(ColonySaveData save, RatData parentA, long gameTime)

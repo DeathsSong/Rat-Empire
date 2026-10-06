@@ -47,6 +47,10 @@ namespace RatHabitat
         private static readonly long NursingCooldownMs =
             (long)(GameConfig.NursingInteractionCooldownHours * 60f * 60f * 1000f);
         private static readonly long NursingRetryCooldownMs = 30L * 1000L;
+        private static readonly Dictionary<string, LitterData> LitterById =
+            new Dictionary<string, LitterData>(StringComparer.Ordinal);
+        private static readonly HashSet<string> MothersWithPinkies =
+            new HashSet<string>(StringComparer.Ordinal);
 
         public static string NormalizeInteractionId(string interactionId)
         {
@@ -117,11 +121,12 @@ namespace RatHabitat
         public static long NextOpportunityGameTime(ColonySaveData save, long gameTime)
         {
             if (save == null || save.rats == null) return long.MaxValue;
+            BuildNursingIndexes(save);
             long next = long.MaxValue;
 
             foreach (RatData mother in save.rats)
             {
-                if (!IsMotherCandidate(save, mother)) continue;
+                if (!IsMotherCandidate(mother)) continue;
                 if (mother.nursingInteractionUntil > gameTime)
                 {
                     next = Math.Min(next, mother.nursingInteractionUntil);
@@ -139,7 +144,7 @@ namespace RatHabitat
                     if (pup == null || pup.stage != RatStage.Pinkie ||
                         pup.removalDisposition != RatRemovalDisposition.None ||
                         pup.enclosure != mother.enclosure ||
-                        !IsRecordedPup(save, mother, pup)) continue;
+                        !IsRecordedPup(mother, pup)) continue;
 
                     hasEligiblePup = true;
                     long availableAt = pup.lastNursedAt <= 0L
@@ -161,11 +166,12 @@ namespace RatHabitat
         public static bool Tick(ColonySaveData save, long gameTime, RatPresenter presenter)
         {
             if (save == null || presenter == null || save.rats == null) return false;
+            BuildNursingIndexes(save);
             bool changed = false;
 
             foreach (RatData mother in save.rats)
             {
-                if (!IsMotherCandidate(save, mother)) continue;
+                if (!IsMotherCandidate(mother)) continue;
 
                 if (mother.nursingInteractionUntil > 0L &&
                     gameTime >= mother.nursingInteractionUntil)
@@ -219,48 +225,70 @@ namespace RatHabitat
             return changed;
         }
 
-        private static bool IsMotherCandidate(ColonySaveData save, RatData mother)
+        private static void BuildNursingIndexes(ColonySaveData save)
+        {
+            LitterById.Clear();
+            MothersWithPinkies.Clear();
+            if (save.litters != null)
+            {
+                foreach (LitterData litter in save.litters)
+                {
+                    if (litter == null || string.IsNullOrEmpty(litter.id)) continue;
+                    LitterById[litter.id] = litter;
+                }
+            }
+            foreach (RatData pup in save.rats)
+            {
+                if (pup == null || pup.stage != RatStage.Pinkie) continue;
+                if (!string.IsNullOrEmpty(pup.motherId))
+                {
+                    MothersWithPinkies.Add(pup.motherId);
+                    continue;
+                }
+                if (!string.IsNullOrEmpty(pup.litterId) &&
+                    LitterById.TryGetValue(pup.litterId, out LitterData litter) &&
+                    !string.IsNullOrEmpty(litter.motherId))
+                    MothersWithPinkies.Add(litter.motherId);
+            }
+        }
+
+        private static bool IsMotherCandidate(RatData mother)
         {
             if (mother == null || mother.sex != RatSex.Female ||
                 (mother.stage != RatStage.Adult && mother.stage != RatStage.Mature) ||
                 mother.removalDisposition != RatRemovalDisposition.None) return false;
-            return mother.nursing || EnclosureSystem.HasDependentPinkies(save, mother.id);
+            return mother.nursing || MothersWithPinkies.Contains(mother.id ?? string.Empty);
         }
 
         private static RatData ChooseNextPup(ColonySaveData save, RatData mother, long gameTime)
         {
-            var candidates = new List<RatData>();
+            RatData best = null;
             foreach (RatData pup in save.rats)
             {
                 if (pup == null || pup.stage != RatStage.Pinkie ||
                     pup.removalDisposition != RatRemovalDisposition.None ||
                     pup.enclosure != mother.enclosure) continue;
-                if (!IsRecordedPup(save, mother, pup)) continue;
+                if (!IsRecordedPup(mother, pup)) continue;
                 if (pup.lastNursedAt > 0L && gameTime - pup.lastNursedAt < NursingCooldownMs) continue;
-                candidates.Add(pup);
+                if (best == null || CompareNursingCandidates(pup, best) < 0) best = pup;
             }
-
-            candidates.Sort((left, right) =>
-            {
-                int result = left.lastNursedAt.CompareTo(right.lastNursedAt);
-                if (result != 0) return result;
-                return string.CompareOrdinal(left.id, right.id);
-            });
-            return candidates.Count == 0 ? null : candidates[0];
+            return best;
         }
 
-        private static bool IsRecordedPup(ColonySaveData save, RatData mother, RatData pup)
+        private static int CompareNursingCandidates(RatData left, RatData right)
+        {
+            int result = left.lastNursedAt.CompareTo(right.lastNursedAt);
+            return result != 0 ? result : string.CompareOrdinal(left.id, right.id);
+        }
+
+        private static bool IsRecordedPup(RatData mother, RatData pup)
         {
             if (pup == null || mother == null) return false;
             if (pup.motherId == mother.id) return true;
-            if (string.IsNullOrEmpty(pup.litterId) || save.litters == null) return false;
-            foreach (LitterData litter in save.litters)
-            {
-                if (litter == null || litter.id != pup.litterId || litter.motherId != mother.id ||
-                    litter.pupIds == null) continue;
-                if (litter.pupIds.Contains(pup.id)) return true;
-            }
-            return false;
+            if (string.IsNullOrEmpty(pup.litterId) ||
+                !LitterById.TryGetValue(pup.litterId, out LitterData litter) ||
+                litter.motherId != mother.id || litter.pupIds == null) return false;
+            return litter.pupIds.Contains(pup.id);
         }
 
         private static long BehaviorSecondsToGameMilliseconds(float behaviorSeconds)

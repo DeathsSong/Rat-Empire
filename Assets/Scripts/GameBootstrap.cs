@@ -66,21 +66,34 @@ namespace RatHabitat
         // arrival, but must not trigger a full colony maintenance scan each frame.
         private readonly Dictionary<string, float> birthRetryAfterRealtime = new Dictionary<string, float>();
         private const float BirthRetryCooldownSeconds = 0.5f;
-        // Expensive colony reconciliation is simulation-tick work, not
-        // presentation-frame work. Six in-game hours is enough resolution for
-        // smooth stat decline while avoiding a full rat/pregnancy/enclosure
-        // scan on every WebGL frame, especially at 3x where a day passes
-        // quickly. Exact pregnancy, session, recovery, and nursing deadlines
-        // still wake the pass immediately through IsTimedSimulationWorkDue.
-        private const long ColonyMaintenanceIntervalGameMs = 6L * 60L * 60L * 1000L;
+        // Full-colony reconciliation is daily or deadline-driven. All age,
+        // pregnancy, recovery, restock, and nursing state is evaluated against
+        // the current authoritative game timestamp; skipped intervals are
+        // coalesced rather than replayed.
+        private const long ColonyMaintenanceIntervalGameMs = GameConfig.GameDayMs;
         private const float AmbientActivityPollIntervalSeconds = 0.25f;
         private const float AutosaveIntervalSeconds = 5f;
         private long nextColonyMaintenanceGameTime;
         private long nextAgeTransitionGameTime = long.MaxValue;
         private long nextNursingTickGameTime = long.MaxValue;
+        private long nextWeaningAnnouncementGameTime = long.MaxValue;
         private bool colonyMaintenanceInitialized;
         private bool ageTransitionScheduleInitialized;
         private bool nursingScheduleInitialized;
+        private bool weaningScheduleInitialized;
+        private struct TimedSimulationWorkDue
+        {
+            public bool StoreRestock;
+            public bool BreedingSession;
+            public bool Pregnancy;
+            public bool Recovery;
+            public bool Weaning;
+
+            public bool Any
+            {
+                get { return StoreRestock || BreedingSession || Pregnancy || Recovery || Weaning; }
+            }
+        }
         private bool performanceSimulationPauseActive;
         private long performanceSimulationPauseStartedAt;
         private float ambientActivityPollTimer;
@@ -815,6 +828,7 @@ namespace RatHabitat
                 GrowthSystem.RefreshRatStages(Save);
                 bool startupReproductiveChanged = BreedingSystem.RefreshReproductiveStates(Save, GameTime);
                 StoreSystem.AdvanceRestock(Save, GameTime);
+                ScheduleNextWeaningAnnouncement();
                 EnclosureSystem.ClearBreedingPair();
                 RestoreDedicatedBreedingPair();
                 EnclosureSystem.RecalculateAssignments(Save);
@@ -1044,7 +1058,6 @@ namespace RatHabitat
                 if (approachStarted)
                 {
                     QueuePairingHeaderRefresh();
-                    SaveSystem.QueueSave(Save, "GameBootstrap.PairingCheckLoop/approach-started");
                 }
             }
         }
@@ -1140,7 +1153,6 @@ namespace RatHabitat
             // route, not a breeding attempt, so activity timestamps and
             // cancellation history reflect the real interaction start.
             StatusMessage = string.Empty;
-            if (ui != null) ui.Refresh(false);
             return true;
         }
 
@@ -1300,6 +1312,7 @@ namespace RatHabitat
             femaleBehavior.FinishPairingInteraction();
             pairingApproach = null;
             Save.pairingNextCheckGameTime = GameTime + GameConfig.PairingCheckIntervalMs;
+            bool pregnancyStatePersisted = false;
 
             if (!resolved || !conceptionSucceeded)
             {
@@ -1315,12 +1328,31 @@ namespace RatHabitat
                 // Pairing Habitat breeding approach/interaction remains
                 // silent. Resolve the announcement from the saved pregnancy
                 // record so the mother ID is always authoritative.
-                AnnounceCreatedPregnancy(createdPregnancy);
+                // Reconcile placement before the atomic pregnancy/announcement
+                // save so one snapshot contains the complete authoritative
+                // result. AnnounceCreatedPregnancy performs that save.
+                EnclosureSystem.RecalculateAssignments(Save);
+                pregnancyStatePersisted = AnnounceCreatedPregnancy(createdPregnancy);
             }
 
-            EnclosureSystem.RecalculateAssignments(Save);
-            RefreshWorldAndUi(resolved && conceptionSucceeded);
-            SaveSystem.Save(Save);
+            if (resolved && conceptionSucceeded)
+            {
+                // A conception changes reproductive presentation and colony
+                // structure, so refresh the world and roster once. The
+                // pregnancy announcement above already persisted the full
+                // state; avoid a second full serialization.
+                RefreshWorldAndUi(true);
+            }
+            else if (ui != null)
+            {
+                // Failed/cancelled attempts only update cooldown/activity
+                // timestamps. Rat visuals own their transitions, so rebuilding
+                // the entire roster here is unnecessary fast-forward work.
+                ui.RefreshHeader();
+            }
+
+            if (!pregnancyStatePersisted)
+                SaveSystem.QueueSave(Save, "GameBootstrap.ResolvePairingApproach");
         }
 
         private bool AnnounceCreatedPregnancy(PregnancyData pregnancy)
@@ -1682,20 +1714,24 @@ namespace RatHabitat
 #endif
         }
 
-        private bool IsTimedSimulationWorkDue()
+        private bool IsTimedSimulationWorkDue(out TimedSimulationWorkDue due)
         {
+            due = default(TimedSimulationWorkDue);
             if (Save == null) return false;
             long gameTime = GameTime;
-            if (Save.storeNextRestockGameTime > 0L &&
-                Save.storeNextRestockGameTime <= gameTime) return true;
-            if (!nursingScheduleInitialized || nextNursingTickGameTime <= gameTime) return true;
+            due.StoreRestock = Save.storeNextRestockGameTime > 0L &&
+                Save.storeNextRestockGameTime <= gameTime;
+            due.Weaning = !weaningScheduleInitialized || nextWeaningAnnouncementGameTime <= gameTime;
 
             if (Save.breedingSessions != null)
             {
                 foreach (DedicatedBreedingSessionData session in Save.breedingSessions)
                 {
                     if (session != null && session.status == "active" && session.endsAt <= gameTime)
-                        return true;
+                    {
+                        due.BreedingSession = true;
+                        break;
+                    }
                 }
             }
             if (Save.pregnancies != null)
@@ -1710,12 +1746,19 @@ namespace RatHabitat
                     // arrival (or a missing route/visual) wakes the expensive
                     // colony pass; travel progress is handled by the rat's
                     // normal per-frame movement update.
-                    if (!pregnancy.birthApproachStarted) return true;
+                    if (!pregnancy.birthApproachStarted)
+                    {
+                        due.Pregnancy = true;
+                        break;
+                    }
                     RatData mother = BreedingSystem.FindRat(Save, pregnancy.motherId);
                     if (mother == null || !EnclosureSystem.HasNest(mother.enclosure) || rats == null ||
                         !rats.TryGetRatBehavior(mother.id, out RatHabitatBehavior birthBehavior) ||
                         birthBehavior == null || !birthBehavior.BirthApproachActive || birthBehavior.BirthApproachAtNest)
-                        return true;
+                    {
+                        due.Pregnancy = true;
+                        break;
+                    }
                 }
             }
             if (Save.rats != null)
@@ -1723,10 +1766,13 @@ namespace RatHabitat
                 foreach (RatData rat in Save.rats)
                 {
                     if (BreedingSystem.IsRecoveryTransitionDue(rat, gameTime))
-                        return true;
+                    {
+                        due.Recovery = true;
+                        break;
+                    }
                 }
             }
-            return false;
+            return due.Any;
         }
 
         private bool BirthRetryReady(PregnancyData pregnancy)
@@ -1759,6 +1805,22 @@ namespace RatHabitat
         {
             nextNursingTickGameTime = NursingSystem.NextOpportunityGameTime(Save, GameTime);
             nursingScheduleInitialized = true;
+        }
+
+        private void ScheduleNextWeaningAnnouncement()
+        {
+            nextWeaningAnnouncementGameTime = long.MaxValue;
+            if (Save != null && Save.litters != null)
+            {
+                foreach (LitterData litter in Save.litters)
+                {
+                    if (litter == null || litter.weaningAnnouncementLogged || litter.weaningTimestamp <= 0L)
+                        continue;
+                    if (litter.weaningTimestamp < nextWeaningAnnouncementGameTime)
+                        nextWeaningAnnouncementGameTime = litter.weaningTimestamp;
+                }
+            }
+            weaningScheduleInitialized = true;
         }
 
         // Birth-transition fixes keep modal pause and presentation ordering
@@ -1900,7 +1962,7 @@ namespace RatHabitat
             bool activityChanged = false;
             bool enclosureChanged = false;
             bool nursingChanged = false;
-            bool nursingPassDue = false;
+            bool nursingPassDue = !nursingScheduleInitialized || nextNursingTickGameTime <= GameTime;
             bool alertAnnouncementStateChanged = false;
             bool birthSequenceChanged = false;
             int completedSessionCount = 0;
@@ -1908,34 +1970,68 @@ namespace RatHabitat
             List<DedicatedBreedingSessionData> completedSessions = null;
             List<LitterData> newLitters = null;
 
-            bool maintenanceDue =
+            bool maintenanceAllowed =
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-                !RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.ColonyMaintenance) &&
+                !RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.ColonyMaintenance);
+#else
+                true;
 #endif
-                (!colonyMaintenanceInitialized ||
-                GameTime >= nextColonyMaintenanceGameTime ||
-                !ageTransitionScheduleInitialized || GameTime >= nextAgeTransitionGameTime ||
-                IsTimedSimulationWorkDue());
+            TimedSimulationWorkDue timedWorkDue = default(TimedSimulationWorkDue);
+            bool hasTimedWorkDue = maintenanceAllowed && IsTimedSimulationWorkDue(out timedWorkDue);
+            bool dailyMaintenanceDue = !colonyMaintenanceInitialized || GameTime >= nextColonyMaintenanceGameTime;
+            bool ageTransitionDue = !ageTransitionScheduleInitialized || GameTime >= nextAgeTransitionGameTime;
+            bool maintenanceDue = maintenanceAllowed &&
+                (dailyMaintenanceDue || ageTransitionDue || hasTimedWorkDue);
             if (maintenanceDue)
             {
                 float maintenanceStartedAt = Time.realtimeSinceStartup;
                 long simulationMaintenanceSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.SimulationMaintenance);
                 BeginPerformanceSample("Rat Empire/Simulation Maintenance");
-                BeginPerformanceSample("Rat Empire/Simulation/Growth and Biology");
-                stageChanged = GrowthSystem.RefreshRatStages(Save);
-                alertAnnouncementStateChanged |= AnnounceNewNaturalDeaths();
-                EndPerformanceSample();
-                BeginPerformanceSample("Rat Empire/Simulation/Reproductive State");
-                reproductiveStateChanged = BreedingSystem.RefreshReproductiveStates(Save, GameTime);
-                EndPerformanceSample();
-                BeginPerformanceSample("Rat Empire/Simulation/Store and Sale Eligibility");
-                storeChanged = StoreSystem.AdvanceRestock(Save, GameTime, out storeRestockResult);
-                saleEligibilityChanged = UpdateSaleEligibilitySignature();
-                EndPerformanceSample();
+                // Store sale values depend on current age-declined traits, so
+                // a restock catch-up refreshes biological values once at the
+                // current timestamp before calculating any payout.
+                bool growthPassDue = dailyMaintenanceDue || ageTransitionDue || timedWorkDue.StoreRestock;
+                bool reproductivePassDue = growthPassDue || timedWorkDue.BreedingSession ||
+                    timedWorkDue.Pregnancy || timedWorkDue.Recovery;
 
-                BeginPerformanceSample("Rat Empire/Simulation/Breeding Deadlines");
-                completedSessionCount = BreedingSystem.ResolveDueDedicatedBreedingSessions(
-                    Save, GameTime, out completedSessions);
+                if (growthPassDue)
+                {
+                    long growthSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.MaintenanceGrowth);
+                    BeginPerformanceSample("Rat Empire/Simulation/Growth and Biology");
+                    stageChanged = GrowthSystem.RefreshRatStages(Save);
+                    if (stageChanged) alertAnnouncementStateChanged |= AnnounceNewNaturalDeaths();
+                    RuntimePerformanceDiagnostics.End(PerformanceProbeArea.MaintenanceGrowth, growthSample);
+                    EndPerformanceSample();
+                }
+
+                if (reproductivePassDue)
+                {
+                    long reproductiveSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.MaintenanceReproductive);
+                    BeginPerformanceSample("Rat Empire/Simulation/Reproductive State");
+                    reproductiveStateChanged = BreedingSystem.RefreshReproductiveStates(
+                        Save, GameTime, false);
+                    RuntimePerformanceDiagnostics.End(PerformanceProbeArea.MaintenanceReproductive, reproductiveSample);
+                    EndPerformanceSample();
+                }
+
+                if (timedWorkDue.StoreRestock)
+                {
+                    long storeSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.MaintenanceStore);
+                    BeginPerformanceSample("Rat Empire/Simulation/Store and Sale Eligibility");
+                    storeChanged = StoreSystem.AdvanceRestock(Save, GameTime, out storeRestockResult);
+                    RuntimePerformanceDiagnostics.End(PerformanceProbeArea.MaintenanceStore, storeSample);
+                    EndPerformanceSample();
+                }
+
+                if (timedWorkDue.BreedingSession)
+                {
+                    long sessionSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.MaintenanceSessions);
+                    BeginPerformanceSample("Rat Empire/Simulation/Breeding Deadlines");
+                    completedSessionCount = BreedingSystem.ResolveDueDedicatedBreedingSessions(
+                        Save, GameTime, out completedSessions);
+                    RuntimePerformanceDiagnostics.End(PerformanceProbeArea.MaintenanceSessions, sessionSample);
+                    EndPerformanceSample();
+                }
                 if (completedSessionCount > 0)
                 {
                     EnclosureSystem.ClearBreedingPair();
@@ -1961,7 +2057,14 @@ namespace RatHabitat
                     reproductiveStateChanged = true;
                 }
 
-                births = ProcessDuePregnanciesAtNest(out newLitters, out birthSequenceChanged);
+                if (timedWorkDue.Pregnancy)
+                {
+                    long birthSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.MaintenanceBirths);
+                    BeginPerformanceSample("Rat Empire/Simulation/Pregnancy and Birth Deadlines");
+                    births = ProcessDuePregnanciesAtNest(out newLitters, out birthSequenceChanged);
+                    RuntimePerformanceDiagnostics.End(PerformanceProbeArea.MaintenanceBirths, birthSample);
+                    EndPerformanceSample();
+                }
                 if (births > 0)
                 {
                     foreach (LitterData litter in newLitters)
@@ -1970,21 +2073,61 @@ namespace RatHabitat
                     if (ui != null) ui.LogBirthTransitionState("birth-processed");
                     stageChanged = true;
                     nextNursingTickGameTime = GameTime;
+                    nursingPassDue = true;
+                    ScheduleNextWeaningAnnouncement();
                 }
-                alertAnnouncementStateChanged |= AnnounceCompletedWeanings();
-                EndPerformanceSample();
+                else if (stageChanged)
+                {
+                    // Stage eligibility can change which mothers have a
+                    // nursing opportunity. Recompute the independent nursing
+                    // deadline without promoting it to a colony-wide pass.
+                    ScheduleNextNursingTick();
+                    nursingPassDue |= nextNursingTickGameTime <= GameTime;
+                }
+                if (timedWorkDue.Weaning)
+                {
+                    long weaningSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.MaintenanceWeanings);
+                    alertAnnouncementStateChanged |= AnnounceCompletedWeanings();
+                    ScheduleNextWeaningAnnouncement();
+                    RuntimePerformanceDiagnostics.End(PerformanceProbeArea.MaintenanceWeanings, weaningSample);
+                }
 
-                BeginPerformanceSample("Rat Empire/Simulation/Activity and Enclosures");
-                activityChanged = RefreshRatActivities();
+                bool refreshActivities = dailyMaintenanceDue || stageChanged || reproductiveStateChanged ||
+                    storeChanged || births > 0 || completedSessionCount > 0 || birthSequenceChanged;
+                if (refreshActivities)
+                {
+                    long activitySample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.MaintenanceActivities);
+                    BeginPerformanceSample("Rat Empire/Simulation/Activity Refresh");
+                    activityChanged = RefreshRatActivities();
+                    RuntimePerformanceDiagnostics.End(PerformanceProbeArea.MaintenanceActivities, activitySample);
+                    EndPerformanceSample();
+                }
                 if (stageChanged || reproductiveStateChanged || births > 0 || completedSessionCount > 0)
+                {
+                    long enclosureSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.MaintenanceEnclosures);
+                    BeginPerformanceSample("Rat Empire/Simulation/Enclosure Recalculation");
                     enclosureChanged = EnclosureSystem.RecalculateAssignments(Save);
-                EndPerformanceSample();
+                    RuntimePerformanceDiagnostics.End(PerformanceProbeArea.MaintenanceEnclosures, enclosureSample);
+                    EndPerformanceSample();
+                }
 
-                nursingPassDue = !nursingScheduleInitialized || nextNursingTickGameTime <= GameTime || births > 0;
+                if (growthPassDue || reproductiveStateChanged || storeChanged || births > 0 || completedSessionCount > 0)
+                {
+                    long saleEligibilityBefore = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.MaintenanceSaleEligibility);
+                    saleEligibilityChanged = UpdateSaleEligibilitySignature();
+                    RuntimePerformanceDiagnostics.End(PerformanceProbeArea.MaintenanceSaleEligibility, saleEligibilityBefore);
+                }
 
-                nextColonyMaintenanceGameTime = GameTime + ColonyMaintenanceIntervalGameMs;
-                nextAgeTransitionGameTime = GrowthSystem.NextAgeBoundaryGameTime(Save, GameTime);
-                ageTransitionScheduleInitialized = true;
+                long maintenanceDeadlineBase = colonyMaintenanceInitialized
+                    ? nextColonyMaintenanceGameTime
+                    : GameTime;
+                nextColonyMaintenanceGameTime = GrowthSystem.AdvanceDeadlinePastNow(
+                    maintenanceDeadlineBase, ColonyMaintenanceIntervalGameMs, GameTime);
+                if (growthPassDue || births > 0)
+                {
+                    nextAgeTransitionGameTime = GrowthSystem.NextAgeBoundaryGameTime(Save, GameTime);
+                    ageTransitionScheduleInitialized = true;
+                }
                 colonyMaintenanceInitialized = true;
                 maintenancePassCount++;
                 lastMaintenanceDurationMs = (Time.realtimeSinceStartup - maintenanceStartedAt) * 1000f;
@@ -1995,6 +2138,10 @@ namespace RatHabitat
                 EndPerformanceSample();
             }
 
+            // Nursing interaction opportunities are independent deadlines,
+            // not a reason to wake the full-colony maintenance bundle.
+            // Births force one immediate pass after newborn presentation roots
+            // are rebuilt; otherwise missed cooldowns are coalesced at now.
             // Ambient behavior transitions are meaningful activity history but
             // do not need a biological full pass. Poll them on a short real
             // time interval so idle/walk transitions remain visible without
@@ -3991,6 +4138,7 @@ namespace RatHabitat
             }
 
             Save.litters.Add(litter);
+            ScheduleNextWeaningAnnouncement();
             GrowthSystem.RefreshRatAges(Save, now);
             EnclosureSystem.RecalculateAssignments(Save);
             selectedRatId = mother.id;

@@ -431,6 +431,21 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void DailyMaintenanceDeadlineSkipsMissedIntervalsWithoutDroppingGameTime()
+        {
+            long interval = GameConfig.GameDayMs;
+            long firstDeadline = 100L * interval;
+            long currentGameTime = firstDeadline + interval * 23L + interval / 3L;
+
+            long nextDeadline = GrowthSystem.AdvanceDeadlinePastNow(firstDeadline, interval, currentGameTime);
+
+            Assert.Greater(nextDeadline, currentGameTime,
+                "A coalesced maintenance deadline must be advanced beyond the authoritative current game time.");
+            Assert.AreEqual(firstDeadline + interval * 24L, nextDeadline,
+                "Skipped daily passes are not replayed, and the original calendar cadence is preserved.");
+        }
+
+        [Test]
         public void StaticDeveloperGrowthOverrideDoesNotScheduleAStaleDueBoundary()
         {
             var save = new ColonySaveData();
@@ -3134,6 +3149,38 @@ namespace RatHabitat.Tests
             StoreSystem.RestockNow(loaded, loaded.clock.gameTimeMs + GameConfig.GameDayMs);
             Assert.AreEqual(loadedWallet, loaded.colonyCredits,
                 "Save/load and a subsequent restock must not replay the payout.");
+        }
+
+        [Test]
+        public void RestockCoalescesMissedCyclesAndProcessesAutomaticSaleOnce()
+        {
+            const long start = 1900000000L;
+            ColonySaveData save = ColonyFactory.CreateNew(start);
+            long firstRestockAt = save.storeNextRestockGameTime;
+            RatData eligible = CreateAutoSaleTestRat(save,
+                "coalesced-restock-sale", "Coalesced Sale", RatSex.Male, 120f);
+            int walletBefore = save.colonyCredits;
+            int expectedPayout = StoreSystem.CalculateSaleValue(save, eligible, firstRestockAt);
+            long interval = GameConfig.StoreRestockIntervalGameMs;
+            long jumpedGameTime = firstRestockAt + interval * 5L + interval / 2L;
+
+            bool processed = StoreSystem.AdvanceRestock(save, jumpedGameTime, out StoreRestockResult result);
+
+            Assert.IsTrue(processed);
+            Assert.AreEqual(6, save.storeRestockCycle,
+                "The market cycle advances past all elapsed deadlines without replaying individual restock passes.");
+            Assert.AreEqual(firstRestockAt + interval * 6L, save.storeNextRestockGameTime);
+            Assert.Greater(save.storeNextRestockGameTime, jumpedGameTime);
+            Assert.AreEqual(1, result.soldRatCount,
+                "A catch-up restock performs its automatic-sale pass only once.");
+            Assert.AreEqual(expectedPayout, result.creditedDollars);
+            Assert.AreEqual(walletBefore + expectedPayout, save.colonyCredits);
+
+            bool repeated = StoreSystem.AdvanceRestock(save, jumpedGameTime, out StoreRestockResult repeatedResult);
+            Assert.IsFalse(repeated, "The same elapsed restock window must not be processed again next frame.");
+            Assert.AreEqual(0, repeatedResult.soldRatCount);
+            Assert.AreEqual(walletBefore + expectedPayout, save.colonyCredits,
+                "A restock catch-up cannot duplicate an automatic-sale payout.");
         }
 
         private static RatData CreateAutoSaleTestRat(

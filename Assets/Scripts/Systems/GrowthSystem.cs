@@ -214,6 +214,7 @@ namespace RatHabitat
                 if (GameConfig.PinkieStageDays > age) threshold = Mathf.Min(threshold, GameConfig.PinkieStageDays);
                 if (maturity > age) threshold = Mathf.Min(threshold, maturity);
                 if (GameConfig.MatureStartDays > age) threshold = Mathf.Min(threshold, GameConfig.MatureStartDays);
+                if (GameConfig.PupSaleMinimumAgeDays > age) threshold = Mathf.Min(threshold, GameConfig.PupSaleMinimumAgeDays);
                 if (rat.breedingEndAgeDays > age) threshold = Mathf.Min(threshold, rat.breedingEndAgeDays);
                 if (rat.expectedLifespanDays > age && rat.expectedLifespanDays < threshold)
                     threshold = rat.expectedLifespanDays;
@@ -238,6 +239,24 @@ namespace RatHabitat
                 if (boundary < next) next = boundary;
             }
             return next;
+        }
+
+        /// <summary>
+        /// Advances a repeating game-time deadline directly past the current
+        /// timestamp. Missed intervals are coalesced instead of replayed one
+        /// at a time, and the returned deadline is always in the future.
+        /// </summary>
+        public static long AdvanceDeadlinePastNow(long deadline, long interval, long gameTime)
+        {
+            if (interval <= 0L)
+                return gameTime == long.MaxValue ? long.MaxValue : gameTime + 1L;
+            if (deadline > gameTime) return deadline;
+
+            long elapsed = gameTime - deadline;
+            long intervalsToAdvance = elapsed / interval + 1L;
+            long maximumSafeIntervals = (long.MaxValue - deadline) / interval;
+            if (intervalsToAdvance > maximumSafeIntervals) return long.MaxValue;
+            return deadline + intervalsToAdvance * interval;
         }
 
         private static void EnsureDiagnosticsFrame()

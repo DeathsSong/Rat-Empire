@@ -30,6 +30,15 @@ namespace RatHabitat
         BootstrapUpdate,
         ClockAndAge,
         SimulationMaintenance,
+        MaintenanceGrowth,
+        MaintenanceReproductive,
+        MaintenanceStore,
+        MaintenanceSessions,
+        MaintenanceBirths,
+        MaintenanceWeanings,
+        MaintenanceActivities,
+        MaintenanceEnclosures,
+        MaintenanceSaleEligibility,
         PairingMovement,
         RatBehaviorUpdate,
         RatBehaviorLateUpdate,
@@ -101,6 +110,27 @@ namespace RatHabitat
         public int RepeatedRatBehaviorUpdates;
         public float SimulationMs;
         public float SimulationMaintenanceMs;
+        public int MaintenancePasses;
+        public float MaintenanceGrowthMs;
+        public int MaintenanceGrowthPasses;
+        public float MaintenanceReproductiveMs;
+        public int MaintenanceReproductivePasses;
+        public float MaintenanceStoreMs;
+        public int MaintenanceStorePasses;
+        public float MaintenanceSessionsMs;
+        public int MaintenanceSessionsPasses;
+        public float MaintenanceBirthsMs;
+        public int MaintenanceBirthsPasses;
+        public float MaintenanceWeaningsMs;
+        public int MaintenanceWeaningsPasses;
+        public float MaintenanceActivitiesMs;
+        public int MaintenanceActivitiesPasses;
+        public float MaintenanceEnclosuresMs;
+        public int MaintenanceEnclosuresPasses;
+        public float MaintenanceSaleEligibilityMs;
+        public int MaintenanceSaleEligibilityPasses;
+        public float NursingMs;
+        public int NursingPasses;
         public float UiRefreshMs;
         public float RatAiMovementMs;
         public float RatTargetSelectionMs;
@@ -143,6 +173,15 @@ namespace RatHabitat
             "Rat Empire/Measured/Bootstrap Update",
             "Rat Empire/Measured/Clock and Age",
             "Rat Empire/Measured/Simulation Maintenance",
+            "Rat Empire/Measured/Maintenance Growth",
+            "Rat Empire/Measured/Maintenance Reproductive",
+            "Rat Empire/Measured/Maintenance Store",
+            "Rat Empire/Measured/Maintenance Sessions",
+            "Rat Empire/Measured/Maintenance Births",
+            "Rat Empire/Measured/Maintenance Weanings",
+            "Rat Empire/Measured/Maintenance Activities",
+            "Rat Empire/Measured/Maintenance Enclosures",
+            "Rat Empire/Measured/Maintenance Sale Eligibility",
             "Rat Empire/Measured/Pairing Movement",
             "Rat Empire/Measured/Rat Behavior Update",
             "Rat Empire/Measured/Rat Behavior LateUpdate",
@@ -389,6 +428,16 @@ namespace RatHabitat
             if (sampleCount < SampleRing.Length) sampleCount++;
             lastSampleUtcTicks = sample.UtcTicks > 0L ? sample.UtcTicks : DateTime.UtcNow.Ticks;
             TrackWorstSubsystem("Simulation/maintenance", sample.SimulationMaintenanceMs);
+            TrackWorstSubsystem("Maintenance/growth", sample.MaintenanceGrowthMs);
+            TrackWorstSubsystem("Maintenance/reproductive", sample.MaintenanceReproductiveMs);
+            TrackWorstSubsystem("Maintenance/store", sample.MaintenanceStoreMs);
+            TrackWorstSubsystem("Maintenance/sessions", sample.MaintenanceSessionsMs);
+            TrackWorstSubsystem("Maintenance/births", sample.MaintenanceBirthsMs);
+            TrackWorstSubsystem("Maintenance/weanings", sample.MaintenanceWeaningsMs);
+            TrackWorstSubsystem("Maintenance/activities", sample.MaintenanceActivitiesMs);
+            TrackWorstSubsystem("Maintenance/enclosures", sample.MaintenanceEnclosuresMs);
+            TrackWorstSubsystem("Maintenance/sale eligibility", sample.MaintenanceSaleEligibilityMs);
+            TrackWorstSubsystem("Nursing", sample.NursingMs);
             TrackWorstSubsystem("Simulation", sample.SimulationMs);
             TrackWorstSubsystem("UI refresh", sample.UiRefreshMs);
             TrackWorstSubsystem("Rat AI/movement", sample.RatAiMovementMs);
@@ -496,6 +545,27 @@ namespace RatHabitat
                     WindowMilliseconds(PerformanceProbeArea.SimulationMaintenance) +
                     WindowMilliseconds(PerformanceProbeArea.NursingUpdate),
                 SimulationMaintenanceMs = WindowMilliseconds(PerformanceProbeArea.SimulationMaintenance),
+                MaintenancePasses = WindowCallCount(PerformanceProbeArea.SimulationMaintenance),
+                MaintenanceGrowthMs = WindowMilliseconds(PerformanceProbeArea.MaintenanceGrowth),
+                MaintenanceGrowthPasses = WindowCallCount(PerformanceProbeArea.MaintenanceGrowth),
+                MaintenanceReproductiveMs = WindowMilliseconds(PerformanceProbeArea.MaintenanceReproductive),
+                MaintenanceReproductivePasses = WindowCallCount(PerformanceProbeArea.MaintenanceReproductive),
+                MaintenanceStoreMs = WindowMilliseconds(PerformanceProbeArea.MaintenanceStore),
+                MaintenanceStorePasses = WindowCallCount(PerformanceProbeArea.MaintenanceStore),
+                MaintenanceSessionsMs = WindowMilliseconds(PerformanceProbeArea.MaintenanceSessions),
+                MaintenanceSessionsPasses = WindowCallCount(PerformanceProbeArea.MaintenanceSessions),
+                MaintenanceBirthsMs = WindowMilliseconds(PerformanceProbeArea.MaintenanceBirths),
+                MaintenanceBirthsPasses = WindowCallCount(PerformanceProbeArea.MaintenanceBirths),
+                MaintenanceWeaningsMs = WindowMilliseconds(PerformanceProbeArea.MaintenanceWeanings),
+                MaintenanceWeaningsPasses = WindowCallCount(PerformanceProbeArea.MaintenanceWeanings),
+                MaintenanceActivitiesMs = WindowMilliseconds(PerformanceProbeArea.MaintenanceActivities),
+                MaintenanceActivitiesPasses = WindowCallCount(PerformanceProbeArea.MaintenanceActivities),
+                MaintenanceEnclosuresMs = WindowMilliseconds(PerformanceProbeArea.MaintenanceEnclosures),
+                MaintenanceEnclosuresPasses = WindowCallCount(PerformanceProbeArea.MaintenanceEnclosures),
+                MaintenanceSaleEligibilityMs = WindowMilliseconds(PerformanceProbeArea.MaintenanceSaleEligibility),
+                MaintenanceSaleEligibilityPasses = WindowCallCount(PerformanceProbeArea.MaintenanceSaleEligibility),
+                NursingMs = WindowMilliseconds(PerformanceProbeArea.NursingUpdate),
+                NursingPasses = WindowCallCount(PerformanceProbeArea.NursingUpdate),
                 UiRefreshMs = WindowMilliseconds(PerformanceProbeArea.UiRefresh),
                 RatAiMovementMs = WindowMilliseconds(PerformanceProbeArea.RatBehaviorUpdate) +
                     WindowMilliseconds(PerformanceProbeArea.RatBehaviorLateUpdate),
@@ -588,6 +658,19 @@ namespace RatHabitat
                 .Append(latest.RatBehaviorUpdates).Append('/').Append(latest.RepeatedRatBehaviorUpdates)
                 .Append(" • sim probe calls ").Append(latest.SimulationProbeCalls)
                 .Append(" • sim ").Append(FormatMetric(latest.SimulationMs))
+                .Append(" • maintenance passes ").Append(latest.MaintenancePasses)
+                .Append(" • G/R/Store/Sess/Birth/Wean/Act/Encl/Sale ms ")
+                .Append(latest.MaintenanceGrowthMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(latest.MaintenanceReproductiveMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(latest.MaintenanceStoreMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(latest.MaintenanceSessionsMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(latest.MaintenanceBirthsMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(latest.MaintenanceWeaningsMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(latest.MaintenanceActivitiesMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(latest.MaintenanceEnclosuresMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(latest.MaintenanceSaleEligibilityMs.ToString("0.00", CultureInfo.InvariantCulture))
+                .Append(" ms; nursing ").Append(latest.NursingMs.ToString("0.00", CultureInfo.InvariantCulture))
+                .Append(" ms x").Append(latest.NursingPasses)
                 .Append(" • save ").Append(FormatMetric(latest.SaveStorageMs)).Append(" x")
                 .Append(latest.SaveStorageOperations).Append(" ops/JSON ").Append(latest.SerializedDataBytes)
                 .Append(" B total, max ").Append(latest.LargestSerializedDataBytes).Append(" B")
@@ -684,7 +767,7 @@ namespace RatHabitat
             }
             else
             {
-                ExportBuilder.AppendLine("record,severity,utc,game_day_time,speed,fps,avg_frame_ms,worst_frame_ms,cpu_main_ms,gpu_ms,unattributed_frame_gap_ms,browser_avg_frame_gap_ms,browser_worst_frame_gap_ms,browser_gap_within_unity_cpu_ms,browser_gap_outside_unity_cpu_ms,browser_frame_count,browser_telemetry_available,page_visible,page_focused,page_hidden_during_window,page_unfocused_during_window,long_task_api_available,long_task_count,long_task_total_ms,long_task_max_ms,gc_alloc_bytes,gc0,gc1,gc2,rats,pinkies,animators,renderers,ui_graphics,canvases,simulation_steps,simulation_probe_calls,rat_behavior_updates,repeated_rat_behavior_updates,simulation_ms,maintenance_ms,ui_refresh_ms,rat_ai_movement_ms,rat_target_selection_ms,world_movement_integration_ms,rat_spacing_ms,animation_ms,grounding_bounds_ms,presentation_ms,presentation_updates,save_storage_ms,save_storage_operations,serialized_data_bytes_total,serialized_data_bytes_max,save_queue_requests,save_queue_coalesced_requests,save_source,save_export_ms,save_export_operations,input_ms,panel");
+                ExportBuilder.AppendLine("record,severity,utc,game_day_time,speed,fps,avg_frame_ms,worst_frame_ms,cpu_main_ms,gpu_ms,unattributed_frame_gap_ms,browser_avg_frame_gap_ms,browser_worst_frame_gap_ms,browser_gap_within_unity_cpu_ms,browser_gap_outside_unity_cpu_ms,browser_frame_count,browser_telemetry_available,page_visible,page_focused,page_hidden_during_window,page_unfocused_during_window,long_task_api_available,long_task_count,long_task_total_ms,long_task_max_ms,gc_alloc_bytes,gc0,gc1,gc2,rats,pinkies,animators,renderers,ui_graphics,canvases,simulation_steps,simulation_probe_calls,rat_behavior_updates,repeated_rat_behavior_updates,simulation_ms,maintenance_ms,maintenance_passes,maintenance_growth_ms,maintenance_growth_passes,maintenance_reproductive_ms,maintenance_reproductive_passes,maintenance_store_ms,maintenance_store_passes,maintenance_sessions_ms,maintenance_sessions_passes,maintenance_births_ms,maintenance_births_passes,maintenance_weanings_ms,maintenance_weanings_passes,maintenance_activities_ms,maintenance_activities_passes,maintenance_enclosures_ms,maintenance_enclosures_passes,maintenance_sale_eligibility_ms,maintenance_sale_eligibility_passes,nursing_ms,nursing_passes,ui_refresh_ms,rat_ai_movement_ms,rat_target_selection_ms,world_movement_integration_ms,rat_spacing_ms,animation_ms,grounding_bounds_ms,presentation_ms,presentation_updates,save_storage_ms,save_storage_operations,serialized_data_bytes_total,serialized_data_bytes_max,save_queue_requests,save_queue_coalesced_requests,save_source,save_export_ms,save_export_operations,input_ms,panel");
             }
 
             for (int index = 0; index < sampleCount; index++)
@@ -877,6 +960,19 @@ namespace RatHabitat
                 .Append(" • sim ").Append(sample.SimulationMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("ms")
                 .Append(" • maint/UI ").Append(sample.SimulationMaintenanceMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
                 .Append(sample.UiRefreshMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("ms")
+                .Append(" • maint passes ").Append(sample.MaintenancePasses)
+                .Append(" • maint G/R/Store/Sess/Birth/Wean/Act/Encl/Sale ms ")
+                .Append(sample.MaintenanceGrowthMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(sample.MaintenanceReproductiveMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(sample.MaintenanceStoreMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(sample.MaintenanceSessionsMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(sample.MaintenanceBirthsMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(sample.MaintenanceWeaningsMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(sample.MaintenanceActivitiesMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(sample.MaintenanceEnclosuresMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(sample.MaintenanceSaleEligibilityMs.ToString("0.00", CultureInfo.InvariantCulture))
+                .Append("ms • nursing ").Append(sample.NursingMs.ToString("0.00", CultureInfo.InvariantCulture))
+                .Append("ms x").Append(sample.NursingPasses)
                 .Append(" • AI/anim/ground ").Append(sample.RatAiMovementMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
                 .Append(sample.AnimationMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
                 .Append(sample.GroundingBoundsMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("ms")
@@ -935,6 +1031,27 @@ namespace RatHabitat
                 .Append(sample.RatBehaviorUpdates).Append(',').Append(sample.RepeatedRatBehaviorUpdates).Append(',')
                 .Append(sample.SimulationMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.SimulationMaintenanceMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.MaintenancePasses).Append(',')
+                .Append(sample.MaintenanceGrowthMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.MaintenanceGrowthPasses).Append(',')
+                .Append(sample.MaintenanceReproductiveMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.MaintenanceReproductivePasses).Append(',')
+                .Append(sample.MaintenanceStoreMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.MaintenanceStorePasses).Append(',')
+                .Append(sample.MaintenanceSessionsMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.MaintenanceSessionsPasses).Append(',')
+                .Append(sample.MaintenanceBirthsMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.MaintenanceBirthsPasses).Append(',')
+                .Append(sample.MaintenanceWeaningsMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.MaintenanceWeaningsPasses).Append(',')
+                .Append(sample.MaintenanceActivitiesMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.MaintenanceActivitiesPasses).Append(',')
+                .Append(sample.MaintenanceEnclosuresMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.MaintenanceEnclosuresPasses).Append(',')
+                .Append(sample.MaintenanceSaleEligibilityMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.MaintenanceSaleEligibilityPasses).Append(',')
+                .Append(sample.NursingMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.NursingPasses).Append(',')
                 .Append(sample.UiRefreshMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.RatAiMovementMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.RatTargetSelectionMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
@@ -1034,6 +1151,15 @@ namespace RatHabitat
                 case PerformanceProbeArea.BootstrapUpdate: return "Bootstrap";
                 case PerformanceProbeArea.ClockAndAge: return "Clock/age";
                 case PerformanceProbeArea.SimulationMaintenance: return "Maintenance";
+                case PerformanceProbeArea.MaintenanceGrowth: return "Maint growth";
+                case PerformanceProbeArea.MaintenanceReproductive: return "Maint reproductive";
+                case PerformanceProbeArea.MaintenanceStore: return "Maint store";
+                case PerformanceProbeArea.MaintenanceSessions: return "Maint sessions";
+                case PerformanceProbeArea.MaintenanceBirths: return "Maint births";
+                case PerformanceProbeArea.MaintenanceWeanings: return "Maint weanings";
+                case PerformanceProbeArea.MaintenanceActivities: return "Maint activities";
+                case PerformanceProbeArea.MaintenanceEnclosures: return "Maint enclosures";
+                case PerformanceProbeArea.MaintenanceSaleEligibility: return "Maint sale eligibility";
                 case PerformanceProbeArea.PairingMovement: return "Pairing movement";
                 case PerformanceProbeArea.RatBehaviorUpdate: return "Rat AI";
                 case PerformanceProbeArea.RatBehaviorLateUpdate: return "Rat facing";
@@ -1372,6 +1498,27 @@ namespace RatHabitat
                         RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.SimulationMaintenance) +
                         RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.NursingUpdate),
                     SimulationMaintenanceMs = game == null ? 0f : game.ConsumePerformanceMaintenanceWindowMs(),
+                    MaintenancePasses = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.SimulationMaintenance),
+                    MaintenanceGrowthMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.MaintenanceGrowth),
+                    MaintenanceGrowthPasses = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.MaintenanceGrowth),
+                    MaintenanceReproductiveMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.MaintenanceReproductive),
+                    MaintenanceReproductivePasses = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.MaintenanceReproductive),
+                    MaintenanceStoreMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.MaintenanceStore),
+                    MaintenanceStorePasses = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.MaintenanceStore),
+                    MaintenanceSessionsMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.MaintenanceSessions),
+                    MaintenanceSessionsPasses = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.MaintenanceSessions),
+                    MaintenanceBirthsMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.MaintenanceBirths),
+                    MaintenanceBirthsPasses = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.MaintenanceBirths),
+                    MaintenanceWeaningsMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.MaintenanceWeanings),
+                    MaintenanceWeaningsPasses = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.MaintenanceWeanings),
+                    MaintenanceActivitiesMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.MaintenanceActivities),
+                    MaintenanceActivitiesPasses = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.MaintenanceActivities),
+                    MaintenanceEnclosuresMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.MaintenanceEnclosures),
+                    MaintenanceEnclosuresPasses = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.MaintenanceEnclosures),
+                    MaintenanceSaleEligibilityMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.MaintenanceSaleEligibility),
+                    MaintenanceSaleEligibilityPasses = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.MaintenanceSaleEligibility),
+                    NursingMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.NursingUpdate),
+                    NursingPasses = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.NursingUpdate),
                     UiRefreshMs = game == null ? 0f : game.ConsumePerformanceUiRefreshWindowMs(),
                 RatAiMovementMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatBehaviorUpdate) +
                     RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.RatBehaviorLateUpdate),

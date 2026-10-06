@@ -152,7 +152,11 @@ namespace RatHabitat
                 save.storeNextRestockGameTime = gameTime + GameConfig.StoreRestockIntervalGameMs;
             if (gameTime < save.storeNextRestockGameTime) return false;
 
-            result = RestockNowWithResult(save, gameTime);
+            long interval = Math.Max(1L, GameConfig.StoreRestockIntervalGameMs);
+            long overdueIntervals = (gameTime - save.storeNextRestockGameTime) / interval;
+            long cyclesDue = overdueIntervals + 1L;
+            long firstDueAt = save.storeNextRestockGameTime;
+            result = RestockNowWithResult(save, gameTime, cyclesDue, firstDueAt);
             return true;
         }
 
@@ -163,15 +167,30 @@ namespace RatHabitat
 
         public static StoreRestockResult RestockNowWithResult(ColonySaveData save, long gameTime)
         {
+            return RestockNowWithResult(save, gameTime, 1, gameTime);
+        }
+
+        private static StoreRestockResult RestockNowWithResult(
+            ColonySaveData save,
+            long gameTime,
+            long elapsedRestockCycles,
+            long firstDueAt)
+        {
             if (save == null) return default(StoreRestockResult);
             save.EnsureLists();
             StoreRestockResult result = AutomaticallySellForSaleRats(save, gameTime);
-            save.storeRestockCycle = Math.Max(0, save.storeRestockCycle) + 1;
+            long nextCycle = (long)Math.Max(0, save.storeRestockCycle) + Math.Max(1L, elapsedRestockCycles);
+            save.storeRestockCycle = (int)Math.Min(int.MaxValue, nextCycle);
             int seed = StableHash((save.createdAt == 0 ? GameConfig.NowMs() : save.createdAt) +
                 "|restock|" + save.storeRestockCycle);
             CreateInventory(save, seed, save.storeRestockCycle);
             save.storeInventoryInitialized = true;
-            save.storeNextRestockGameTime = gameTime + GameConfig.StoreRestockIntervalGameMs;
+            long interval = Math.Max(1L, GameConfig.StoreRestockIntervalGameMs);
+            long cycles = Math.Max(1L, elapsedRestockCycles);
+            long maxCycles = (long.MaxValue - firstDueAt) / interval;
+            save.storeNextRestockGameTime = cycles > maxCycles
+                ? long.MaxValue
+                : firstDueAt + cycles * interval;
             RatNameSystem.EnsureUniqueNames(save, gameTime);
             RecordListingNameUsage(save, gameTime);
             result.autoSaleMessage = BuildAutomaticSaleMessage(result.skippedRatDetails, result);
