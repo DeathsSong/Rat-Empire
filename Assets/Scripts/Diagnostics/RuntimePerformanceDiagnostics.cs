@@ -214,6 +214,7 @@ namespace RatHabitat
             "Rat Empire/Measured/Maintenance Pairing Checks",
             "Rat Empire/Measured/Maintenance Historical Litter Scan",
             "Rat Empire/Measured/Maintenance Historical Pregnancy Scan",
+            "Rat Empire/Measured/Maintenance Historical Rat Index",
             "Rat Empire/Measured/Maintenance Birth Repair and Recovery",
             "Rat Empire/Measured/Pairing Movement",
             "Rat Empire/Measured/Rat Behavior Update",
@@ -367,8 +368,24 @@ namespace RatHabitat
 
         public static long Begin(PerformanceProbeArea area)
         {
-            if (!captureEnabled) return 0L;
-            Profiler.BeginSample(SampleNames[(int)area]);
+            int index = (int)area;
+            if (!captureEnabled || index < 0 || index >= (int)PerformanceProbeArea.Count ||
+                SampleNames == null || index >= SampleNames.Length ||
+                string.IsNullOrWhiteSpace(SampleNames[index]))
+                return 0L;
+
+            // A malformed probe must never turn diagnostics into a stream of
+            // WebGL console exceptions. Validate first and treat any remaining
+            // profiler argument rejection as a disabled sample.
+            try
+            {
+                Profiler.BeginSample(SampleNames[index]);
+            }
+            catch (ArgumentException)
+            {
+                return 0L;
+            }
+
             long start = Stopwatch.GetTimestamp();
             return start == 0L ? 1L : start;
         }
@@ -379,6 +396,9 @@ namespace RatHabitat
             long elapsed = Math.Max(0L, Stopwatch.GetTimestamp() - startedAt);
             Profiler.EndSample();
             int index = (int)area;
+            if (index < 0 || index >= (int)PerformanceProbeArea.Count ||
+                index >= WindowTicks.Length || index >= MaxTicks.Length || index >= Calls.Length)
+                return;
             WindowTicks[index] += elapsed;
             if (elapsed > MaxTicks[index]) MaxTicks[index] = elapsed;
             Calls[index]++;

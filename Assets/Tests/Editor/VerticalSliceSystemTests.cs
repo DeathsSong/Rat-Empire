@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEngine;
@@ -14,6 +15,27 @@ namespace RatHabitat.Tests
 {
     public class VerticalSliceSystemTests
     {
+        [Test]
+        public void PerformanceProbeNamesStayAlignedAndInvalidAreasAreIgnored()
+        {
+            FieldInfo namesField = typeof(RuntimePerformanceDiagnostics).GetField(
+                "SampleNames", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.IsNotNull(namesField, "Development builds must retain the profiler sample name table.");
+            string[] names = namesField.GetValue(null) as string[];
+            Assert.IsNotNull(names);
+            Assert.AreEqual((int)PerformanceProbeArea.Count, names.Length,
+                "Every probe enum value must have exactly one profiler name.");
+            Assert.AreEqual("Rat Empire/Measured/Maintenance Historical Rat Index",
+                names[(int)PerformanceProbeArea.MaintenanceHistoricalRatIndex]);
+
+            Assert.AreEqual(0L, RuntimePerformanceDiagnostics.Begin((PerformanceProbeArea)(-1)),
+                "Negative probe values must be ignored without opening a profiler sample.");
+            Assert.AreEqual(0L, RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.Count),
+                "The Count sentinel is not a valid probe and must be ignored.");
+            Assert.AreEqual(0L, RuntimePerformanceDiagnostics.Begin((PerformanceProbeArea)int.MaxValue),
+                "Out-of-range probe values must be ignored without throwing.");
+        }
+
         [Test]
         public void RuntimePerformanceLogStaysBoundedAndRecordsLagSeverityEscalation()
         {
