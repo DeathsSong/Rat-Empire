@@ -70,6 +70,8 @@ namespace RatHabitat
         public const float HealthDeclinePerDay = 0.035f;
         public const float FertilityDeclinePerDay = 0.06f;
         public const long BreedingCooldownMs = 30L * 1000L;
+        // Automatic Pairing Habitat attempts are rate-limited in real time,
+        // independent of the accelerated simulation/calendar speed.
         public const long PairingCheckIntervalMs = 30L * 1000L;
         // Applies to a resolved Pairing Habitat attempt, including a failed
         // conception. This is serialized on each RatData record so a save or
@@ -110,9 +112,9 @@ namespace RatHabitat
         // as unattributed rather than calling it GPU time.
         public const float PerformanceUnattributedFrameGapThresholdMs = 50f;
         public const int PerformanceLogRecentDisplayCount = 8;
-        // Market founders are almost always solid; breeding is the primary
-        // source of new marked lines.
-        public const float StoreFounderMarkingChance = 0.01f;
+        // Roll independently for each new market listing. A 50% chance keeps
+        // solid founders available while making marked rats a regular find.
+        public const float StoreFounderMarkingChance = 0.50f;
         // Both new-game starters share one solid visual coat while their
         // underlying black/dilution alleles remain independently generated.
         public const string StarterSolidCoatColorVariant = "agouti";
@@ -121,7 +123,9 @@ namespace RatHabitat
         // Legacy base-count name is retained for source compatibility.
         public const int StoreRestockListingCount = 2;
         public const int StoreListingCapacityUpgradeStep = 1;
-        public const float StoreSharedMarkingFamilyChance = 0.70f;
+        // Retained for source compatibility; new listings now choose families
+        // independently and avoid repeating a marked family within a restock.
+        public const float StoreSharedMarkingFamilyChance = 0f;
         // New-game founders are deliberately weak but still varied. These
         // are absolute stat values, not percentages.
         public const float StarterBeginnerTraitMinimum = 0f;

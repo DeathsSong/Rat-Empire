@@ -511,13 +511,12 @@ namespace RatHabitat
         public bool myRatsSortAscending = true;
         public string myRatsSexFilter = "All";
         public bool myRatsFavoritesOnly;
-        // Absolute real-time deadline for the next automatic Pairing Habitat
-        // evaluation. Persisting the deadline keeps save/load from resetting
-        // the 30-second cadence.
+        // Absolute UTC deadline for the next automatic Pairing Habitat
+        // evaluation. The real-time cadence is independent of simulation
+        // speed and remains stable when the player changes fast-forward.
         public long pairingNextCheckRealTimestamp;
-        // Authoritative simulation-clock deadline. The legacy real-time field
-        // remains for backward-compatible save reads, but new checks use this
-        // value so 1x/2x/4x speed affects pairing consistently with biology.
+        // Legacy simulation-clock deadline retained for save compatibility.
+        // New pairing scheduling is governed by pairingNextCheckRealTimestamp.
         public long pairingNextCheckGameTime;
         // The player-facing event history is intentionally small. Events are
         // stored newest-first so the UI can render the same order without

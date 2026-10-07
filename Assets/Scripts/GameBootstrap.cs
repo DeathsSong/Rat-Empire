@@ -962,10 +962,22 @@ namespace RatHabitat
         {
             if (Save == null) return;
             Save.EnsureLists();
-            if (Save.pairingNextCheckGameTime <= 0L)
+            long realNow = GameConfig.NowMs();
+            if (Save.pairingNextCheckRealTimestamp <= 0L)
             {
-                Save.pairingNextCheckGameTime = GameTime + GameConfig.PairingCheckIntervalMs;
+                Save.pairingNextCheckRealTimestamp = realNow + GameConfig.PairingCheckIntervalMs;
             }
+            if (Save.pairingNextCheckGameTime <= 0L)
+                Save.pairingNextCheckGameTime = GameTime + GameConfig.PairingCheckIntervalMs;
+        }
+
+        private void ScheduleNextPairingCheck()
+        {
+            if (Save == null) return;
+            Save.pairingNextCheckRealTimestamp = GameConfig.NowMs() + GameConfig.PairingCheckIntervalMs;
+            // Keep the older field coherent for backward compatibility with
+            // saves/tools that still inspect the simulation-time deadline.
+            Save.pairingNextCheckGameTime = GameTime + GameConfig.PairingCheckIntervalMs;
         }
 
         private void RestoreDedicatedBreedingPair()
@@ -1023,17 +1035,10 @@ namespace RatHabitat
                 }
 
                 EnsurePairingCheckScheduled();
-                long remainingGameMs = Save.pairingNextCheckGameTime - GameTime;
-                if (remainingGameMs > 0L)
+                long remainingRealMs = Save.pairingNextCheckRealTimestamp - GameConfig.NowMs();
+                if (remainingRealMs > 0L)
                 {
-                    double simulatedMillisecondsPerRealSecond =
-                        GrowthSystem.SimulationMillisecondsPerRealSecond(SimulationSpeed);
-                    float waitSeconds = (float)(remainingGameMs / simulatedMillisecondsPerRealSecond);
-                    // Do not impose a 100 ms real-time floor: at the
-                    // documented clock rate a short in-game cooldown can be
-                    // less than one frame, and the next frame is the safest
-                    // bounded catch-up point. The persisted game timestamp
-                    // remains authoritative, so this never double-advances.
+                    float waitSeconds = (float)(remainingRealMs / 1000d);
                     if (waitSeconds > 0.001f)
                         yield return new WaitForSecondsRealtime(waitSeconds);
                     else
@@ -1041,10 +1046,10 @@ namespace RatHabitat
                     continue;
                 }
 
-                // Advance the persisted deadline before evaluating. A stalled
-                // or backgrounded app therefore performs one catch-up pass,
-                // then resumes the normal 30-second cadence.
-                Save.pairingNextCheckGameTime = GameTime + GameConfig.PairingCheckIntervalMs;
+                // Advance from the current wall-clock time before evaluating.
+                // If the app was backgrounded or stalled, do one check and
+                // resume the cadence; never replay missed intervals.
+                ScheduleNextPairingCheck();
                 RatData male;
                 RatData female;
                 bool approachStarted = false;
@@ -1316,7 +1321,7 @@ namespace RatHabitat
             maleBehavior.FinishPairingInteraction();
             femaleBehavior.FinishPairingInteraction();
             pairingApproach = null;
-            Save.pairingNextCheckGameTime = GameTime + GameConfig.PairingCheckIntervalMs;
+            ScheduleNextPairingCheck();
             bool pregnancyStateQueued = false;
 
             if (!resolved || !conceptionSucceeded)
@@ -1466,7 +1471,7 @@ namespace RatHabitat
                 }
                 pairingRetryNotBeforeRealtime = Time.realtimeSinceStartup + retryDelay;
             }
-            Save.pairingNextCheckGameTime = GameTime + GameConfig.PairingCheckIntervalMs;
+            ScheduleNextPairingCheck();
             if (!routeFailure)
             {
                 // Eligibility changes such as pregnancy are expected state

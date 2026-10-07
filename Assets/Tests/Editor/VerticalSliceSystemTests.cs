@@ -1936,10 +1936,10 @@ namespace RatHabitat.Tests
         }
 
         [Test]
-        public void MarketMarkingRollIsRareByDefault()
+        public void MarketMarkingRollKeepsMarkedAndSolidListingsCommon()
         {
-            Assert.AreEqual(0.01f, GameConfig.StoreFounderMarkingChance,
-                "Only one percent of market founder rolls should introduce visible markings.");
+            Assert.AreEqual(0.50f, GameConfig.StoreFounderMarkingChance,
+                "About half of new market listings roll a marking; the rest remain solid.");
         }
 
         [Test]

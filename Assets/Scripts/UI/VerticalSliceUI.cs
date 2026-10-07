@@ -1845,7 +1845,8 @@ namespace RatHabitat
             settingsOverlay = CreateModalOverlay("Settings Popup", new Color(0.01f, 0.03f, 0.04f, 0.74f), out settingsCard);
             AddText(settingsCard, "Settings", 22, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
             AddText(settingsCard, "Pairing Habitat: " + (GameConfig.PairingPregnancyChance * 100f).ToString("0") +
-                "% pregnancy chance per " + (GameConfig.PairingCheckIntervalMs / 1000L).ToString() + " in-game seconds.",
+                "% pregnancy chance per pairing attempt; automatic attempts are limited to once every " +
+                (GameConfig.PairingCheckIntervalMs / 1000L).ToString() + " real-world seconds.",
                 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
             keepScreenAwakeButton = AddButtonTo(settingsCard, "Keep Screen Awake", true,
                 game.ToggleKeepScreenAwake, new Color(0.16f, 0.38f, 0.33f), 46f);

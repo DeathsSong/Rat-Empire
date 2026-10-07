@@ -90,15 +90,22 @@ namespace RatHabitat
         }
 
         // Weighted toward common pet-rat patterns while keeping rarer families
-        // in the market. The selected family is persisted on the listing.
+        // in the market. Solid/Self are excluded: the listing-level chance
+        // roll handles unmarked rats separately. The selected family is saved.
         private static readonly string[] MarkingFamilies =
         {
-            "Solid", "Solid", "Solid", "Self", "Hooded", "Hooded",
-            "Broken hooded", "Berkshire", "Berkshire", "Bareback", "Capped",
-            "Mask", "Patch", "Black-eye white", "Variegated", "Variberk",
-            "Irish", "Blaze", "Lightning blaze Siamese", "Badger blaze Siamese",
-            "Dalmatian-style", "Dominant white spotted", "White side", "Merle", "Tabby/Marble",
-            "Mismarked hooded"
+            "Hooded", "Hooded", "Hooded", "Hooded", "Hooded", "Hooded",
+            "Berkshire", "Berkshire", "Berkshire", "Berkshire", "Berkshire",
+            "Broken hooded", "Broken hooded", "Broken hooded", "Broken hooded",
+            "Bareback", "Bareback", "Bareback",
+            "Capped", "Capped", "Capped",
+            "Mask", "Mask", "Mask",
+            "Patch", "Patch", "Patch",
+            "Irish", "Irish", "Irish",
+            "Blaze", "Blaze", "Blaze",
+            "Black-eye white", "Variegated", "Variberk", "Lightning blaze Siamese",
+            "Badger blaze Siamese", "Dalmatian-style", "Dominant white spotted",
+            "White side", "Merle", "Tabby/Marble", "Mismarked hooded"
         };
 
         public static void EnsureStoreState(ColonySaveData save)
@@ -617,20 +624,17 @@ namespace RatHabitat
             int qualityCap = UpgradeSystem.StoreQualityCap(save);
             int listingCount = UpgradeSystem.StoreListingCount(save);
 
-            // Generate the pair from one shared low-stat baseline. Each rat
-            // gets a small deterministic deviation, so the starter pair feels
+            // Generate listings from one shared low-stat baseline. Each rat
+            // gets a small deterministic deviation, so the market feels
             // coordinated without becoming identical clones.
             float sharedBaseline = NextTrait(random, GameConfig.StoreLowTraitMinimum, qualityCap);
 
             long namingGameTime = save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs;
-            string firstFamily = PickMarketMarkingFamily(random);
-            string secondFamily = random.NextDouble() < GameConfig.StoreSharedMarkingFamilyChance
-                ? firstFamily
-                : PickMarketMarkingFamily(random);
+            var usedMarkedFamilies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             for (int index = 0; index < listingCount; index++)
             {
                 RatSex sex = index % 2 == 0 ? RatSex.Male : RatSex.Female;
-                string family = index % 2 == 0 ? firstFamily : secondFamily;
+                string family = PickMarketMarkingFamily(random, usedMarkedFamilies);
                 string sexName = sex == RatSex.Male ? "male" : "female";
                 // Preserve legacy identifiers for the original two cards;
                 // subsequent entries add the index and remain stable per restock.
@@ -771,15 +775,35 @@ namespace RatHabitat
             return Math.Max(minimum, Math.Min(maximum, baseline + deviation));
         }
 
-        private static string PickMarkingFamily(Random random)
+        private static string PickMarkingFamily(Random random, HashSet<string> usedFamilies)
         {
+            int availableWeight = 0;
+            for (int index = 0; index < MarkingFamilies.Length; index++)
+                if (!usedFamilies.Contains(MarkingFamilies[index]))
+                    availableWeight++;
+
+            // When every distinct marking has already appeared in a very
+            // large upgraded market, resume weighted selection with repeats.
+            if (availableWeight == 0)
+                return MarkingFamilies[random.Next(MarkingFamilies.Length)];
+
+            int selectedWeight = random.Next(availableWeight);
+            for (int index = 0; index < MarkingFamilies.Length; index++)
+            {
+                string family = MarkingFamilies[index];
+                if (usedFamilies.Contains(family)) continue;
+                if (selectedWeight-- > 0) continue;
+                usedFamilies.Add(family);
+                return family;
+            }
+
             return MarkingFamilies[random.Next(MarkingFamilies.Length)];
         }
 
-        private static string PickMarketMarkingFamily(Random random)
+        private static string PickMarketMarkingFamily(Random random, HashSet<string> usedFamilies)
         {
             return random.NextDouble() < GameConfig.StoreFounderMarkingChance
-                ? PickMarkingFamily(random)
+                ? PickMarkingFamily(random, usedFamilies)
                 : "Solid";
         }
 
