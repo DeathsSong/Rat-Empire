@@ -394,71 +394,19 @@ namespace RatHabitat
         private static HashSet<string> BuildDependentPinkieMotherIds(ColonySaveData save)
         {
             var result = new HashSet<string>();
-            if (save == null || save.rats == null) return result;
-
-            var litterMothers = new Dictionary<string, string>();
-            if (save.litters != null)
-            {
-                foreach (LitterData litter in save.litters)
-                {
-                    if (litter == null || string.IsNullOrEmpty(litter.id) ||
-                        string.IsNullOrEmpty(litter.motherId)) continue;
-                    litterMothers[litter.id] = litter.motherId;
-                }
-            }
-
-            foreach (RatData pup in save.rats)
-            {
-                if (pup == null || pup.stage != RatStage.Pinkie) continue;
-                if (!string.IsNullOrEmpty(pup.motherId))
-                {
-                    result.Add(pup.motherId);
-                    continue;
-                }
-
-                string motherId;
-                if (!string.IsNullOrEmpty(pup.litterId) &&
-                    litterMothers.TryGetValue(pup.litterId, out motherId))
-                    result.Add(motherId);
-            }
+            BreedingSystem.CopyDependentPinkieMotherIds(save, result);
             return result;
         }
 
         public static bool HasDependentPinkies(ColonySaveData save, string motherId)
         {
-            if (save == null || string.IsNullOrEmpty(motherId)) return false;
-            save.EnsureLists();
-            foreach (var rat in save.rats)
-            {
-                if (rat == null || rat.stage != RatStage.Pinkie) continue;
-                if (rat.motherId == motherId) return true;
-
-                // Older saves may have retained the litter relationship but
-                // not copied motherId onto every pup. Use that relationship as
-                // a compatibility fallback, while still checking the live
-                // Pinkie record so deleted/removed pups cannot keep a mother
-                // in the Nursery indefinitely.
-                if (string.IsNullOrEmpty(rat.litterId)) continue;
-                foreach (var litter in save.litters)
-                {
-                    if (litter != null && litter.id == rat.litterId && litter.motherId == motherId) return true;
-                }
-            }
-            return false;
+            return BreedingSystem.HasDependentPinkies(save, motherId);
         }
 
         public static bool IsPregnant(ColonySaveData save, RatData rat)
         {
-            if (save == null || rat == null || rat.sex != RatSex.Female) return false;
-            PregnancyData pending = BreedingSystem.FindPendingPregnancy(save, rat.id);
-            if (pending != null && pending.motherId == rat.id) return true;
-            if (string.IsNullOrEmpty(rat.pregnancyId)) return false;
-            foreach (var pregnancy in save.pregnancies)
-            {
-                if (pregnancy != null && pregnancy.id == rat.pregnancyId &&
-                    pregnancy.status == "pending" && pregnancy.motherId == rat.id) return true;
-            }
-            return false;
+            return save != null && rat != null && rat.sex == RatSex.Female &&
+                BreedingSystem.FindActivePregnancyForMother(save, rat) != null;
         }
 
         public static RatEnclosure DesiredEnclosure(ColonySaveData save, RatData rat, bool hasDependentPinkies)

@@ -12,6 +12,8 @@ namespace RatHabitat
     {
         public const int CurrentMigrationVersion = 2;
         public const int MaximumNameLength = 24;
+        private static readonly Dictionary<string, RatNameUseData> SaveNameHistoryIndex =
+            new Dictionary<string, RatNameUseData>(StringComparer.Ordinal);
 
         private static long CooldownMs
         {
@@ -23,6 +25,17 @@ namespace RatHabitat
             if (save == null) return false;
             save.EnsureLists();
             bool changed = MigrateLegacyNames(save, gameTime);
+            // Save normalization runs on every full-colony write. Build the
+            // history lookup once so ensuring entries for each active/retired
+            // rat is O(rats + history), not a repeated linear search through
+            // the entire historical name ledger for every rat.
+            SaveNameHistoryIndex.Clear();
+            foreach (RatNameUseData entry in save.ratNameHistory)
+            {
+                if (entry == null || string.IsNullOrEmpty(entry.normalizedName) ||
+                    SaveNameHistoryIndex.ContainsKey(entry.normalizedName)) continue;
+                SaveNameHistoryIndex.Add(entry.normalizedName, entry);
+            }
             var occupied = new HashSet<string>(StringComparer.Ordinal);
             var playerNames = new HashSet<string>(StringComparer.Ordinal);
             foreach (RatData rat in save.rats)
@@ -57,14 +70,14 @@ namespace RatHabitat
                     changed = true;
                 }
                 if (!string.IsNullOrEmpty(key)) occupied.Add(key);
-                EnsureHistoryEntry(save, rat.name, rat.sex, rat.id, gameTime);
+                EnsureHistoryEntry(save, rat.name, rat.sex, rat.id, gameTime, SaveNameHistoryIndex);
             }
 
             foreach (RatData rat in save.retiredRats)
             {
                 if (rat == null || string.IsNullOrWhiteSpace(rat.name)) continue;
                 EnsureHistoryEntry(save, rat.name, rat.sex, rat.id,
-                    rat.removedAt > 0L ? rat.removedAt : gameTime);
+                    rat.removedAt > 0L ? rat.removedAt : gameTime, SaveNameHistoryIndex);
             }
 
             foreach (StoreRatListingData listing in save.storeRatListings)
@@ -80,7 +93,7 @@ namespace RatHabitat
                     changed = true;
                 }
                 if (!string.IsNullOrEmpty(key)) occupied.Add(key);
-                EnsureHistoryEntry(save, listing.name, listing.sex, listing.id, gameTime);
+                EnsureHistoryEntry(save, listing.name, listing.sex, listing.id, gameTime, SaveNameHistoryIndex);
             }
 
             if (save.ratNameMigrationVersion < CurrentMigrationVersion)
@@ -97,6 +110,7 @@ namespace RatHabitat
                 RewriteEventNames(save, previous, listing.name);
                 changed = true;
             }
+            SaveNameHistoryIndex.Clear();
             return changed;
         }
 
@@ -551,6 +565,28 @@ namespace RatHabitat
                     ratId = ratId,
                 };
                 save.ratNameHistory.Add(entry);
+            }
+            if (entry.lastUsedGameTime <= 0L) entry.lastUsedGameTime = gameTime;
+            if (entry.lastFirstNameUsedGameTime <= 0L) SetNameParts(entry, name, entry.lastUsedGameTime);
+        }
+
+        private static void EnsureHistoryEntry(ColonySaveData save, string name, RatSex sex,
+            string ratId, long gameTime, Dictionary<string, RatNameUseData> historyIndex)
+        {
+            if (save == null || string.IsNullOrWhiteSpace(name)) return;
+            string key = NormalizeForComparison(name);
+            if (string.IsNullOrEmpty(key)) return;
+            if (!historyIndex.TryGetValue(key, out RatNameUseData entry) || entry == null)
+            {
+                entry = new RatNameUseData
+                {
+                    normalizedName = key,
+                    displayName = ColonyFactory.NormalizeDisplayName(name),
+                    sex = sex,
+                    ratId = ratId,
+                };
+                save.ratNameHistory.Add(entry);
+                historyIndex[key] = entry;
             }
             if (entry.lastUsedGameTime <= 0L) entry.lastUsedGameTime = gameTime;
             if (entry.lastFirstNameUsedGameTime <= 0L) SetNameParts(entry, name, entry.lastUsedGameTime);

@@ -624,6 +624,7 @@ namespace RatHabitat
                 RatNameSystem.RecordUsage(save, rat.name, rat.sex, rat.id, gameTime);
                 changed = true;
             }
+            if (changed) BreedingSystem.InvalidateReproductiveStateIndexes(save);
             return changed;
         }
 

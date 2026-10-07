@@ -1048,7 +1048,12 @@ namespace RatHabitat
                 RatData male;
                 RatData female;
                 bool approachStarted = false;
-                if (PairingHabitatSystem.TryChoosePair(Save, GameTime, out male, out female))
+                long pairingCheckSample = RuntimePerformanceDiagnostics.Begin(
+                    PerformanceProbeArea.MaintenancePairingChecks);
+                bool pairAvailable = PairingHabitatSystem.TryChoosePair(Save, GameTime, out male, out female);
+                RuntimePerformanceDiagnostics.End(
+                    PerformanceProbeArea.MaintenancePairingChecks, pairingCheckSample);
+                if (pairAvailable)
                 {
                     approachStarted = BeginPairingApproach(male, female);
                 }
@@ -1312,7 +1317,7 @@ namespace RatHabitat
             femaleBehavior.FinishPairingInteraction();
             pairingApproach = null;
             Save.pairingNextCheckGameTime = GameTime + GameConfig.PairingCheckIntervalMs;
-            bool pregnancyStatePersisted = false;
+            bool pregnancyStateQueued = false;
 
             if (!resolved || !conceptionSucceeded)
             {
@@ -1328,19 +1333,18 @@ namespace RatHabitat
                 // Pairing Habitat breeding approach/interaction remains
                 // silent. Resolve the announcement from the saved pregnancy
                 // record so the mother ID is always authoritative.
-                // Reconcile placement before the atomic pregnancy/announcement
-                // save so one snapshot contains the complete authoritative
-                // result. AnnounceCreatedPregnancy performs that save.
+                // Reconcile placement before queuing the pregnancy/announcement
+                // so one snapshot contains the complete authoritative result.
                 EnclosureSystem.RecalculateAssignments(Save);
-                pregnancyStatePersisted = AnnounceCreatedPregnancy(createdPregnancy);
+                pregnancyStateQueued = AnnounceCreatedPregnancy(createdPregnancy);
             }
 
             if (resolved && conceptionSucceeded)
             {
                 // A conception changes reproductive presentation and colony
                 // structure, so refresh the world and roster once. The
-                // pregnancy announcement above already persisted the full
-                // state; avoid a second full serialization.
+                // pregnancy announcement above queued the full state; avoid a
+                // second full serialization.
                 RefreshWorldAndUi(true);
             }
             else if (ui != null)
@@ -1351,7 +1355,7 @@ namespace RatHabitat
                 ui.RefreshHeader();
             }
 
-            if (!pregnancyStatePersisted)
+            if (!pregnancyStateQueued)
                 SaveSystem.QueueSave(Save, "GameBootstrap.ResolvePairingApproach");
         }
 
@@ -1365,9 +1369,9 @@ namespace RatHabitat
             RatData mother = BreedingSystem.FindRat(Save, pregnancy.motherId);
             if (mother == null || mother.sex != RatSex.Female) return false;
 
-            // Persist the pregnancy and its one-time announcement guard in a
-            // single atomic snapshot instead of writing the same full colony
-            // twice in this synchronous transition.
+            // Queue the pregnancy and its one-time announcement guard as one
+            // atomic snapshot. SaveSystem coalesces this with any other
+            // maintenance changes before serializing the full colony.
             bool previousAnnouncementState = pregnancy.pregnancyAnnouncementLogged;
             string previousStatus = StatusMessage;
             ColonyEventData previousNewestEvent = Save.eventLog != null && Save.eventLog.Count > 0
@@ -1378,7 +1382,7 @@ namespace RatHabitat
             long previousLiveExpiry = liveEventExpiresAt;
             pregnancy.pregnancyAnnouncementLogged = true;
             StatusMessage = ColonyFactory.DisplayName(mother) + " is pregnant!";
-            if (SaveSystem.Save(Save)) return true;
+            if (SaveSystem.QueueSave(Save, "GameBootstrap.AnnounceCreatedPregnancy")) return true;
             pregnancy.pregnancyAnnouncementLogged = previousAnnouncementState;
             if (Save.eventLog != null && Save.eventLog.Count > 0 &&
                 !ReferenceEquals(Save.eventLog[0], previousNewestEvent))
@@ -1723,20 +1727,16 @@ namespace RatHabitat
                 Save.storeNextRestockGameTime <= gameTime;
             due.Weaning = !weaningScheduleInitialized || nextWeaningAnnouncementGameTime <= gameTime;
 
-            if (Save.breedingSessions != null)
+            due.BreedingSession = BreedingSystem.NextActiveSessionDueGameTime(Save) <= gameTime;
+
+            // The cached list contains pending records only, rather than
+            // rescanning the full historical pregnancy ledger on every
+            // rendered frame. Before the earliest due timestamp, this loop
+            // is skipped entirely.
+            if (BreedingSystem.NextPendingPregnancyDueGameTime(Save) <= gameTime)
             {
-                foreach (DedicatedBreedingSessionData session in Save.breedingSessions)
-                {
-                    if (session != null && session.status == "active" && session.endsAt <= gameTime)
-                    {
-                        due.BreedingSession = true;
-                        break;
-                    }
-                }
-            }
-            if (Save.pregnancies != null)
-            {
-                foreach (PregnancyData pregnancy in Save.pregnancies)
+                List<PregnancyData> pendingPregnancies = BreedingSystem.GetIndexedPendingPregnancies(Save);
+                foreach (PregnancyData pregnancy in pendingPregnancies)
                 {
                     if (pregnancy == null || pregnancy.status != "pending" || pregnancy.dueAt > gameTime ||
                         !BirthRetryReady(pregnancy)) continue;
@@ -1761,17 +1761,7 @@ namespace RatHabitat
                     }
                 }
             }
-            if (Save.rats != null)
-            {
-                foreach (RatData rat in Save.rats)
-                {
-                    if (BreedingSystem.IsRecoveryTransitionDue(rat, gameTime))
-                    {
-                        due.Recovery = true;
-                        break;
-                    }
-                }
-            }
+            due.Recovery = BreedingSystem.NextRecoveryTransitionGameTime(Save) <= gameTime;
             return due.Any;
         }
 
@@ -1965,6 +1955,7 @@ namespace RatHabitat
             bool nursingPassDue = !nursingScheduleInitialized || nextNursingTickGameTime <= GameTime;
             bool alertAnnouncementStateChanged = false;
             bool birthSequenceChanged = false;
+            bool birthBatchQueued = false;
             int completedSessionCount = 0;
             int births = 0;
             List<DedicatedBreedingSessionData> completedSessions = null;
@@ -1977,7 +1968,11 @@ namespace RatHabitat
                 true;
 #endif
             TimedSimulationWorkDue timedWorkDue = default(TimedSimulationWorkDue);
+            long deadlineResolutionSample = RuntimePerformanceDiagnostics.Begin(
+                PerformanceProbeArea.MaintenanceDeadlineResolution);
             bool hasTimedWorkDue = maintenanceAllowed && IsTimedSimulationWorkDue(out timedWorkDue);
+            RuntimePerformanceDiagnostics.End(
+                PerformanceProbeArea.MaintenanceDeadlineResolution, deadlineResolutionSample);
             bool dailyMaintenanceDue = !colonyMaintenanceInitialized || GameTime >= nextColonyMaintenanceGameTime;
             bool ageTransitionDue = !ageTransitionScheduleInitialized || GameTime >= nextAgeTransitionGameTime;
             bool maintenanceDue = maintenanceAllowed &&
@@ -2036,11 +2031,11 @@ namespace RatHabitat
                 {
                     EnclosureSystem.ClearBreedingPair();
                     RestoreDedicatedBreedingPair();
-                    // Persist the finished session and any pregnancy before
-                    // announcing a result. A success message is only valid
-                    // after the actual pregnancy state has been written.
-                    bool resolvedStateSaved = SaveSystem.Save(Save);
-                    if (resolvedStateSaved)
+                    // Add the session result and any conception announcement
+                    // to the same authoritative maintenance batch. The final
+                    // state-change queue below persists them together instead
+                    // of synchronously serializing the entire colony here.
+                    if (completedSessions != null)
                     {
                         foreach (DedicatedBreedingSessionData completedSession in completedSessions)
                         {
@@ -2049,10 +2044,6 @@ namespace RatHabitat
                                 Save, completedSession.motherId);
                             AnnounceCreatedPregnancy(pregnancy);
                         }
-                    }
-                    else
-                    {
-                        Debug.LogWarning("[Rat Habitat] Dedicated breeding resolved but the outcome could not be saved yet.");
                     }
                     reproductiveStateChanged = true;
                 }
@@ -2088,7 +2079,6 @@ namespace RatHabitat
                 {
                     long weaningSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.MaintenanceWeanings);
                     alertAnnouncementStateChanged |= AnnounceCompletedWeanings();
-                    ScheduleNextWeaningAnnouncement();
                     RuntimePerformanceDiagnostics.End(PerformanceProbeArea.MaintenanceWeanings, weaningSample);
                 }
 
@@ -2195,10 +2185,24 @@ namespace RatHabitat
                 EndPerformanceSample();
             }
 
+            // Birth creation, pregnancy finalization, the one-time event, and
+            // the pinkie naming queue are one authoritative state change. Queue
+            // them together once after nursing has observed the newborns; the
+            // bounded save service persists the latest snapshot, while lifecycle
+            // callbacks still force an immediate write before the page leaves.
+            if (births > 0)
+            {
+                birthBatchQueued = SaveSystem.QueueSave(Save, "GameBootstrap.UpdateCore/birth-batch");
+                if (birthBatchQueued)
+                    saveTimer = 0f;
+                else
+                    StatusMessage = "Birth is safe in the colony; saving will retry automatically.";
+            }
+
             bool stateNeedsSave = activityChanged || nursingChanged || stageChanged ||
                 reproductiveStateChanged || enclosureChanged || storeChanged ||
                 births > 0 || birthSequenceChanged || completedSessionCount > 0 || alertAnnouncementStateChanged;
-            if (stateNeedsSave)
+            if (stateNeedsSave && !birthBatchQueued)
             {
                 SaveSystem.QueueSave(Save, "GameBootstrap.UpdateCore/state-change");
                 saveTimer = 0f;
@@ -3712,12 +3716,31 @@ namespace RatHabitat
 
         private bool AnnounceCompletedWeanings()
         {
-            if (Save == null || Save.litters == null) return false;
+            if (Save == null || Save.litters == null)
+            {
+                nextWeaningAnnouncementGameTime = long.MaxValue;
+                weaningScheduleInitialized = true;
+                return false;
+            }
+
             bool changed = false;
+            int recordsScanned = 0;
+            int weaningsAnnounced = 0;
+            nextWeaningAnnouncementGameTime = long.MaxValue;
+            long historicalLitterScan = RuntimePerformanceDiagnostics.Begin(
+                PerformanceProbeArea.MaintenanceHistoricalLitters);
             foreach (LitterData litter in Save.litters)
             {
+                recordsScanned++;
                 if (litter == null || litter.weaningAnnouncementLogged ||
-                    litter.weaningTimestamp <= 0L || GameTime < litter.weaningTimestamp) continue;
+                    litter.weaningTimestamp <= 0L) continue;
+
+                if (GameTime < litter.weaningTimestamp)
+                {
+                    if (litter.weaningTimestamp < nextWeaningAnnouncementGameTime)
+                        nextWeaningAnnouncementGameTime = litter.weaningTimestamp;
+                    continue;
+                }
 
                 litter.weaningAnnouncementLogged = true;
                 RatData mother = BreedingSystem.FindHistoricalRat(Save, litter.motherId);
@@ -3725,7 +3748,13 @@ namespace RatHabitat
                     ? "A litter is fully weaned."
                     : ColonyFactory.DisplayName(mother) + "'s litter is fully weaned.";
                 changed = true;
+                weaningsAnnounced++;
             }
+            RuntimePerformanceDiagnostics.End(
+                PerformanceProbeArea.MaintenanceHistoricalLitters, historicalLitterScan);
+            RuntimePerformanceDiagnostics.RecordMaintenanceWorkCount(
+                PerformanceProbeArea.MaintenanceHistoricalLitters, recordsScanned, weaningsAnnounced);
+            weaningScheduleInitialized = true;
             return changed;
         }
 
@@ -3809,7 +3838,8 @@ namespace RatHabitat
 
                 LitterData litter;
                 string reason;
-                if (!BreedingSystem.FinishPregnancy(Save, pregnancy.id, GameTime, out litter, out reason) || litter == null)
+                if (!BreedingSystem.FinishPregnancyForBatch(
+                    Save, pregnancy.id, GameTime, out litter, out reason) || litter == null)
                 {
                     sequenceChanged |= MarkBirthBlockedAndScheduleRetry(pregnancy,
                         string.IsNullOrEmpty(reason) ? "Birth transaction did not complete; pregnancy retained." : reason);
@@ -3843,7 +3873,9 @@ namespace RatHabitat
             cameraView = HabitatCameraView.Pairing;
             cameraFocusNest = false;
             cameraFollowSelectedRat = false;
-            SaveSystem.Save(Save);
+            // This transfer is part of the same due-pregnancy maintenance
+            // batch. The caller queues its complete resulting state once,
+            // including the resumed birth approach flag and any retry reason.
             RefreshWorldAndUi(false);
             return true;
         }
@@ -3873,19 +3905,10 @@ namespace RatHabitat
             string announcement = ColonyFactory.DisplayName(mother) + " has given birth to " +
                 createdPups + " " + pupWord + "!";
             StatusMessage = announcement;
-            ColonyEventData emittedEvent = Save.eventLog != null && Save.eventLog.Count > 0
-                ? Save.eventLog[0]
-                : null;
             litter.birthAnnouncementLogged = true;
-            // FinishPregnancy already durably committed the litter, pinkies,
-            // and reproductive state. Persist this one-time announcement
-            // guard once; if that write fails, roll it back so maintenance can
-            // retry without duplicating the litter.
-            if (SaveSystem.Save(Save)) return true;
-            litter.birthAnnouncementLogged = false;
-            if (emittedEvent != null && Save.eventLog != null)
-                Save.eventLog.Remove(emittedEvent);
-            return false;
+            // The live birth batch persists this together with the pregnancy,
+            // pups, and pending naming queue in one full-colony write.
+            return true;
         }
 
         public void GrowSelectedRat()
@@ -4166,7 +4189,10 @@ namespace RatHabitat
             // a speed-button press from retroactively scaling the previous
             // interval while presentation responds immediately.
             GrowthSystem.ChangeSpeedAtTimestamp(Save, normalized, GameConfig.NowMs());
-            SaveSystem.Save(Save);
+            // Speed-button taps commonly happen in quick succession. Queue
+            // the newest clock anchor/rate so SaveSystem can coalesce them
+            // instead of synchronously serializing the colony on every tap.
+            SaveSystem.QueueSave(Save, "GameBootstrap.SetSimulationSpeed");
             Debug.Log("[Rat Movement] " + MovementDiagnostics);
             if (ui != null) ui.Refresh(true);
         }
@@ -4742,7 +4768,7 @@ namespace RatHabitat
             foreach (LitterData litter in litters) QueuePendingLitterNaming(litter);
             Save.clock.lastRealTimestamp = GameConfig.NowMs();
             GrowthSystem.SetSimulationPaused(true);
-            SaveSystem.Save(Save);
+            // The caller commits this queue with the complete birth batch.
             if (ui != null) ui.OpenPendingLitterNaming();
         }
 

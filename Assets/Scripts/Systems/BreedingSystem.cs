@@ -13,12 +13,104 @@ namespace RatHabitat
             new Dictionary<string, PregnancyData>(StringComparer.Ordinal);
         private static readonly Dictionary<string, PregnancyData> PendingPregnancyById =
             new Dictionary<string, PregnancyData>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, PregnancyData> PendingPregnancyByParticipant =
+            new Dictionary<string, PregnancyData>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, PregnancyData> FinishedPregnancyByLitterId =
+            new Dictionary<string, PregnancyData>(StringComparer.Ordinal);
+        private static readonly List<PregnancyData> PendingPregnancyRecords = new List<PregnancyData>();
+        private static readonly Dictionary<string, RatData> HistoricalRatById =
+            new Dictionary<string, RatData>(StringComparer.Ordinal);
         private static readonly Dictionary<string, long> LatestBirthByMother =
             new Dictionary<string, long>(StringComparer.Ordinal);
         private static readonly Dictionary<string, string> MotherByLitterId =
             new Dictionary<string, string>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, LitterData> LitterById =
+            new Dictionary<string, LitterData>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, LitterData> LitterByPupId =
+            new Dictionary<string, LitterData>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, DedicatedBreedingSessionData> ActiveSessionByParticipant =
+            new Dictionary<string, DedicatedBreedingSessionData>(StringComparer.Ordinal);
+        private static readonly List<DedicatedBreedingSessionData> ActiveSessionRecords =
+            new List<DedicatedBreedingSessionData>();
         private static readonly HashSet<string> MothersWithDependentPinkies =
             new HashSet<string>(StringComparer.Ordinal);
+        private static ColonySaveData indexedSave;
+        private static int indexedRatCount = -1;
+        private static int indexedRetiredRatCount = -1;
+        private static int indexedLitterCount = -1;
+        private static int indexedPregnancyCount = -1;
+        private static int indexedSessionCount = -1;
+        private static bool reproductiveIndexesReady;
+        private static long nextPendingPregnancyDueGameTime = long.MaxValue;
+        private static long nextActiveSessionDueGameTime = long.MaxValue;
+        private static long nextRecoveryTransitionGameTime = long.MaxValue;
+
+        public static long NextPendingPregnancyDueGameTime(ColonySaveData save)
+        {
+            EnsureReproductiveStateIndexes(save);
+            return nextPendingPregnancyDueGameTime;
+        }
+
+        public static long NextActiveSessionDueGameTime(ColonySaveData save)
+        {
+            EnsureReproductiveStateIndexes(save);
+            return nextActiveSessionDueGameTime;
+        }
+
+        public static long NextRecoveryTransitionGameTime(ColonySaveData save)
+        {
+            EnsureReproductiveStateIndexes(save);
+            return nextRecoveryTransitionGameTime;
+        }
+
+        public static List<PregnancyData> GetIndexedPendingPregnancies(ColonySaveData save)
+        {
+            EnsureReproductiveStateIndexes(save);
+            return PendingPregnancyRecords;
+        }
+
+        public static bool HasDependentPinkies(ColonySaveData save, string motherId)
+        {
+            if (save == null || string.IsNullOrEmpty(motherId)) return false;
+            EnsureReproductiveStateIndexes(save);
+            return MothersWithDependentPinkies.Contains(motherId);
+        }
+
+        public static void CopyDependentPinkieMotherIds(ColonySaveData save, HashSet<string> destination)
+        {
+            if (save == null || destination == null) return;
+            EnsureReproductiveStateIndexes(save);
+            destination.Clear();
+            destination.UnionWith(MothersWithDependentPinkies);
+        }
+
+        public static LitterData FindLitterForPup(ColonySaveData save, RatData rat)
+        {
+            if (save == null || rat == null) return null;
+            EnsureReproductiveStateIndexes(save);
+            if (!string.IsNullOrEmpty(rat.litterId) && LitterById.TryGetValue(rat.litterId, out LitterData litter))
+                return litter;
+            if (!string.IsNullOrEmpty(rat.id) && LitterByPupId.TryGetValue(rat.id, out litter))
+                return litter;
+            return null;
+        }
+
+        public static void InvalidateReproductiveStateIndexes(ColonySaveData save)
+        {
+            if (save == null || ReferenceEquals(indexedSave, save)) reproductiveIndexesReady = false;
+        }
+
+        private static void EnsureReproductiveStateIndexes(ColonySaveData save)
+        {
+            if (save == null) return;
+            save.EnsureLists();
+            if (reproductiveIndexesReady && ReferenceEquals(indexedSave, save) &&
+                indexedRatCount == save.rats.Count && indexedLitterCount == save.litters.Count &&
+                indexedRetiredRatCount == save.retiredRats.Count &&
+                indexedPregnancyCount == save.pregnancies.Count && indexedSessionCount == save.breedingSessions.Count)
+                return;
+            BuildReproductiveStateIndexes(save);
+        }
 
         /// <summary>
         /// Recovery timestamps are historical after the state has returned to
@@ -68,29 +160,20 @@ namespace RatHabitat
 
         public static RatData FindHistoricalRat(ColonySaveData save, string id)
         {
-            RatData active = FindRat(save, id);
-            if (active != null || save == null || string.IsNullOrEmpty(id)) return active;
-            save.EnsureLists();
-            foreach (var rat in save.retiredRats)
-            {
-                if (rat != null && rat.id == id) return rat;
-            }
-            return null;
+            if (save == null || string.IsNullOrEmpty(id)) return null;
+            EnsureReproductiveStateIndexes(save);
+            return HistoricalRatById.TryGetValue(id, out RatData rat) ? rat : null;
         }
 
         public static PregnancyData FindPendingPregnancy(ColonySaveData save, string ratId)
         {
-            if (save == null) return null;
-            foreach (var pregnancy in save.pregnancies)
-            {
-                if (pregnancy != null && pregnancy.status == "pending" &&
-                    (pregnancy.motherId == ratId || pregnancy.fatherId == ratId))
-                {
-                    EnsurePregnancyTiming(pregnancy);
-                    return pregnancy;
-                }
-            }
-            return null;
+            if (save == null || string.IsNullOrEmpty(ratId)) return null;
+            EnsureReproductiveStateIndexes(save);
+            if (!PendingPregnancyByParticipant.TryGetValue(ratId, out PregnancyData pregnancy) ||
+                pregnancy == null || pregnancy.status != "pending" ||
+                (pregnancy.motherId != ratId && pregnancy.fatherId != ratId)) return null;
+            EnsurePregnancyTiming(pregnancy);
+            return pregnancy;
         }
 
         // A pregnancy record references both parents for history, but only the
@@ -99,15 +182,11 @@ namespace RatHabitat
         public static PregnancyData FindPendingPregnancyForMother(ColonySaveData save, string ratId)
         {
             if (save == null || string.IsNullOrEmpty(ratId)) return null;
-            foreach (var pregnancy in save.pregnancies)
-            {
-                if (pregnancy != null && pregnancy.status == "pending" && pregnancy.motherId == ratId)
-                {
-                    EnsurePregnancyTiming(pregnancy);
-                    return pregnancy;
-                }
-            }
-            return null;
+            EnsureReproductiveStateIndexes(save);
+            if (!PendingPregnancyByMother.TryGetValue(ratId, out PregnancyData pregnancy) ||
+                pregnancy == null || pregnancy.status != "pending" || pregnancy.motherId != ratId) return null;
+            EnsurePregnancyTiming(pregnancy);
+            return pregnancy;
         }
 
         /// <summary>
@@ -124,14 +203,13 @@ namespace RatHabitat
 
             if (!string.IsNullOrEmpty(rat.pregnancyId))
             {
-                foreach (var pregnancy in save.pregnancies)
+                EnsureReproductiveStateIndexes(save);
+                if (PendingPregnancyById.TryGetValue(rat.pregnancyId, out PregnancyData indexedPregnancy) &&
+                    indexedPregnancy != null && indexedPregnancy.status == "pending" &&
+                    indexedPregnancy.motherId == rat.id)
                 {
-                    if (pregnancy != null && pregnancy.status == "pending" &&
-                        pregnancy.id == rat.pregnancyId && pregnancy.motherId == rat.id)
-                    {
-                        EnsurePregnancyTiming(pregnancy);
-                        return pregnancy;
-                    }
+                    EnsurePregnancyTiming(indexedPregnancy);
+                    return indexedPregnancy;
                 }
             }
 
@@ -197,12 +275,10 @@ namespace RatHabitat
         public static PregnancyData FindPregnancyForLitter(ColonySaveData save, string litterId)
         {
             if (save == null || string.IsNullOrEmpty(litterId)) return null;
-            foreach (var pregnancy in save.pregnancies)
-            {
-                if (pregnancy != null && pregnancy.status == "finished" && pregnancy.litterId == litterId)
-                    return pregnancy;
-            }
-            return null;
+            EnsureReproductiveStateIndexes(save);
+            return FinishedPregnancyByLitterId.TryGetValue(litterId, out PregnancyData pregnancy)
+                ? pregnancy
+                : null;
         }
 
         private static bool ClearLegacyMalePregnancyState(ColonySaveData save, RatData rat)
@@ -225,13 +301,11 @@ namespace RatHabitat
         public static DedicatedBreedingSessionData FindActiveDedicatedSession(ColonySaveData save, string ratId)
         {
             if (save == null || string.IsNullOrEmpty(ratId)) return null;
-            save.EnsureLists();
-            foreach (var session in save.breedingSessions)
-            {
-                if (session == null || session.status != "active") continue;
-                if (session.motherId == ratId || session.fatherId == ratId) return session;
-            }
-            return null;
+            EnsureReproductiveStateIndexes(save);
+            if (!ActiveSessionByParticipant.TryGetValue(ratId, out DedicatedBreedingSessionData session) ||
+                session == null || session.status != "active" ||
+                (session.motherId != ratId && session.fatherId != ratId)) return null;
+            return session;
         }
 
         public static List<RatData> GetFertileAdultFemales(ColonySaveData save, long gameTime)
@@ -248,7 +322,6 @@ namespace RatHabitat
         {
             var result = new List<RatData>();
             if (save == null) return result;
-            RefreshReproductiveStates(save, gameTime);
             foreach (var rat in save.rats)
             {
                 if (rat == null || rat.sex != sex) continue;
@@ -730,7 +803,10 @@ namespace RatHabitat
 
         public static bool RefreshReproductiveStates(ColonySaveData save, long gameTime)
         {
-            return RefreshReproductiveStates(save, gameTime, true);
+            // Birth-transaction repair is explicitly opt-in for load/recovery.
+            // Ordinary UI, pairing, and maintenance refreshes must never walk
+            // completed historical pregnancies looking for old write gaps.
+            return RefreshReproductiveStates(save, gameTime, false);
         }
 
         /// <summary>
@@ -745,16 +821,30 @@ namespace RatHabitat
         {
             if (save == null) return false;
             save.EnsureLists();
-            bool changed = repairFinishedBirthTransactions && RepairBirthTransactions(save, gameTime);
-            if (save.pregnancies != null)
+            bool changed = false;
+            if (repairFinishedBirthTransactions)
             {
-                foreach (PregnancyData pregnancy in save.pregnancies)
-                {
-                    if (pregnancy != null && EnsurePregnancyTiming(pregnancy)) changed = true;
-                }
+                long repairSample = RuntimePerformanceDiagnostics.Begin(
+                    PerformanceProbeArea.MaintenanceBirthRepairRecovery);
+                int transactionsScanned;
+                int transactionsReopened;
+                changed = RepairBirthTransactions(save, gameTime,
+                    out transactionsScanned, out transactionsReopened);
+                RuntimePerformanceDiagnostics.End(
+                    PerformanceProbeArea.MaintenanceBirthRepairRecovery, repairSample);
+                RuntimePerformanceDiagnostics.RecordMaintenanceWorkCount(
+                    PerformanceProbeArea.MaintenanceBirthRepairRecovery,
+                    transactionsScanned, transactionsReopened);
+                if (changed) InvalidateReproductiveStateIndexes(save);
             }
 
-            BuildReproductiveStateIndexes(save);
+            // Reuse the indexed history while the save's relationship lists
+            // are unchanged. Rebuilding here on every maintenance deadline
+            // made even a no-pregnancy colony pay for a complete history scan
+            // every simulated day. Mutators invalidate the cache explicitly;
+            // list-count changes are detected by Ensure as a fallback.
+            EnsureReproductiveStateIndexes(save);
+            nextRecoveryTransitionGameTime = long.MaxValue;
             foreach (var rat in save.rats)
             {
                 if (rat == null) continue;
@@ -859,6 +949,9 @@ namespace RatHabitat
                     rat.reproductiveState = ReproductiveState.Fertile;
                 }
                 if (oldState != rat.reproductiveState) changed = true;
+                if (rat.reproductiveState == ReproductiveState.Recovery && rat.recoveryUntil > 0L &&
+                    rat.recoveryUntil < nextRecoveryTransitionGameTime)
+                    nextRecoveryTransitionGameTime = rat.recoveryUntil;
             }
             return changed;
         }
@@ -867,40 +960,113 @@ namespace RatHabitat
         {
             PendingPregnancyByMother.Clear();
             PendingPregnancyById.Clear();
+            PendingPregnancyByParticipant.Clear();
+            FinishedPregnancyByLitterId.Clear();
+            PendingPregnancyRecords.Clear();
+            HistoricalRatById.Clear();
             LatestBirthByMother.Clear();
             MotherByLitterId.Clear();
+            LitterById.Clear();
+            LitterByPupId.Clear();
+            ActiveSessionByParticipant.Clear();
+            ActiveSessionRecords.Clear();
             MothersWithDependentPinkies.Clear();
+            nextPendingPregnancyDueGameTime = long.MaxValue;
+            nextActiveSessionDueGameTime = long.MaxValue;
+            nextRecoveryTransitionGameTime = long.MaxValue;
 
             if (save.litters != null)
             {
+                long litterScan = RuntimePerformanceDiagnostics.Begin(
+                    PerformanceProbeArea.MaintenanceHistoricalLitters);
                 foreach (LitterData litter in save.litters)
                 {
-                    if (litter == null || string.IsNullOrEmpty(litter.motherId)) continue;
-                    if (!string.IsNullOrEmpty(litter.id)) MotherByLitterId[litter.id] = litter.motherId;
+                    if (litter == null) continue;
+                    if (!string.IsNullOrEmpty(litter.id))
+                    {
+                        LitterById[litter.id] = litter;
+                        if (!string.IsNullOrEmpty(litter.motherId)) MotherByLitterId[litter.id] = litter.motherId;
+                    }
+                    if (litter.pupIds != null)
+                    {
+                        foreach (string pupId in litter.pupIds)
+                            if (!string.IsNullOrEmpty(pupId) && !LitterByPupId.ContainsKey(pupId))
+                                LitterByPupId.Add(pupId, litter);
+                    }
+                    if (string.IsNullOrEmpty(litter.motherId)) continue;
                     if (litter.birthTimestamp <= 0L) continue;
                     if (!LatestBirthByMother.TryGetValue(litter.motherId, out long existingBirth) ||
                         litter.birthTimestamp > existingBirth)
                         LatestBirthByMother[litter.motherId] = litter.birthTimestamp;
                 }
+                RuntimePerformanceDiagnostics.End(
+                    PerformanceProbeArea.MaintenanceHistoricalLitters, litterScan);
+                RuntimePerformanceDiagnostics.RecordMaintenanceWorkCount(
+                    PerformanceProbeArea.MaintenanceHistoricalLitters, save.litters.Count, 0);
             }
 
             if (save.pregnancies != null)
             {
+                long pregnancyScan = RuntimePerformanceDiagnostics.Begin(
+                    PerformanceProbeArea.MaintenanceHistoricalPregnancies);
                 foreach (PregnancyData pregnancy in save.pregnancies)
                 {
-                    if (pregnancy == null || pregnancy.status != "pending") continue;
+                    if (pregnancy == null) continue;
+                    EnsurePregnancyTiming(pregnancy);
+                    if (pregnancy.status == "finished" && !string.IsNullOrEmpty(pregnancy.litterId) &&
+                        !FinishedPregnancyByLitterId.ContainsKey(pregnancy.litterId))
+                        FinishedPregnancyByLitterId.Add(pregnancy.litterId, pregnancy);
+                    if (pregnancy.status != "pending") continue;
                     if (!string.IsNullOrEmpty(pregnancy.id))
                         PendingPregnancyById[pregnancy.id] = pregnancy;
                     if (!string.IsNullOrEmpty(pregnancy.motherId) &&
                         !PendingPregnancyByMother.ContainsKey(pregnancy.motherId))
                         PendingPregnancyByMother[pregnancy.motherId] = pregnancy;
+                    if (!string.IsNullOrEmpty(pregnancy.motherId) &&
+                        !PendingPregnancyByParticipant.ContainsKey(pregnancy.motherId))
+                        PendingPregnancyByParticipant[pregnancy.motherId] = pregnancy;
+                    if (!string.IsNullOrEmpty(pregnancy.fatherId) &&
+                        !PendingPregnancyByParticipant.ContainsKey(pregnancy.fatherId))
+                        PendingPregnancyByParticipant[pregnancy.fatherId] = pregnancy;
+                    PendingPregnancyRecords.Add(pregnancy);
+                    if (pregnancy.dueAt > 0L && pregnancy.dueAt < nextPendingPregnancyDueGameTime)
+                        nextPendingPregnancyDueGameTime = pregnancy.dueAt;
+                }
+                RuntimePerformanceDiagnostics.End(
+                    PerformanceProbeArea.MaintenanceHistoricalPregnancies, pregnancyScan);
+                RuntimePerformanceDiagnostics.RecordMaintenanceWorkCount(
+                    PerformanceProbeArea.MaintenanceHistoricalPregnancies, save.pregnancies.Count, 0);
+            }
+
+            if (save.breedingSessions != null)
+            {
+                foreach (DedicatedBreedingSessionData session in save.breedingSessions)
+                {
+                    if (session == null || session.status != "active") continue;
+                    ActiveSessionRecords.Add(session);
+                    if (!string.IsNullOrEmpty(session.motherId) &&
+                        !ActiveSessionByParticipant.ContainsKey(session.motherId))
+                        ActiveSessionByParticipant[session.motherId] = session;
+                    if (!string.IsNullOrEmpty(session.fatherId) &&
+                        !ActiveSessionByParticipant.ContainsKey(session.fatherId))
+                        ActiveSessionByParticipant[session.fatherId] = session;
+                    if (session.endsAt > 0L && session.endsAt < nextActiveSessionDueGameTime)
+                        nextActiveSessionDueGameTime = session.endsAt;
                 }
             }
 
-            if (save.rats == null) return;
+            long historicalRatIndexSample = RuntimePerformanceDiagnostics.Begin(
+                PerformanceProbeArea.MaintenanceHistoricalRatIndex);
+            if (save.rats != null)
             foreach (RatData pup in save.rats)
             {
-                if (pup == null || pup.stage != RatStage.Pinkie) continue;
+                if (pup == null) continue;
+                if (!string.IsNullOrEmpty(pup.id) && !HistoricalRatById.ContainsKey(pup.id))
+                    HistoricalRatById.Add(pup.id, pup);
+                if (pup.reproductiveState == ReproductiveState.Recovery && pup.recoveryUntil > 0L &&
+                    pup.recoveryUntil < nextRecoveryTransitionGameTime)
+                    nextRecoveryTransitionGameTime = pup.recoveryUntil;
+                if (pup.stage != RatStage.Pinkie) continue;
                 if (!string.IsNullOrEmpty(pup.motherId))
                 {
                     MothersWithDependentPinkies.Add(pup.motherId);
@@ -911,6 +1077,25 @@ namespace RatHabitat
                     MotherByLitterId.TryGetValue(pup.litterId, out string motherId))
                     MothersWithDependentPinkies.Add(motherId);
             }
+            if (save.retiredRats != null)
+                foreach (RatData retiredRat in save.retiredRats)
+                    if (retiredRat != null && !string.IsNullOrEmpty(retiredRat.id) &&
+                        !HistoricalRatById.ContainsKey(retiredRat.id))
+                        HistoricalRatById.Add(retiredRat.id, retiredRat);
+            RuntimePerformanceDiagnostics.End(
+                PerformanceProbeArea.MaintenanceHistoricalRatIndex, historicalRatIndexSample);
+            RuntimePerformanceDiagnostics.RecordMaintenanceWorkCount(
+                PerformanceProbeArea.MaintenanceHistoricalRatIndex,
+                (save.rats == null ? 0 : save.rats.Count) +
+                (save.retiredRats == null ? 0 : save.retiredRats.Count), 0);
+
+            indexedSave = save;
+            indexedRatCount = save.rats.Count;
+            indexedRetiredRatCount = save.retiredRats.Count;
+            indexedLitterCount = save.litters.Count;
+            indexedPregnancyCount = save.pregnancies.Count;
+            indexedSessionCount = save.breedingSessions.Count;
+            reproductiveIndexesReady = true;
         }
 
         /// <summary>
@@ -919,28 +1104,71 @@ namespace RatHabitat
         /// clear the pregnancy before a browser save completed. Reopening the
         /// record makes the normal due/arrival path retry it safely.
         /// </summary>
-        private static bool RepairBirthTransactions(ColonySaveData save, long gameTime)
+        private static bool RepairBirthTransactions(
+            ColonySaveData save, long gameTime, out int transactionsScanned, out int transactionsReopened)
         {
+            transactionsScanned = save == null || save.pregnancies == null ? 0 : save.pregnancies.Count;
+            transactionsReopened = 0;
             if (save == null || save.pregnancies == null) return false;
+
+            // Recovery runs only while loading/importing a save. Build the
+            // identity maps once so a corrupt legacy save with many completed
+            // pregnancies does not nest a litter scan and rat scan per record.
+            var litterById = new Dictionary<string, LitterData>(StringComparer.Ordinal);
+            if (save.litters != null)
+            {
+                long litterScan = RuntimePerformanceDiagnostics.Begin(
+                    PerformanceProbeArea.MaintenanceHistoricalLitters);
+                foreach (LitterData litter in save.litters)
+                    if (litter != null && !string.IsNullOrEmpty(litter.id)) litterById[litter.id] = litter;
+                RuntimePerformanceDiagnostics.End(
+                    PerformanceProbeArea.MaintenanceHistoricalLitters, litterScan);
+                RuntimePerformanceDiagnostics.RecordMaintenanceWorkCount(
+                    PerformanceProbeArea.MaintenanceHistoricalLitters, save.litters.Count, 0);
+            }
+
+            var knownRatIds = new HashSet<string>(StringComparer.Ordinal);
+            var activeRatById = new Dictionary<string, RatData>(StringComparer.Ordinal);
+            if (save.rats != null)
+                foreach (RatData rat in save.rats)
+                    if (rat != null && !string.IsNullOrEmpty(rat.id))
+                    {
+                        knownRatIds.Add(rat.id);
+                        activeRatById[rat.id] = rat;
+                    }
+            if (save.retiredRats != null)
+                foreach (RatData rat in save.retiredRats)
+                    if (rat != null && !string.IsNullOrEmpty(rat.id)) knownRatIds.Add(rat.id);
+
             bool changed = false;
             foreach (PregnancyData pregnancy in save.pregnancies)
             {
                 if (pregnancy == null || pregnancy.status != "finished" || string.IsNullOrEmpty(pregnancy.litterId)) continue;
-                LitterData litter = FindLitterById(save, pregnancy.litterId);
-                if (litter != null && PreparedLitterIsComplete(save, litter, litter.size)) continue;
+                litterById.TryGetValue(pregnancy.litterId, out LitterData litter);
+                bool litterComplete = litter != null && litter.pupIds != null && litter.pupIds.Count > 0 &&
+                    (litter.size <= 0 || litter.pupIds.Count == litter.size);
+                if (litterComplete)
+                    foreach (string pupId in litter.pupIds)
+                        if (string.IsNullOrEmpty(pupId) || !knownRatIds.Contains(pupId))
+                        {
+                            litterComplete = false;
+                            break;
+                        }
+                if (litterComplete) continue;
 
                 pregnancy.status = "pending";
                 pregnancy.finishedAt = 0L;
                 pregnancy.litterId = null;
                 pregnancy.birthCommitState = 0;
                 pregnancy.birthFailureReason = "Previous birth had no saved litter; pregnancy reopened for retry.";
-                RatData mother = FindRat(save, pregnancy.motherId);
+                activeRatById.TryGetValue(pregnancy.motherId ?? string.Empty, out RatData mother);
                 if (mother != null)
                 {
                     mother.pregnancyId = pregnancy.id;
                     mother.reproductiveState = ReproductiveState.Pregnant;
                 }
                 changed = true;
+                transactionsReopened++;
                 UnityEngine.Debug.LogWarning("[Rat Habitat] Reopened incomplete birth " + pregnancy.id + " at game time " + gameTime + ".");
             }
             return changed;
@@ -1016,6 +1244,7 @@ namespace RatHabitat
                 expectedLitterSize = CalculateExpectedLitterSize(mother, father),
             };
             save.pregnancies.Add(pregnancy);
+            InvalidateReproductiveStateIndexes(save);
             mother.pregnancyId = pregnancy.id;
             // The father remains a historical participant, not a pregnant rat.
             // His ID is preserved on PregnancyData for litter history.
@@ -1064,6 +1293,7 @@ namespace RatHabitat
             };
             save.EnsureLists();
             save.breedingSessions.Add(session);
+            InvalidateReproductiveStateIndexes(save);
             RatActivitySystem.SetCurrent(save, parentA, "breeding", "Breeding", gameTime);
             RatActivitySystem.SetCurrent(save, parentB, "breeding", "Breeding", gameTime);
             reason = string.Empty;
@@ -1074,9 +1304,10 @@ namespace RatHabitat
         {
             resolved = new List<DedicatedBreedingSessionData>();
             if (save == null) return 0;
-            save.EnsureLists();
-            foreach (var session in save.breedingSessions)
+            EnsureReproductiveStateIndexes(save);
+            for (int index = 0; index < ActiveSessionRecords.Count; index++)
             {
+                DedicatedBreedingSessionData session = ActiveSessionRecords[index];
                 if (session == null || session.status != "active" || session.endsAt > gameTime) continue;
                 var mother = FindRat(save, session.motherId);
                 var father = FindRat(save, session.fatherId);
@@ -1098,6 +1329,7 @@ namespace RatHabitat
                 session.resolvedAt = gameTime;
                 resolved.Add(session);
             }
+            if (resolved.Count > 0) InvalidateReproductiveStateIndexes(save);
             return resolved.Count;
         }
 
@@ -1113,9 +1345,36 @@ namespace RatHabitat
                 session.resolvedAt = gameTime;
                 session.conceptionSucceeded = false;
             }
+            InvalidateReproductiveStateIndexes(save);
         }
 
         public static bool FinishPregnancy(ColonySaveData save, string pregnancyId, long gameTime, out LitterData litter, out string reason)
+        {
+            return FinishPregnancyInternal(save, pregnancyId, gameTime, true, out litter, out reason);
+        }
+
+        /// <summary>
+        /// Creates/finalizes a birth without intermediate storage writes. The caller must
+        /// persist the complete colony state, including any announcement or naming queue,
+        /// before returning control to the browser event loop.
+        /// </summary>
+        public static bool FinishPregnancyForBatch(
+            ColonySaveData save,
+            string pregnancyId,
+            long gameTime,
+            out LitterData litter,
+            out string reason)
+        {
+            return FinishPregnancyInternal(save, pregnancyId, gameTime, false, out litter, out reason);
+        }
+
+        private static bool FinishPregnancyInternal(
+            ColonySaveData save,
+            string pregnancyId,
+            long gameTime,
+            bool persistDurablePhases,
+            out LitterData litter,
+            out string reason)
         {
             litter = null;
             reason = string.Empty;
@@ -1166,7 +1425,8 @@ namespace RatHabitat
                     return false;
                 }
                 litter = prepared;
-                if (!FinalizePreparedBirth(save, pregnancy, mother, father, litter, gameTime, out reason))
+                if (!FinalizePreparedBirth(save, pregnancy, mother, father, litter, gameTime,
+                    persistDurablePhases, out reason))
                     return false;
                 return true;
             }
@@ -1271,14 +1531,16 @@ namespace RatHabitat
             pregnancy.birthCommitState = 1;
             pregnancy.birthFailureReason = string.Empty;
             save.litters.Add(litter);
-            if (!SaveSystem.Save(save))
+            InvalidateReproductiveStateIndexes(save);
+            if (persistDurablePhases && !SaveSystem.Save(save))
             {
                 reason = "Litter was created but could not be saved; retrying birth.";
                 MarkBirthBlocked(pregnancy, gameTime, reason);
                 return false;
             }
 
-            if (!FinalizePreparedBirth(save, pregnancy, mother, father, litter, gameTime, out reason))
+            if (!FinalizePreparedBirth(save, pregnancy, mother, father, litter, gameTime,
+                persistDurablePhases, out reason))
                 return false;
             return true;
         }
@@ -1290,6 +1552,7 @@ namespace RatHabitat
             RatData father,
             LitterData litter,
             long gameTime,
+            bool persistImmediately,
             out string reason)
         {
             reason = string.Empty;
@@ -1304,6 +1567,7 @@ namespace RatHabitat
             long oldFatherCooldown = father.breedingCooldownUntil;
 
             pregnancy.status = "finished";
+            InvalidateReproductiveStateIndexes(save);
             pregnancy.finishedAt = gameTime;
             pregnancy.birthCommitState = 2;
             pregnancy.birthFailureReason = string.Empty;
@@ -1323,12 +1587,17 @@ namespace RatHabitat
             RatActivitySystem.Record(save, mother, "caring", "Caring for pinkies", gameTime, "Caring for pinkies");
             RatActivitySystem.SetCurrent(save, father, "exploring", "Exploring", gameTime);
 
+            // The normal API retains the durable prepared-litter checkpoint and
+            // final-state write. The live simulation batches this transaction
+            // with its announcement/naming state and performs one atomic save.
+            if (!persistImmediately) return true;
             if (SaveSystem.Save(save)) return true;
 
             // Do not leave an in-memory finished pregnancy when its final
             // commit did not reach browser storage. The prepared litter stays
             // attached so the next pass can retry exactly this pregnancy.
             pregnancy.status = "pending";
+            InvalidateReproductiveStateIndexes(save);
             pregnancy.finishedAt = 0L;
             pregnancy.birthCommitState = 1;
             pregnancy.birthFailureReason = "Final birth state could not be saved; retrying.";
@@ -1348,9 +1617,8 @@ namespace RatHabitat
         private static LitterData FindLitterById(ColonySaveData save, string litterId)
         {
             if (save == null || save.litters == null || string.IsNullOrEmpty(litterId)) return null;
-            foreach (LitterData item in save.litters)
-                if (item != null && item.id == litterId) return item;
-            return null;
+            EnsureReproductiveStateIndexes(save);
+            return LitterById.TryGetValue(litterId, out LitterData litter) ? litter : null;
         }
 
         private static bool PreparedLitterIsComplete(ColonySaveData save, LitterData litter, int expectedSize)
@@ -1382,10 +1650,11 @@ namespace RatHabitat
         {
             var due = new List<PregnancyData>();
             if (save == null || save.pregnancies == null) return due;
-            foreach (PregnancyData pregnancy in save.pregnancies)
+            List<PregnancyData> pending = GetIndexedPendingPregnancies(save);
+            for (int index = 0; index < pending.Count; index++)
             {
+                PregnancyData pregnancy = pending[index];
                 if (pregnancy == null || pregnancy.status != "pending") continue;
-                EnsurePregnancyTiming(pregnancy);
                 if (pregnancy.dueAt <= gameTime) due.Add(pregnancy);
             }
             return due;
@@ -1414,6 +1683,7 @@ namespace RatHabitat
                     father.reproductiveState = ReproductiveState.Fertile;
                 }
             }
+            InvalidateReproductiveStateIndexes(save);
         }
     }
 
@@ -1424,6 +1694,12 @@ namespace RatHabitat
     /// </summary>
     public static class PairingHabitatSystem
     {
+        // Pairing may be scheduled every 30 in-game seconds (about 48
+        // opportunities per real second at the fastest clock rate). Reuse
+        // these main-thread scratch lists instead of allocating each check.
+        private static readonly List<RatData> MaleCandidates = new List<RatData>();
+        private static readonly List<RatData> FemaleCandidates = new List<RatData>();
+
         /// <summary>
         /// Selects one eligible male/female pair without resolving conception.
         /// The presentation layer uses this boundary to stage a physical
@@ -1435,11 +1711,12 @@ namespace RatHabitat
             male = null;
             female = null;
             if (save == null) return false;
-
-            BreedingSystem.RefreshReproductiveStates(save, gameTime);
-
-            var males = new List<RatData>();
-            var females = new List<RatData>();
+            // Maintenance/load owns the full reproductive reconciliation.
+            // Candidate eligibility below is timestamp-authoritative and
+            // uses the cached pregnancy/session indexes; a pairing attempt
+            // must not trigger birth recovery or rebuild all colony history.
+            MaleCandidates.Clear();
+            FemaleCandidates.Clear();
             foreach (var rat in save.rats)
             {
                 if (rat == null || (rat.stage != RatStage.Adult && rat.stage != RatStage.Mature) ||
@@ -1447,17 +1724,17 @@ namespace RatHabitat
 
                 string reason;
                 if (!BreedingSystem.IsBreedEligible(save, rat, gameTime, out reason)) continue;
-                if (rat.sex == RatSex.Male) males.Add(rat);
-                else if (rat.sex == RatSex.Female) females.Add(rat);
+                if (rat.sex == RatSex.Male) MaleCandidates.Add(rat);
+                else if (rat.sex == RatSex.Female) FemaleCandidates.Add(rat);
             }
 
-            Shuffle(males);
-            Shuffle(females);
-            int pairCount = Mathf.Min(males.Count, females.Count);
+            Shuffle(MaleCandidates);
+            Shuffle(FemaleCandidates);
+            int pairCount = Mathf.Min(MaleCandidates.Count, FemaleCandidates.Count);
             if (pairCount <= 0) return false;
 
-            male = males[0];
-            female = females[0];
+            male = MaleCandidates[0];
+            female = FemaleCandidates[0];
             return true;
         }
 

@@ -1581,6 +1581,45 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void SaveNameNormalizationPreservesLargeHistoryAndIsIdempotent()
+        {
+            var save = new ColonySaveData();
+            save.EnsureLists();
+            save.ratNameMigrationVersion = RatNameSystem.CurrentMigrationVersion;
+            save.rats.Add(new RatData { id = "active-name-1", name = "Mabel", sex = RatSex.Female });
+            save.rats.Add(new RatData { id = "active-name-2", name = "Otto", sex = RatSex.Male });
+            const int historySize = 256;
+            for (int index = 0; index < historySize; index++)
+            {
+                string name = "Retired Rat " + index;
+                string id = "retired-name-rat-" + index;
+                save.retiredRats.Add(new RatData { id = id, name = name, sex = RatSex.Female });
+                save.ratNameHistory.Add(new RatNameUseData
+                {
+                    normalizedName = RatNameSystem.NormalizeForComparison(name),
+                    displayName = name,
+                    ratId = id,
+                    sex = RatSex.Female,
+                    lastUsedGameTime = GameConfig.StartGameTimeMs,
+                    lastFirstNameUsedGameTime = GameConfig.StartGameTimeMs,
+                });
+            }
+
+            string activeName1 = save.rats[0].name;
+            string activeName2 = save.rats[1].name;
+            RatNameSystem.EnsureUniqueNames(save, GameConfig.StartGameTimeMs);
+            int normalizedHistoryCount = save.ratNameHistory.Count;
+            RatNameSystem.EnsureUniqueNames(save, GameConfig.StartGameTimeMs + 1L);
+
+            Assert.AreEqual(historySize + save.rats.Count, normalizedHistoryCount,
+                "Save normalization should add only the missing active-rat name records.");
+            Assert.AreEqual(normalizedHistoryCount, save.ratNameHistory.Count,
+                "Repeated save normalization must reuse historical name records.");
+            Assert.AreEqual(activeName1, save.rats[0].name);
+            Assert.AreEqual(activeName2, save.rats[1].name);
+        }
+
+        [Test]
         public void DirectParentNameInheritanceUsesOnlyTheRequestedLineageSuffixes()
         {
             ColonySaveData save = ColonyFactory.CreateNew(1000000L);
@@ -2150,6 +2189,81 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void BatchedBirthPersistsFinishedPregnancyAndWholeLitterInOneSave()
+        {
+            Func<ColonySaveData, string, bool> priorSaveInterceptor = SaveSystem.SaveInterceptorForTests;
+            string persistedJson = null;
+            int saveCount = 0;
+            SaveSystem.ClearPendingSaveQueueForTests();
+            try
+            {
+                SaveSystem.SaveInterceptorForTests = (currentSave, source) =>
+                {
+                    saveCount++;
+                    persistedJson = SaveSystem.ToJson(currentSave);
+                    return true;
+                };
+
+                const long gameTime = 2000000L;
+                ColonySaveData save = ColonyFactory.CreateNew(gameTime);
+                RatData mother = save.rats.Find(rat => rat != null && rat.sex == RatSex.Female);
+                RatData father = save.rats.Find(rat => rat != null && rat.sex == RatSex.Male);
+                PrepareStarterPairForBreeding(save, gameTime, false);
+                PregnancyData pregnancy;
+                string reason;
+                Assert.IsTrue(BreedingSystem.StartBreeding(
+                    save, mother, father, gameTime, out pregnancy, out reason), reason);
+                pregnancy.expectedLitterSize = 1;
+                pregnancy.dueAt = gameTime;
+                saveCount = 0;
+                persistedJson = null;
+
+                LitterData litter;
+                Assert.IsTrue(BreedingSystem.FinishPregnancyForBatch(
+                    save, pregnancy.id, gameTime, out litter, out reason), reason);
+                Assert.AreEqual(0, saveCount,
+                    "The simulation batch defers storage until announcement and naming state are included.");
+                Assert.AreEqual("finished", pregnancy.status);
+                Assert.IsNotNull(litter);
+                Assert.AreEqual(1, litter.pupIds.Count);
+
+                // These are the final pieces the live caller adds after the
+                // pregnancy transaction and before its single batch commit.
+                save.eventLog.Insert(0, new ColonyEventData
+                {
+                    gameTimeMs = gameTime,
+                    message = "The mother has given birth to 1 pup!",
+                    category = EventLogPolicy.Birth,
+                });
+                litter.birthAnnouncementLogged = true;
+                save.pendingNamingLitterIds.Add(litter.id);
+
+                Assert.IsTrue(SaveSystem.Save(save, "test/birth-batch"));
+                Assert.AreEqual(1, saveCount,
+                    "A complete birth batch serializes the full colony exactly once.");
+                ColonySaveData restored = SaveSystem.FromJson(persistedJson);
+                PregnancyData restoredPregnancy = restored.pregnancies.Find(item =>
+                    item != null && item.id == pregnancy.id);
+                Assert.IsNotNull(restoredPregnancy);
+                Assert.AreEqual("finished", restoredPregnancy.status);
+                LitterData restoredLitter = restored.litters.Find(item =>
+                    item != null && item.id == litter.id);
+                Assert.IsNotNull(restoredLitter);
+                Assert.AreEqual(1, restoredLitter.pupIds.Count);
+                Assert.IsTrue(restoredLitter.birthAnnouncementLogged);
+                Assert.IsNotNull(BreedingSystem.FindRat(restored, restoredLitter.pupIds[0]));
+                Assert.IsTrue(restored.pendingNamingLitterIds.Contains(litter.id),
+                    "The naming blocker is persisted together with the completed litter.");
+                Assert.AreEqual("The mother has given birth to 1 pup!", restored.eventLog[0].message);
+            }
+            finally
+            {
+                SaveSystem.SaveInterceptorForTests = priorSaveInterceptor;
+                SaveSystem.ClearPendingSaveQueueForTests();
+            }
+        }
+
+        [Test]
         public void BehaviorDeltaFollowsSelectedSimulationSpeed()
         {
             // This also exercises a slower WebGL frame. No elapsed real time
@@ -2223,13 +2337,149 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void WorldMovementDistanceMatchesCalendarAcrossLiveSpeedTransitions()
+        {
+            const float baseWorldSpeed = 0.75f;
+            const long realIntervalMs = 1000L;
+            float[] speeds = { 1f, 2f, 3f, 1f };
+            long realNow = 10000L;
+            GrowthSystem.SetSimulationPaused(false);
+            ColonySaveData save = ColonyFactory.CreateNew(realNow);
+            save.clock.gameTimeMs = GameConfig.StartGameTimeMs;
+            save.clock.lastRealTimestamp = realNow;
+            save.clock.speed = 1f;
+            var root = new GameObject("calendar-synchronized-moving rat");
+            Vector3 target = new Vector3(100000f, 0f, 0f);
+
+            try
+            {
+                for (int segment = 0; segment < speeds.Length; segment++)
+                {
+                    GrowthSystem.ChangeSpeedAtTimestamp(save, speeds[segment], realNow);
+                    long calendarBefore = save.clock.gameTimeMs;
+                    long nextRealTimestamp = realNow + realIntervalMs;
+                    GrowthSystem.AdvanceClock(save, nextRealTimestamp);
+                    long calendarDeltaMs = save.clock.gameTimeMs - calendarBefore;
+
+                    float movementDelta = GrowthSystem.SimulationMovementDeltaSeconds(
+                        realIntervalMs / 1000f);
+                    float movementBudget = GrowthSystem.SimulationMovementTimeBudget(movementDelta);
+                    Vector3 before = root.transform.position;
+                    root.transform.position = GrowthSystem.SimulationMovementTargetPosition(
+                        before, target, baseWorldSpeed, movementDelta, ref movementBudget);
+                    float actualDistance = Vector3.Distance(before, root.transform.position);
+                    // One authored movement second equals the 1x calendar rate
+                    // (one in-game minute per real second). Normalize the
+                    // authoritative clock delta against that baseline so the
+                    // comparison measures only the selected 1x/60x/1440x rate.
+                    double baselineCalendarMillisecondsPerMovementSecond =
+                        GrowthSystem.SimulationMillisecondsPerRealSecond(1f);
+                    float calendarMovementSeconds = (float)(calendarDeltaMs /
+                        baselineCalendarMillisecondsPerMovementSecond);
+                    float calendarDistance = baseWorldSpeed * calendarMovementSeconds;
+
+                    Assert.AreEqual(calendarDistance, actualDistance, 0.002f,
+                        "World-space travel must use the same single game-time multiplier as the calendar at " +
+                        speeds[segment] + "x (segment " + segment + ").");
+                    Assert.LessOrEqual(actualDistance, calendarDistance + 0.002f,
+                        "A speed transition must not teleport the rat or add movement backlog.");
+                    realNow = nextRealTimestamp;
+                }
+            }
+            finally
+            {
+                GrowthSystem.SetRuntimeSpeed(1f);
+                GrowthSystem.SetSimulationPaused(false);
+                Object.DestroyImmediate(root);
+            }
+        }
+
+        [Test]
+        public void RoutineReproductiveMaintenanceScansHistoryOnceAndNeverRunsBirthRepair()
+        {
+            bool wasCapturing = RuntimePerformanceDiagnostics.CaptureEnabled;
+            ColonySaveData save = ColonyFactory.CreateNew(GameConfig.NowMs());
+            const int historyCount = 128;
+            for (int index = 0; index < historyCount; index++)
+            {
+                string motherId = "retired-mother-" + index;
+                save.litters.Add(new LitterData
+                {
+                    id = "indexed-history-litter-" + index,
+                    motherId = motherId,
+                    birthTimestamp = GameConfig.StartGameTimeMs + index,
+                    pupIds = new List<string> { "historical-pup-" + index },
+                    size = 1,
+                });
+                save.pregnancies.Add(new PregnancyData
+                {
+                    id = "indexed-history-pregnancy-" + index,
+                    motherId = motherId,
+                    fatherId = "retired-father-" + index,
+                    status = "finished",
+                    finishedAt = GameConfig.StartGameTimeMs + index,
+                    litterId = "indexed-history-litter-" + index,
+                });
+                save.retiredRats.Add(new RatData { id = motherId, name = motherId });
+            }
+
+            try
+            {
+                RuntimePerformanceDiagnostics.SetCaptureEnabled(true);
+                RuntimePerformanceDiagnostics.ClearLog();
+
+                // This is the routine runtime path, including a second pass
+                // over unchanged data. A finished record with incomplete old
+                // history must not be reopened outside load/recovery.
+                BreedingSystem.RefreshReproductiveStates(save, save.clock.gameTimeMs);
+                BreedingSystem.RefreshReproductiveStates(save, save.clock.gameTimeMs + 1L);
+                BreedingSystem.HasDependentPinkies(save, "no-dependent-pinkies");
+                BreedingSystem.FindLitterForPup(save, new RatData { id = "historical-pup-10" });
+                for (int index = 0; index < historyCount; index++)
+                {
+                    Assert.AreSame(save.retiredRats[index],
+                        BreedingSystem.FindHistoricalRat(save, save.retiredRats[index].id));
+                    Assert.AreSame(save.pregnancies[index],
+                        BreedingSystem.FindPregnancyForLitter(save, save.litters[index].id));
+                }
+                BreedingSystem.NextPendingPregnancyDueGameTime(save);
+
+                Assert.AreEqual("finished", save.pregnancies[0].status,
+                    "Completed-birth repair is load/recovery-only, not routine maintenance.");
+                Assert.AreEqual(1, RuntimePerformanceDiagnostics.WindowCallCount(
+                    PerformanceProbeArea.MaintenanceHistoricalLitters),
+                    "An unchanged history ledger should be indexed once and reused across routine refreshes.");
+                Assert.AreEqual(1, RuntimePerformanceDiagnostics.WindowCallCount(
+                    PerformanceProbeArea.MaintenanceHistoricalPregnancies),
+                    "An unchanged pregnancy ledger should be indexed once and reused across routine refreshes.");
+                Assert.AreEqual(historyCount, RuntimePerformanceDiagnostics.WindowWorkCount(
+                    PerformanceProbeArea.MaintenanceHistoricalLitters));
+                Assert.AreEqual(historyCount, RuntimePerformanceDiagnostics.WindowWorkCount(
+                    PerformanceProbeArea.MaintenanceHistoricalPregnancies));
+                Assert.AreEqual(1, RuntimePerformanceDiagnostics.WindowCallCount(
+                    PerformanceProbeArea.MaintenanceHistoricalRatIndex),
+                    "Historical rat lookups must reuse one active/retired ID index rather than scan the colony per litter.");
+                Assert.AreEqual(historyCount + save.rats.Count, RuntimePerformanceDiagnostics.WindowWorkCount(
+                    PerformanceProbeArea.MaintenanceHistoricalRatIndex));
+                Assert.AreEqual(0, RuntimePerformanceDiagnostics.WindowCallCount(
+                    PerformanceProbeArea.MaintenanceBirthRepairRecovery));
+            }
+            finally
+            {
+                RuntimePerformanceDiagnostics.ClearLog();
+                RuntimePerformanceDiagnostics.SetCaptureEnabled(wasCapturing);
+                BreedingSystem.InvalidateReproductiveStateIndexes(save);
+            }
+        }
+
+        [Test]
         public void MovingColoniesWithPinkiesKeepFastForwardMovementAndBoundedBehaviorWork()
         {
             const float baseWorldSpeed = 0.75f;
             const float realFrameSeconds = 1f / 60f;
             const int frameCount = 120;
-            int[] colonySizes = { 10, 20, 30 };
-            int[] pinkieCounts = { 3, 5, 7 };
+            int[] colonySizes = { 10, 12, 20, 30 };
+            int[] pinkieCounts = { 3, 4, 5, 7 };
 
             try
             {
@@ -3238,6 +3488,11 @@ namespace RatHabitat.Tests
             save.colonyCredits = 10000;
             save.rats[0].enclosure = RatEnclosure.Pairing;
             save.rats[0].pairingHabitatAssigned = true;
+            RatData otherStarter = save.rats[1];
+            otherStarter.enclosure = otherStarter.sex == RatSex.Male
+                ? RatEnclosure.MaleColony
+                : RatEnclosure.FemaleColony;
+            otherStarter.pairingHabitatAssigned = false;
             RatData pinkie = CreateSaleTestRat(save, "capacity-persist-pinkie", RatSex.Female,
                 1f, RatStage.Pinkie);
             pinkie.enclosure = RatEnclosure.Pairing;

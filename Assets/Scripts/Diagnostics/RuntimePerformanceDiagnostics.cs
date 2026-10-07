@@ -39,6 +39,12 @@ namespace RatHabitat
         MaintenanceActivities,
         MaintenanceEnclosures,
         MaintenanceSaleEligibility,
+        MaintenanceDeadlineResolution,
+        MaintenancePairingChecks,
+        MaintenanceHistoricalLitters,
+        MaintenanceHistoricalPregnancies,
+        MaintenanceHistoricalRatIndex,
+        MaintenanceBirthRepairRecovery,
         PairingMovement,
         RatBehaviorUpdate,
         RatBehaviorLateUpdate,
@@ -129,6 +135,23 @@ namespace RatHabitat
         public int MaintenanceEnclosuresPasses;
         public float MaintenanceSaleEligibilityMs;
         public int MaintenanceSaleEligibilityPasses;
+        public float MaintenanceDeadlineResolutionMs;
+        public int MaintenanceDeadlineResolutionPasses;
+        public float MaintenancePairingChecksMs;
+        public int MaintenancePairingChecksPasses;
+        public float MaintenanceHistoricalLittersMs;
+        public int MaintenanceHistoricalLitterScans;
+        public long MaintenanceHistoricalLitterRecords;
+        public float MaintenanceHistoricalPregnanciesMs;
+        public int MaintenanceHistoricalPregnancyScans;
+        public long MaintenanceHistoricalPregnancyRecords;
+        public float MaintenanceHistoricalRatIndexMs;
+        public int MaintenanceHistoricalRatIndexScans;
+        public long MaintenanceHistoricalRatIndexRecords;
+        public float MaintenanceBirthRepairRecoveryMs;
+        public int MaintenanceBirthRepairRecoveryPasses;
+        public long MaintenanceBirthRepairRecordsScanned;
+        public long MaintenanceBirthRepairTransactionsReopened;
         public float NursingMs;
         public int NursingPasses;
         public float UiRefreshMs;
@@ -167,6 +190,11 @@ namespace RatHabitat
     /// </summary>
     public static class RuntimePerformanceDiagnostics
     {
+        // Identifies the Git source baseline used for the local verification
+        // build. The +worktree suffix distinguishes uncommitted source edits
+        // from the checked-in WebGL bundle.
+        public const string BuildRevision = "85e784b+worktree";
+
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
         private static readonly string[] SampleNames =
         {
@@ -182,6 +210,11 @@ namespace RatHabitat
             "Rat Empire/Measured/Maintenance Activities",
             "Rat Empire/Measured/Maintenance Enclosures",
             "Rat Empire/Measured/Maintenance Sale Eligibility",
+            "Rat Empire/Measured/Maintenance Deadline Resolution",
+            "Rat Empire/Measured/Maintenance Pairing Checks",
+            "Rat Empire/Measured/Maintenance Historical Litter Scan",
+            "Rat Empire/Measured/Maintenance Historical Pregnancy Scan",
+            "Rat Empire/Measured/Maintenance Birth Repair and Recovery",
             "Rat Empire/Measured/Pairing Movement",
             "Rat Empire/Measured/Rat Behavior Update",
             "Rat Empire/Measured/Rat Behavior LateUpdate",
@@ -204,6 +237,8 @@ namespace RatHabitat
         private static readonly long[] WindowTicks = new long[(int)PerformanceProbeArea.Count];
         private static readonly long[] MaxTicks = new long[(int)PerformanceProbeArea.Count];
         private static readonly int[] Calls = new int[(int)PerformanceProbeArea.Count];
+        private static readonly long[] WindowWorkCounts = new long[(int)PerformanceProbeArea.Count];
+        private static readonly long[] WindowChangedCounts = new long[(int)PerformanceProbeArea.Count];
         private static readonly StringBuilder SummaryBuilder = new StringBuilder(512);
         private static readonly StringBuilder SaveSourceBuilder = new StringBuilder(256);
         private static readonly string[] SaveSourceNames = new string[16];
@@ -359,6 +394,26 @@ namespace RatHabitat
             return Calls[(int)area];
         }
 
+        public static long WindowWorkCount(PerformanceProbeArea area)
+        {
+            return WindowWorkCounts[(int)area];
+        }
+
+        public static long WindowChangedCount(PerformanceProbeArea area)
+        {
+            return WindowChangedCounts[(int)area];
+        }
+
+        public static void RecordMaintenanceWorkCount(
+            PerformanceProbeArea area, long recordsScanned, long recordsChanged)
+        {
+            if (!captureEnabled) return;
+            int index = (int)area;
+            if (index < 0 || index >= WindowWorkCounts.Length) return;
+            WindowWorkCounts[index] += Math.Max(0L, recordsScanned);
+            WindowChangedCounts[index] += Math.Max(0L, recordsChanged);
+        }
+
         public static void RecordBrowserTelemetry(float averageFrameGapMs, float worstFrameGapMs,
             int frameCount, int longTaskCount, float longTaskTotalMs, float longTaskMaxMs,
             bool pageVisible, bool pageFocused, bool pageWasHidden, bool pageWasUnfocused,
@@ -437,6 +492,12 @@ namespace RatHabitat
             TrackWorstSubsystem("Maintenance/activities", sample.MaintenanceActivitiesMs);
             TrackWorstSubsystem("Maintenance/enclosures", sample.MaintenanceEnclosuresMs);
             TrackWorstSubsystem("Maintenance/sale eligibility", sample.MaintenanceSaleEligibilityMs);
+            TrackWorstSubsystem("Maintenance/deadline resolution", sample.MaintenanceDeadlineResolutionMs);
+            TrackWorstSubsystem("Maintenance/pairing checks", sample.MaintenancePairingChecksMs);
+            TrackWorstSubsystem("Maintenance/historical litters", sample.MaintenanceHistoricalLittersMs);
+            TrackWorstSubsystem("Maintenance/historical pregnancies", sample.MaintenanceHistoricalPregnanciesMs);
+            TrackWorstSubsystem("Maintenance/historical rat index", sample.MaintenanceHistoricalRatIndexMs);
+            TrackWorstSubsystem("Maintenance/birth repair recovery", sample.MaintenanceBirthRepairRecoveryMs);
             TrackWorstSubsystem("Nursing", sample.NursingMs);
             TrackWorstSubsystem("Simulation", sample.SimulationMs);
             TrackWorstSubsystem("UI refresh", sample.UiRefreshMs);
@@ -564,6 +625,23 @@ namespace RatHabitat
                 MaintenanceEnclosuresPasses = WindowCallCount(PerformanceProbeArea.MaintenanceEnclosures),
                 MaintenanceSaleEligibilityMs = WindowMilliseconds(PerformanceProbeArea.MaintenanceSaleEligibility),
                 MaintenanceSaleEligibilityPasses = WindowCallCount(PerformanceProbeArea.MaintenanceSaleEligibility),
+                MaintenanceDeadlineResolutionMs = WindowMilliseconds(PerformanceProbeArea.MaintenanceDeadlineResolution),
+                MaintenanceDeadlineResolutionPasses = WindowCallCount(PerformanceProbeArea.MaintenanceDeadlineResolution),
+                MaintenancePairingChecksMs = WindowMilliseconds(PerformanceProbeArea.MaintenancePairingChecks),
+                MaintenancePairingChecksPasses = WindowCallCount(PerformanceProbeArea.MaintenancePairingChecks),
+                MaintenanceHistoricalLittersMs = WindowMilliseconds(PerformanceProbeArea.MaintenanceHistoricalLitters),
+                MaintenanceHistoricalLitterScans = WindowCallCount(PerformanceProbeArea.MaintenanceHistoricalLitters),
+                MaintenanceHistoricalLitterRecords = WindowWorkCounts[(int)PerformanceProbeArea.MaintenanceHistoricalLitters],
+                MaintenanceHistoricalPregnanciesMs = WindowMilliseconds(PerformanceProbeArea.MaintenanceHistoricalPregnancies),
+                MaintenanceHistoricalPregnancyScans = WindowCallCount(PerformanceProbeArea.MaintenanceHistoricalPregnancies),
+                MaintenanceHistoricalPregnancyRecords = WindowWorkCounts[(int)PerformanceProbeArea.MaintenanceHistoricalPregnancies],
+                MaintenanceHistoricalRatIndexMs = WindowMilliseconds(PerformanceProbeArea.MaintenanceHistoricalRatIndex),
+                MaintenanceHistoricalRatIndexScans = WindowCallCount(PerformanceProbeArea.MaintenanceHistoricalRatIndex),
+                MaintenanceHistoricalRatIndexRecords = WindowWorkCounts[(int)PerformanceProbeArea.MaintenanceHistoricalRatIndex],
+                MaintenanceBirthRepairRecoveryMs = WindowMilliseconds(PerformanceProbeArea.MaintenanceBirthRepairRecovery),
+                MaintenanceBirthRepairRecoveryPasses = WindowCallCount(PerformanceProbeArea.MaintenanceBirthRepairRecovery),
+                MaintenanceBirthRepairRecordsScanned = WindowWorkCounts[(int)PerformanceProbeArea.MaintenanceBirthRepairRecovery],
+                MaintenanceBirthRepairTransactionsReopened = WindowChangedCounts[(int)PerformanceProbeArea.MaintenanceBirthRepairRecovery],
                 NursingMs = WindowMilliseconds(PerformanceProbeArea.NursingUpdate),
                 NursingPasses = WindowCallCount(PerformanceProbeArea.NursingUpdate),
                 UiRefreshMs = WindowMilliseconds(PerformanceProbeArea.UiRefresh),
@@ -638,6 +716,7 @@ namespace RatHabitat
             PerformanceLogSample latest = SampleAt(sampleCount - 1);
             ExportBuilder.Length = 0;
             ExportBuilder.Append(captureEnabled ? "CAPTURE ON" : "CAPTURE OFF")
+                .Append(" • source ").Append(BuildRevision)
                 .Append(" • ").Append(latest.CurrentPanel ?? "None")
                 .Append(" • ").Append(GameCalendar.FormatTimestamp(latest.GameTimeMs))
                 .Append(" • ").Append(latest.Speed).Append('x')
@@ -671,6 +750,18 @@ namespace RatHabitat
                 .Append(latest.MaintenanceSaleEligibilityMs.ToString("0.00", CultureInfo.InvariantCulture))
                 .Append(" ms; nursing ").Append(latest.NursingMs.ToString("0.00", CultureInfo.InvariantCulture))
                 .Append(" ms x").Append(latest.NursingPasses)
+                .Append(" • deadline/pairing/histL/histP/repair ms ")
+                .Append(latest.MaintenanceDeadlineResolutionMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(latest.MaintenancePairingChecksMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(latest.MaintenanceHistoricalLittersMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(latest.MaintenanceHistoricalPregnanciesMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(latest.MaintenanceHistoricalRatIndexMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(latest.MaintenanceBirthRepairRecoveryMs.ToString("0.00", CultureInfo.InvariantCulture))
+                .Append("; hist records L/P/R ").Append(latest.MaintenanceHistoricalLitterRecords).Append('/')
+                .Append(latest.MaintenanceHistoricalPregnancyRecords).Append('/')
+                .Append(latest.MaintenanceHistoricalRatIndexRecords)
+                .Append("; birth repair scanned/reopened ").Append(latest.MaintenanceBirthRepairRecordsScanned).Append('/')
+                .Append(latest.MaintenanceBirthRepairTransactionsReopened)
                 .Append(" • save ").Append(FormatMetric(latest.SaveStorageMs)).Append(" x")
                 .Append(latest.SaveStorageOperations).Append(" ops/JSON ").Append(latest.SerializedDataBytes)
                 .Append(" B total, max ").Append(latest.LargestSerializedDataBytes).Append(" B")
@@ -767,7 +858,7 @@ namespace RatHabitat
             }
             else
             {
-                ExportBuilder.AppendLine("record,severity,utc,game_day_time,speed,fps,avg_frame_ms,worst_frame_ms,cpu_main_ms,gpu_ms,unattributed_frame_gap_ms,browser_avg_frame_gap_ms,browser_worst_frame_gap_ms,browser_gap_within_unity_cpu_ms,browser_gap_outside_unity_cpu_ms,browser_frame_count,browser_telemetry_available,page_visible,page_focused,page_hidden_during_window,page_unfocused_during_window,long_task_api_available,long_task_count,long_task_total_ms,long_task_max_ms,gc_alloc_bytes,gc0,gc1,gc2,rats,pinkies,animators,renderers,ui_graphics,canvases,simulation_steps,simulation_probe_calls,rat_behavior_updates,repeated_rat_behavior_updates,simulation_ms,maintenance_ms,maintenance_passes,maintenance_growth_ms,maintenance_growth_passes,maintenance_reproductive_ms,maintenance_reproductive_passes,maintenance_store_ms,maintenance_store_passes,maintenance_sessions_ms,maintenance_sessions_passes,maintenance_births_ms,maintenance_births_passes,maintenance_weanings_ms,maintenance_weanings_passes,maintenance_activities_ms,maintenance_activities_passes,maintenance_enclosures_ms,maintenance_enclosures_passes,maintenance_sale_eligibility_ms,maintenance_sale_eligibility_passes,nursing_ms,nursing_passes,ui_refresh_ms,rat_ai_movement_ms,rat_target_selection_ms,world_movement_integration_ms,rat_spacing_ms,animation_ms,grounding_bounds_ms,presentation_ms,presentation_updates,save_storage_ms,save_storage_operations,serialized_data_bytes_total,serialized_data_bytes_max,save_queue_requests,save_queue_coalesced_requests,save_source,save_export_ms,save_export_operations,input_ms,panel");
+                ExportBuilder.AppendLine("record,severity,source_revision,utc,game_day_time,speed,fps,avg_frame_ms,worst_frame_ms,cpu_main_ms,gpu_ms,unattributed_frame_gap_ms,browser_avg_frame_gap_ms,browser_worst_frame_gap_ms,browser_gap_within_unity_cpu_ms,browser_gap_outside_unity_cpu_ms,browser_frame_count,browser_telemetry_available,page_visible,page_focused,page_hidden_during_window,page_unfocused_during_window,long_task_api_available,long_task_count,long_task_total_ms,long_task_max_ms,gc_alloc_bytes,gc0,gc1,gc2,rats,pinkies,animators,renderers,ui_graphics,canvases,simulation_steps,simulation_probe_calls,rat_behavior_updates,repeated_rat_behavior_updates,simulation_ms,maintenance_ms,maintenance_passes,maintenance_growth_ms,maintenance_growth_passes,maintenance_reproductive_ms,maintenance_reproductive_passes,maintenance_store_ms,maintenance_store_passes,maintenance_sessions_ms,maintenance_sessions_passes,maintenance_births_ms,maintenance_births_passes,maintenance_weanings_ms,maintenance_weanings_passes,maintenance_activities_ms,maintenance_activities_passes,maintenance_enclosures_ms,maintenance_enclosures_passes,maintenance_sale_eligibility_ms,maintenance_sale_eligibility_passes,maintenance_deadline_resolution_ms,maintenance_deadline_resolution_passes,maintenance_pairing_checks_ms,maintenance_pairing_checks_passes,maintenance_historical_litters_ms,maintenance_historical_litter_scans,maintenance_historical_litter_records,maintenance_historical_pregnancies_ms,maintenance_historical_pregnancy_scans,maintenance_historical_pregnancy_records,maintenance_historical_rat_index_ms,maintenance_historical_rat_index_scans,maintenance_historical_rat_index_records,maintenance_birth_repair_recovery_ms,maintenance_birth_repair_recovery_passes,maintenance_birth_repair_records_scanned,maintenance_birth_repair_transactions_reopened,nursing_ms,nursing_passes,ui_refresh_ms,rat_ai_movement_ms,rat_target_selection_ms,world_movement_integration_ms,rat_spacing_ms,animation_ms,grounding_bounds_ms,presentation_ms,presentation_updates,save_storage_ms,save_storage_operations,serialized_data_bytes_total,serialized_data_bytes_max,save_queue_requests,save_queue_coalesced_requests,save_source,save_export_ms,save_export_operations,input_ms,panel");
             }
 
             for (int index = 0; index < sampleCount; index++)
@@ -934,6 +1025,7 @@ namespace RatHabitat
         private static StringBuilder AppendCompactSample(StringBuilder builder, PerformanceLogSample sample)
         {
             builder.Append(new DateTime(sample.UtcTicks, DateTimeKind.Utc).ToString("yyyy-MM-dd HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture))
+                .Append(" • src ").Append(BuildRevision)
                 .Append(" • ").Append(GameCalendar.FormatTimestamp(sample.GameTimeMs)).Append(" • ").Append(sample.Speed).Append('x')
                 .Append(" • FPS ").Append(sample.Fps.ToString("0.0", CultureInfo.InvariantCulture))
                 .Append(" • frame ").Append(sample.AverageFrameMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("/")
@@ -973,6 +1065,17 @@ namespace RatHabitat
                 .Append(sample.MaintenanceSaleEligibilityMs.ToString("0.00", CultureInfo.InvariantCulture))
                 .Append("ms • nursing ").Append(sample.NursingMs.ToString("0.00", CultureInfo.InvariantCulture))
                 .Append("ms x").Append(sample.NursingPasses)
+                .Append(" • deadline/pairing/histL/histP/repair ms ")
+                .Append(sample.MaintenanceDeadlineResolutionMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(sample.MaintenancePairingChecksMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(sample.MaintenanceHistoricalLittersMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(sample.MaintenanceHistoricalPregnanciesMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
+                .Append(sample.MaintenanceBirthRepairRecoveryMs.ToString("0.00", CultureInfo.InvariantCulture))
+                .Append(" • history records L/P/R ").Append(sample.MaintenanceHistoricalLitterRecords).Append('/')
+                .Append(sample.MaintenanceHistoricalPregnancyRecords).Append('/')
+                .Append(sample.MaintenanceHistoricalRatIndexRecords)
+                .Append(" • birth repair scan/reopen ").Append(sample.MaintenanceBirthRepairRecordsScanned).Append('/')
+                .Append(sample.MaintenanceBirthRepairTransactionsReopened)
                 .Append(" • AI/anim/ground ").Append(sample.RatAiMovementMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
                 .Append(sample.AnimationMs.ToString("0.00", CultureInfo.InvariantCulture)).Append('/')
                 .Append(sample.GroundingBoundsMs.ToString("0.00", CultureInfo.InvariantCulture)).Append("ms")
@@ -997,7 +1100,7 @@ namespace RatHabitat
 
         private static void AppendCsvRecord(StringBuilder builder, string type, string severity, PerformanceLogSample sample)
         {
-            builder.Append(type).Append(',').Append(severity).Append(',')
+            builder.Append(type).Append(',').Append(severity).Append(',').Append(BuildRevision).Append(',')
                 .Append(new DateTime(sample.UtcTicks, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture)).Append(',')
                 .Append('"').Append(GameCalendar.FormatTimestamp(sample.GameTimeMs).Replace("\"", "\"\"")).Append('"')
                 .Append(',').Append(sample.Speed).Append(',')
@@ -1050,6 +1153,23 @@ namespace RatHabitat
                 .Append(sample.MaintenanceEnclosuresPasses).Append(',')
                 .Append(sample.MaintenanceSaleEligibilityMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.MaintenanceSaleEligibilityPasses).Append(',')
+                .Append(sample.MaintenanceDeadlineResolutionMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.MaintenanceDeadlineResolutionPasses).Append(',')
+                .Append(sample.MaintenancePairingChecksMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.MaintenancePairingChecksPasses).Append(',')
+                .Append(sample.MaintenanceHistoricalLittersMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.MaintenanceHistoricalLitterScans).Append(',')
+                .Append(sample.MaintenanceHistoricalLitterRecords).Append(',')
+                .Append(sample.MaintenanceHistoricalPregnanciesMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.MaintenanceHistoricalPregnancyScans).Append(',')
+                .Append(sample.MaintenanceHistoricalPregnancyRecords).Append(',')
+                .Append(sample.MaintenanceHistoricalRatIndexMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.MaintenanceHistoricalRatIndexScans).Append(',')
+                .Append(sample.MaintenanceHistoricalRatIndexRecords).Append(',')
+                .Append(sample.MaintenanceBirthRepairRecoveryMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
+                .Append(sample.MaintenanceBirthRepairRecoveryPasses).Append(',')
+                .Append(sample.MaintenanceBirthRepairRecordsScanned).Append(',')
+                .Append(sample.MaintenanceBirthRepairTransactionsReopened).Append(',')
                 .Append(sample.NursingMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
                 .Append(sample.NursingPasses).Append(',')
                 .Append(sample.UiRefreshMs.ToString("0.000", CultureInfo.InvariantCulture)).Append(',')
@@ -1160,6 +1280,12 @@ namespace RatHabitat
                 case PerformanceProbeArea.MaintenanceActivities: return "Maint activities";
                 case PerformanceProbeArea.MaintenanceEnclosures: return "Maint enclosures";
                 case PerformanceProbeArea.MaintenanceSaleEligibility: return "Maint sale eligibility";
+                case PerformanceProbeArea.MaintenanceDeadlineResolution: return "Maint deadlines";
+                case PerformanceProbeArea.MaintenancePairingChecks: return "Maint pairing checks";
+                case PerformanceProbeArea.MaintenanceHistoricalLitters: return "History litters";
+                case PerformanceProbeArea.MaintenanceHistoricalPregnancies: return "History pregnancies";
+                case PerformanceProbeArea.MaintenanceHistoricalRatIndex: return "History rat index";
+                case PerformanceProbeArea.MaintenanceBirthRepairRecovery: return "Birth repair recovery";
                 case PerformanceProbeArea.PairingMovement: return "Pairing movement";
                 case PerformanceProbeArea.RatBehaviorUpdate: return "Rat AI";
                 case PerformanceProbeArea.RatBehaviorLateUpdate: return "Rat facing";
@@ -1187,6 +1313,8 @@ namespace RatHabitat
             Array.Clear(WindowTicks, 0, WindowTicks.Length);
             Array.Clear(MaxTicks, 0, MaxTicks.Length);
             Array.Clear(Calls, 0, Calls.Length);
+            Array.Clear(WindowWorkCounts, 0, WindowWorkCounts.Length);
+            Array.Clear(WindowChangedCounts, 0, WindowChangedCounts.Length);
             saveQueueRequestsInWindow = 0;
             saveQueueCoalescedInWindow = 0;
             serializedBytesInWindow = 0L;
@@ -1209,6 +1337,9 @@ namespace RatHabitat
         public static long Begin(PerformanceProbeArea area) { return 0L; }
         public static void End(PerformanceProbeArea area, long startedAt) { }
         public static int WindowCallCount(PerformanceProbeArea area) { return 0; }
+        public static long WindowWorkCount(PerformanceProbeArea area) { return 0L; }
+        public static long WindowChangedCount(PerformanceProbeArea area) { return 0L; }
+        public static void RecordMaintenanceWorkCount(PerformanceProbeArea area, long recordsScanned, long recordsChanged) { }
         public static void RecordSaveQueueRequest(string source, bool coalesced) { }
         public static void RecordSaveSerializedData(string source, int byteCount) { }
         public static void RecordBrowserTelemetry(float averageFrameGapMs, float worstFrameGapMs,
@@ -1517,6 +1648,23 @@ namespace RatHabitat
                     MaintenanceEnclosuresPasses = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.MaintenanceEnclosures),
                     MaintenanceSaleEligibilityMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.MaintenanceSaleEligibility),
                     MaintenanceSaleEligibilityPasses = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.MaintenanceSaleEligibility),
+                    MaintenanceDeadlineResolutionMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.MaintenanceDeadlineResolution),
+                    MaintenanceDeadlineResolutionPasses = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.MaintenanceDeadlineResolution),
+                    MaintenancePairingChecksMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.MaintenancePairingChecks),
+                    MaintenancePairingChecksPasses = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.MaintenancePairingChecks),
+                    MaintenanceHistoricalLittersMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.MaintenanceHistoricalLitters),
+                    MaintenanceHistoricalLitterScans = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.MaintenanceHistoricalLitters),
+                    MaintenanceHistoricalLitterRecords = RuntimePerformanceDiagnostics.WindowWorkCount(PerformanceProbeArea.MaintenanceHistoricalLitters),
+                    MaintenanceHistoricalPregnanciesMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.MaintenanceHistoricalPregnancies),
+                    MaintenanceHistoricalPregnancyScans = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.MaintenanceHistoricalPregnancies),
+                    MaintenanceHistoricalPregnancyRecords = RuntimePerformanceDiagnostics.WindowWorkCount(PerformanceProbeArea.MaintenanceHistoricalPregnancies),
+                    MaintenanceHistoricalRatIndexMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.MaintenanceHistoricalRatIndex),
+                    MaintenanceHistoricalRatIndexScans = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.MaintenanceHistoricalRatIndex),
+                    MaintenanceHistoricalRatIndexRecords = RuntimePerformanceDiagnostics.WindowWorkCount(PerformanceProbeArea.MaintenanceHistoricalRatIndex),
+                    MaintenanceBirthRepairRecoveryMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.MaintenanceBirthRepairRecovery),
+                    MaintenanceBirthRepairRecoveryPasses = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.MaintenanceBirthRepairRecovery),
+                    MaintenanceBirthRepairRecordsScanned = RuntimePerformanceDiagnostics.WindowWorkCount(PerformanceProbeArea.MaintenanceBirthRepairRecovery),
+                    MaintenanceBirthRepairTransactionsReopened = RuntimePerformanceDiagnostics.WindowChangedCount(PerformanceProbeArea.MaintenanceBirthRepairRecovery),
                     NursingMs = RuntimePerformanceDiagnostics.WindowMilliseconds(PerformanceProbeArea.NursingUpdate),
                     NursingPasses = RuntimePerformanceDiagnostics.WindowCallCount(PerformanceProbeArea.NursingUpdate),
                     UiRefreshMs = game == null ? 0f : game.ConsumePerformanceUiRefreshWindowMs(),

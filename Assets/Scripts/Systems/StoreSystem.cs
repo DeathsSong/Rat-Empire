@@ -597,15 +597,7 @@ namespace RatHabitat
 
         private static LitterData FindLitterForPup(ColonySaveData save, RatData rat)
         {
-            if (save == null || rat == null || save.litters == null) return null;
-            foreach (LitterData litter in save.litters)
-            {
-                if (litter == null) continue;
-                if (!string.IsNullOrEmpty(rat.litterId) && litter.id == rat.litterId) return litter;
-                if (litter.pupIds == null || string.IsNullOrEmpty(rat.id)) continue;
-                if (litter.pupIds.Contains(rat.id)) return litter;
-            }
-            return null;
+            return BreedingSystem.FindLitterForPup(save, rat);
         }
 
         private static string FormatRemainingDays(float days)

@@ -247,7 +247,7 @@ namespace RatHabitat
                 save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
             GrowthSystem.AdvanceClock(save, now);
             GrowthSystem.RefreshRatStages(save);
-            BreedingSystem.RefreshReproductiveStates(save, save.clock.gameTimeMs);
+            BreedingSystem.RefreshReproductiveStates(save, save.clock.gameTimeMs, true);
             StoreSystem.AdvanceRestock(save, save.clock.gameTimeMs);
             RatNameSystem.EnsureUniqueNames(save, save.clock.gameTimeMs);
             // Reconcile legacy saves and all relationship-driven placement
@@ -502,7 +502,8 @@ namespace RatHabitat
                 StoreSystem.EnsureStoreState(save);
                 LitterNameSystem.EnsureLitterNames(save);
                 GrowthSystem.RefreshRatStages(save);
-                BreedingSystem.RefreshReproductiveStates(save, save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
+                BreedingSystem.RefreshReproductiveStates(save,
+                    save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs, true);
                 StoreSystem.AdvanceRestock(save, save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
                 EnclosureSystem.RecalculateAssignments(save);
                 return save;
