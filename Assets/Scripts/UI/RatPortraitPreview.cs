@@ -18,7 +18,7 @@ namespace RatHabitat
         private const int PortraitResolution = 256;
         private const float PortraitElevationDegrees = 35f;
         private const float PortraitSideAngleDegrees = 40f;
-        private const float PortraitSpinDegreesPerSecond = 10f;
+        private const float PortraitSpinDegreesPerSecond = 35f;
         // CalculateFramingSize returns the projected half-extent of the
         // filtered body bounds. Keep the established fit margin and
         // presentation zoom unchanged while adding only preview rotation.
