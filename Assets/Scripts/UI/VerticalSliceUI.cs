@@ -53,6 +53,7 @@ namespace RatHabitat
         private RectTransform settingsViewport;
         private ScrollRect settingsScroll;
         private Button keepScreenAwakeButton;
+        private Button autoNamePinkiesButton;
         private Button topScreenAlertsHeading;
         private RectTransform topScreenAlertsContent;
         private bool topScreenAlertsExpanded;
@@ -337,7 +338,7 @@ namespace RatHabitat
             {
                 switch (activeMainPanel)
                 {
-                    case MainPanel.Habitat: return "Habitat";
+                    case MainPanel.Habitat: return "Tank";
                     case MainPanel.MyRats: return "My Rats";
                     case MainPanel.Breeding: return "Breeding";
                     case MainPanel.Store: return "Store";
@@ -345,7 +346,7 @@ namespace RatHabitat
                     case MainPanel.FamilyTree: return "Family Tree";
                     case MainPanel.Settings: return "Settings";
                     case MainPanel.DeveloperTools: return "Developer Tools";
-                    default: return "Habitat";
+                    default: return "Tank";
                 }
             }
         }
@@ -913,7 +914,7 @@ namespace RatHabitat
                     "  •  Fertility " + traits.fertility.ToString("0");
             }
             if (rat != null && liveProfileHabitatText != null)
-                liveProfileHabitatText.text = "Current habitat: " + EnclosureSystem.Label(rat.enclosure);
+                liveProfileHabitatText.text = "Current tank: " + EnclosureSystem.Label(rat.enclosure);
             if (rat != null && liveProfileReproductiveText != null)
                 liveProfileReproductiveText.text = "Reproductive state: " + ReproductiveStateLabel(rat);
 
@@ -1232,8 +1233,9 @@ namespace RatHabitat
             float previousNormalized = string.IsNullOrEmpty(lastSignature) ? 1f : pageScroll.verticalNormalizedPosition;
             float previousMateNormalized = mateListScroll == null ? 1f : mateListScroll.verticalNormalizedPosition;
             float previousRosterNormalized = ratRosterScroll == null ? 1f : ratRosterScroll.verticalNormalizedPosition;
-            float previousStoreNormalized = storeRatListScroll == null ? 1f : storeRatListScroll.verticalNormalizedPosition;
-            string previousStoreStructureSignature = storeRatListStructureSignature;
+            Vector2 previousStoreContentPosition = storeRatListScroll == null || storeRatListScroll.content == null
+                ? Vector2.zero
+                : storeRatListScroll.content.anchoredPosition;
             try
             {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
@@ -1287,12 +1289,10 @@ namespace RatHabitat
             }
             if (storeRatListScroll != null)
             {
-                bool storeListStructureChanged = !string.Equals(previousStoreStructureSignature,
-                    storeRatListStructureSignature, StringComparison.Ordinal);
-                if (storeRatListResetRequested || storeListStructureChanged)
+                if (storeRatListResetRequested)
                     ResetStoreRatListToTop();
                 else
-                    storeRatListScroll.verticalNormalizedPosition = previousStoreNormalized;
+                    RestoreStoreRatListPosition(previousStoreContentPosition);
             }
             storeRatListResetRequested = false;
             if (ratProfileScroll != null && ratProfileScrollRatId == (game.SelectedRat == null ? string.Empty : game.SelectedRat.id))
@@ -1516,7 +1516,7 @@ namespace RatHabitat
             habitatHomeHitTarget.gameObject.AddComponent<DirectUiClickRelay>().Configure(this, habitatHomeButton,
                 () => ToggleTopPanel(MainPanel.Habitat));
             var homeTooltip = habitatHomeHitTarget.gameObject.AddComponent<RatUiTooltip>();
-            homeTooltip.Label = "Open habitat views";
+            homeTooltip.Label = "Open tank views";
 
             walletText = AddText(headerContent, "$0", 12, new Color(1f, 0.82f, 0.38f), TextAnchor.MiddleLeft);
             walletText.rectTransform.anchorMin = new Vector2(0f, 0.59f);
@@ -1835,7 +1835,7 @@ namespace RatHabitat
                 }
             }
             AddText(welcomeCard, "Welcome to Rat Empire!", 22, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
-            AddText(welcomeCard, "You're starting with " + femaleName + " and " + maleName + " in a small habitat. Take some time to get to know them, watch their health and fertility, and move them into the Pairing Habitat when you're ready to begin breeding.", 15, Color.white, TextAnchor.UpperLeft);
+            AddText(welcomeCard, "You're starting with " + femaleName + " and " + maleName + " in a small tank. Take some time to get to know them, watch their health and fertility, and move them into the Pairing Tank when you're ready to begin breeding.", 15, Color.white, TextAnchor.UpperLeft);
             AddText(welcomeCard, "You can earn money by managing your colony, improve it with upgrades, and watch your rat family grow over time. Have fun building your little empire!", 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
             AddButtonTo(welcomeCard, "Start Playing", true, CloseWelcome, new Color(0.16f, 0.38f, 0.33f), 46f);
         }
@@ -1844,12 +1844,17 @@ namespace RatHabitat
         {
             settingsOverlay = CreateModalOverlay("Settings Popup", new Color(0.01f, 0.03f, 0.04f, 0.74f), out settingsCard);
             AddText(settingsCard, "Settings", 22, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
-            AddText(settingsCard, "Pairing Habitat: " + (GameConfig.PairingPregnancyChance * 100f).ToString("0") +
-                "% pregnancy chance per pairing attempt; automatic attempts are limited to once every " +
-                (GameConfig.PairingCheckIntervalMs / 1000L).ToString() + " real-world seconds.",
+            AddText(settingsCard, "Pairing Tank: " + (GameConfig.PairingPregnancyChance * 100f).ToString("0") +
+                "% pregnancy chance per pairing attempt; automatic pairing checks run every " +
+                (GameConfig.PairingCheckIntervalRealMs / 1000f).ToString("0.0") + " real-world seconds when no courtship is active.",
                 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
             keepScreenAwakeButton = AddButtonTo(settingsCard, "Keep Screen Awake", true,
                 game.ToggleKeepScreenAwake, new Color(0.16f, 0.38f, 0.33f), 46f);
+            autoNamePinkiesButton = AddButtonTo(settingsCard, "Auto-name Pinkies", true,
+                game.ToggleAutoNamePinkies, new Color(0.16f, 0.38f, 0.33f), 46f);
+            autoNamePinkiesButton.gameObject.name = "Settings Auto-name Pinkies";
+            AddText(settingsCard, "When on, newborn rats keep their generated names and the naming prompt is skipped.",
+                13, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
             topScreenAlertsHeading = AddButtonTo(settingsCard,
                 (topScreenAlertsExpanded ? "▾  " : "▸  ") + "Top Screen Alerts", true,
                 ToggleTopScreenAlerts, new Color(0.12f, 0.27f, 0.29f), 42f);
@@ -1918,6 +1923,7 @@ namespace RatHabitat
             settingsCard.sizeDelta = new Vector2(0f, 0f);
             settingsScroll.content = settingsCard;
             RefreshWakeLockControls();
+            RefreshAutoNamePinkiesControls();
             RefreshAlertPreferenceControls();
             RefreshCustomNameControls();
             SetOverlayVisibility();
@@ -2501,6 +2507,20 @@ namespace RatHabitat
                         : new Color(0.18f, 0.25f, 0.27f);
                 }
             }
+        }
+
+        public void RefreshAutoNamePinkiesControls()
+        {
+            if (game == null || autoNamePinkiesButton == null) return;
+            bool enabled = game.AutoNamePinkiesEnabled;
+            SetButtonLabel(autoNamePinkiesButton, enabled
+                ? "Auto-name Pinkies: On"
+                : "Auto-name Pinkies: Off");
+            Image image = autoNamePinkiesButton.GetComponent<Image>();
+            if (image != null)
+                image.color = enabled
+                    ? new Color(0.16f, 0.38f, 0.33f)
+                    : new Color(0.18f, 0.25f, 0.27f);
         }
 
         private void BuildDeveloperToolsPopup()
@@ -4122,7 +4142,7 @@ namespace RatHabitat
         private void AddBreedingIntro(RectTransform parent)
         {
             var card = CreateCard("Breeding");
-            AddText(card, "Select an adult rat in the habitat or My Rats list to begin breeding.", 14,
+            AddText(card, "Select an adult rat in the tank view or My Rats list to begin breeding.", 14,
                 new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
             if (game != null && game.SelectedRat != null)
             {
@@ -4216,8 +4236,8 @@ namespace RatHabitat
 
             int pairingCapacity = game.PairingHabitatCapacity;
             int pairingCost = game.PairingHabitatCapacityUpgradeCost;
-            AddText(card, "Pairing Habitat Capacity", 16, Color.white, TextAnchor.UpperLeft);
-            AddText(card, "Pairing Habitat: " + game.PairingHabitatCount + " / " + pairingCapacity,
+            AddText(card, "Pairing Tank Capacity", 16, Color.white, TextAnchor.UpperLeft);
+            AddText(card, "Pairing Tank: " + game.PairingHabitatCount + " / " + pairingCapacity,
                 14, new Color(0.78f, 0.88f, 0.82f), TextAnchor.UpperLeft);
             AddText(card, "Next upgrade: +" + GameConfig.PairingHabitatCapacityUpgradeStep +
                 " occupants (" + (pairingCapacity + GameConfig.PairingHabitatCapacityUpgradeStep) +
@@ -4225,8 +4245,8 @@ namespace RatHabitat
                 new Color(0.76f, 0.86f, 0.80f), TextAnchor.UpperLeft);
             bool canBuyPairingCapacity = game.Save.colonyCredits >= pairingCost;
             AddButtonTo(card, canBuyPairingCapacity
-                    ? "Increase Pairing Habitat Capacity\n$" + pairingCost
-                    : "Increase Pairing Habitat Capacity\nNeed $" + pairingCost,
+                    ? "Increase Pairing Tank Capacity\n$" + pairingCost
+                    : "Increase Pairing Tank Capacity\nNeed $" + pairingCost,
                 canBuyPairingCapacity, game.PurchasePairingHabitatCapacityUpgrade,
                 new Color(0.20f, 0.38f, 0.36f), 58f);
 
@@ -4254,10 +4274,11 @@ namespace RatHabitat
             if (category == StoreCategory.Sell && storeCategory != StoreCategory.Sell)
                 storeSellFilterState.ResetForSellPanelOpen();
             storeCategory = category;
-            storeRatListResetRequested = true;
             // Store categories are page-level controls. Always bring the
             // category bar back into view before rebuilding so a Sell list
-            // cannot leave the Buy control above the current scroll position.
+            // cannot leave the Buy control above the current page position.
+            // The nested rat list separately preserves its current content
+            // offset across this category switch.
             if (pageScroll != null)
             {
                 pageScroll.StopMovement();
@@ -4269,8 +4290,9 @@ namespace RatHabitat
 
         private void OpenStoreForRatManagement(string ratId, bool euthanize)
         {
+            bool alreadyOnStoreTab = activeMainPanel == MainPanel.Store;
             storeCategory = euthanize ? StoreCategory.Euthanize : StoreCategory.Sell;
-            storeRatListResetRequested = true;
+            if (!alreadyOnStoreTab) storeRatListResetRequested = true;
             if (!euthanize) storeSellFilterState.ResetForSellPanelOpen();
             activeMainPanel = MainPanel.Store;
             if (pageScroll != null)
@@ -4345,7 +4367,6 @@ namespace RatHabitat
                 storeSellFilterState.Selected == filter) return;
 
             storeSellFilterState.Select(filter);
-            storeRatListResetRequested = true;
             if (pageScroll != null)
             {
                 pageScroll.StopMovement();
@@ -4634,17 +4655,41 @@ namespace RatHabitat
             storeRatListScroll.verticalNormalizedPosition = 1f;
         }
 
+        private void RestoreStoreRatListPosition(Vector2 previousContentPosition)
+        {
+            if (storeRatListScroll == null || storeRatListScroll.content == null) return;
+
+            RectTransform listContent = storeRatListScroll.content;
+            RectTransform viewport = storeRatListScroll.viewport;
+            if (viewport != null)
+                LayoutRebuilder.ForceRebuildLayoutImmediate(viewport);
+            LayoutRebuilder.ForceRebuildLayoutImmediate(listContent);
+            Canvas.ForceUpdateCanvases();
+
+            // Preserve the same content-space offset across category changes,
+            // confirmation UI updates, and row removal. If the new list is
+            // shorter, clamp only to its nearest legal edge rather than
+            // restarting at the top or preserving a misleading percentage.
+            float maxScrollY = viewport == null
+                ? 0f
+                : Mathf.Max(0f, listContent.rect.height - viewport.rect.height);
+            float restoredY = Mathf.Clamp(previousContentPosition.y, 0f, maxScrollY);
+            listContent.anchoredPosition = new Vector2(previousContentPosition.x, restoredY);
+            storeRatListScroll.velocity = Vector2.zero;
+            Canvas.ForceUpdateCanvases();
+        }
+
         private void AddStoreRatCard(Transform parent, RatData rat, string actionLabel, Color actionColor,
             UnityEngine.Events.UnityAction action, bool inlineSaleConfirmation = false,
             bool actionInteractable = true, bool showFavorite = false)
         {
             if (parent == null || rat == null) return;
 
-            // Sell cards can contain a wrapped coat/markings line plus the
-            // pregnancy status and, when needed, a sale restriction/warning.
-            // Leave enough vertical room for those rows instead of forcing
-            // them to draw into each other on narrow screens.
-            float cardHeight = inlineSaleConfirmation ? 230f : showFavorite ? 172f : 158f;
+            // Confirmation replaces the action button in its existing slot;
+            // it must not change the row height and shift the surrounding list.
+            // Sell cards already reserve room for wrapped coat/marking and
+            // pregnancy/restriction details in their normal layout.
+            float cardHeight = showFavorite ? 172f : 158f;
             const float portraitSize = 88f;
             const float actionWidth = 94f;
             var card = CreateRect("Store Management Card " + rat.id, parent);
@@ -4857,9 +4902,9 @@ namespace RatHabitat
         {
             if (parent == null || game == null) return;
             var card = CreateCard(game.HabitatPageLabel);
-            AddText(card, "Swipe left or right to move between full-size habitats.",
+            AddText(card, "Swipe left or right to move between full-size tanks.",
                 13, new Color(0.78f, 0.9f, 0.82f), TextAnchor.UpperLeft);
-            AddText(card, "Pairing Habitat: " + game.PairingHabitatCount + " / " + game.PairingHabitatCapacity + " occupants",
+            AddText(card, "Pairing Tank: " + game.PairingHabitatCount + " / " + game.PairingHabitatCapacity + " occupants",
                 13, new Color(1f, 0.84f, 0.52f), TextAnchor.UpperLeft);
 
             var pagerRow = CreateRect("Habitat Pager Controls", card);
@@ -4879,7 +4924,7 @@ namespace RatHabitat
 
             if (game.PairingMoveAllConfirmationPending)
             {
-                AddText(card, "Move every rat out of Pairing Habitat? Mothers and pups will stay together in a normal habitat.",
+                AddText(card, "Move every rat out of Pairing Tank? Mothers and pups will stay together in a normal tank.",
                     13, new Color(1f, 0.55f, 0.36f), TextAnchor.UpperLeft);
                 AddButtonTo(card, "CONFIRM MOVE ALL OUT", true, game.ConfirmMoveAllOutOfPairingHabitat,
                     new Color(0.65f, 0.22f, 0.16f), 46f);
@@ -4888,7 +4933,7 @@ namespace RatHabitat
             }
             else
             {
-                AddButtonTo(card, "Move All Out of Pairing Habitat", true, game.RequestMoveAllOutOfPairingHabitat,
+                AddButtonTo(card, "Move All Out of Pairing Tank", true, game.RequestMoveAllOutOfPairingHabitat,
                     new Color(0.35f, 0.28f, 0.18f), 44f);
             }
 
@@ -5316,7 +5361,7 @@ namespace RatHabitat
                 bool pendingPregnancy = EnclosureSystem.IsPregnant(game.Save, rat);
                 bool canRemove = !((rat.stage == RatStage.Adult || rat.stage == RatStage.Mature) && rat.sex == RatSex.Female &&
                     (dependentLitter || pendingPregnancy));
-                AddButton(more, canRemove ? "Remove from Pairing Habitat" : "Remain in Pairing Habitat while caring for litter",
+                AddButton(more, canRemove ? "Remove from Pairing Tank" : "Remain in Pairing Tank while caring for litter",
                     canRemove, () => game.RemoveRatFromPairingHabitat(rat.id));
             }
             else if (liveRat)
@@ -5324,7 +5369,7 @@ namespace RatHabitat
                 // Pass the profile's ID explicitly. The profile may have been
                 // opened from family-history navigation, so the global world
                 // selection is not a safe source for this action.
-                AddButton(more, "Move to Pairing Habitat", true,
+                AddButton(more, "Move to Pairing Tank", true,
                     () => game.MoveRatToPairingHabitat(rat.id));
             }
 
@@ -5344,7 +5389,7 @@ namespace RatHabitat
             UnityEngine.Events.UnityAction returnAction = liveRat
                 ? new UnityEngine.Events.UnityAction(game.ReturnToHabitat)
                 : new UnityEngine.Events.UnityAction(() => OpenFamilyTree(rat.id));
-            AddButton(more, liveRat ? "Return to Habitat" : "Back to Family Tree", true, returnAction);
+            AddButton(more, liveRat ? "Return to Tank" : "Back to Family Tree", true, returnAction);
         }
 
         private void AddExpandedRatProfileDetails(RectTransform parent, RatData rat, int fontSize)
@@ -5371,7 +5416,7 @@ namespace RatHabitat
                 new Color(0.70f, 0.78f, 0.74f), TextAnchor.UpperLeft);
             liveProfileHabitatText = AddText(parent, string.Empty, fontSize,
                 new Color(0.78f, 0.90f, 0.82f), TextAnchor.UpperLeft);
-            BindLiveText(liveProfileHabitatText, () => "Current habitat: " + EnclosureSystem.Label(rat.enclosure));
+            BindLiveText(liveProfileHabitatText, () => "Current tank: " + EnclosureSystem.Label(rat.enclosure));
         }
 
         private void ToggleProfileMoreInformation()
@@ -5464,7 +5509,7 @@ namespace RatHabitat
 
         private void AddObjectProfile(HabitatObjectData selected)
         {
-            var card = CreateCard(selected.label + "  •  Habitat object");
+            var card = CreateCard(selected.label + "  •  Tank object");
             AddText(card, "Condition: " + selected.condition.ToString("0") + "%", 15, Color.white, TextAnchor.UpperLeft);
             AddText(card, "Tap the service button to keep this object ready for the colony.", 14, new Color(0.75f, 0.82f, 0.77f), TextAnchor.UpperLeft);
             AddButton(card, ServiceLabel(selected.type), true, game.ServiceSelectedObject);
@@ -5947,7 +5992,7 @@ namespace RatHabitat
                 game.MultipleSelectionMode ? new Color(0.28f, 0.50f, 0.34f) : new Color(0.18f, 0.34f, 0.36f), 44f);
             if (game.MultipleSelectionMode)
             {
-                AddText(card, game.SelectedGroupCount + " rats selected. Tap rows or habitat rats to toggle them, then choose a destination.",
+                AddText(card, game.SelectedGroupCount + " rats selected. Tap rows or rats in the tank view to toggle them, then choose a destination.",
                     13, new Color(0.78f, 0.9f, 0.82f), TextAnchor.UpperLeft);
                 var groupRow = CreateRect("Group Move Controls", card);
                 var groupLayout = groupRow.gameObject.AddComponent<HorizontalLayoutGroup>();
@@ -6713,25 +6758,25 @@ namespace RatHabitat
                 detailFitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
                 AddDetailedRatInformation(detailPanel, rat, 12);
                 AddRatActivityHistory(detailPanel, rat);
-                if (game != null && game.CanSellRat(rat))
+                if (game != null && game.CanReturnRatFromForSaleTank(rat))
                 {
-                    bool alreadyInSaleTank = rat.enclosure == RatEnclosure.ForSale;
+                    AddButtonTo(detailPanel, "Remove from Sale Tank", true,
+                        () => game.RemoveRatFromForSaleTank(rat.id),
+                        new Color(0.24f, 0.40f, 0.28f), 42f);
+                }
+                else if (game != null && game.CanSellRat(rat))
+                {
                     bool hasDependentPinkies = EnclosureSystem.HasDependentPinkies(game.Save, rat.id);
                     bool canMoveToSaleTank = game.CanMoveRatToForSaleTank(rat);
-                    string moveLabel = alreadyInSaleTank
-                        ? "Already in For Sale tank"
-                        : hasDependentPinkies
+                    string moveLabel = hasDependentPinkies
                             ? "Keep mother with dependent pinkies"
                             : game.ForSaleHabitatCount >= game.ForSaleHabitatCapacity
-                                ? "For Sale tank is full"
+                                ? "For Sale Tank is full"
                                 : "Send to Sale Tank";
-                    UnityEngine.Events.UnityAction moveToSaleAction = alreadyInSaleTank
-                        ? null
-                        : new UnityEngine.Events.UnityAction(() => game.MoveRatToForSaleTank(rat.id));
                     AddButtonTo(detailPanel,
                         moveLabel,
                         canMoveToSaleTank,
-                        moveToSaleAction,
+                        () => game.MoveRatToForSaleTank(rat.id),
                         canMoveToSaleTank ? new Color(0.24f, 0.40f, 0.28f) : new Color(0.18f, 0.25f, 0.27f), 42f);
                 }
                 AddButtonTo(detailPanel, "Profile", true,
@@ -6808,7 +6853,7 @@ namespace RatHabitat
                 new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
             AddText(parent, "Parents: " + ParentSummary(rat) + "  •  Litter: " + LitterNameForRat(rat), fontSize - 1,
                 new Color(0.70f, 0.78f, 0.74f), TextAnchor.UpperLeft);
-            AddText(parent, "Current habitat: " + EnclosureSystem.Label(rat.enclosure), fontSize,
+            AddText(parent, "Current tank: " + EnclosureSystem.Label(rat.enclosure), fontSize,
                 new Color(0.78f, 0.90f, 0.82f), TextAnchor.UpperLeft);
             Text reproductiveStateText = AddText(parent, string.Empty, fontSize,
                 new Color(0.72f, 0.84f, 0.78f), TextAnchor.UpperLeft);
@@ -7106,7 +7151,7 @@ namespace RatHabitat
                 if (candidate == null) continue;
                 string label = (game.IsActiveBreedingSelection(candidate.id) ? "✓ " : string.Empty) + ColonyFactory.DisplayName(candidate) +
                     "  •  " + SexLabel(candidate.sex) + "  •  Age " + GrowthSystem.FormatAge(candidate.ageDays) + "\n" +
-                    "Habitat: " + EnclosureSystem.Label(candidate.enclosure) + "\n" +
+                    "Tank: " + EnclosureSystem.Label(candidate.enclosure) + "\n" +
                     "State: " + ReproductiveStateLabel(candidate);
                 AddMateRow(listRoot, candidate, label, game.IsActiveBreedingSelection(candidate.id)
                     ? new Color(0.16f, 0.3f, 0.24f) : new Color(0.1f, 0.16f, 0.14f));
@@ -7366,7 +7411,7 @@ namespace RatHabitat
                 if (live == null) return label;
                 return (game.IsActiveBreedingSelection(live.id) ? "✓ " : string.Empty) + ColonyFactory.DisplayName(live) +
                     "  •  " + SexLabel(live.sex) + "  •  Age " + GrowthSystem.FormatAge(live.ageDays) + "\n" +
-                    "Habitat: " + EnclosureSystem.Label(live.enclosure) + "\n" +
+                    "Tank: " + EnclosureSystem.Label(live.enclosure) + "\n" +
                     "State: " + ReproductiveStateLabel(live);
             });
         }
@@ -7593,6 +7638,7 @@ namespace RatHabitat
             DeveloperAccordionGroup diagnosticsGroup = BeginDeveloperAccordion("diagnostics", "Live diagnostics");
             AddText(developerToolsCard, "Movement diagnostic: " + game.MovementDiagnostics, 12, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
             AddText(developerToolsCard, "Simulation diagnostic: " + game.SimulationPerformanceDiagnostics, 12, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
+            AddText(developerToolsCard, "Breeding diagnostic: " + PairingHabitatSystem.DiagnosticsSummary(game.Save), 12, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
             EndDeveloperAccordion(diagnosticsGroup);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             DeveloperAccordionGroup performanceGroup = BeginDeveloperAccordion("performance", "Runtime Performance Diagnostics");
@@ -7788,7 +7834,7 @@ namespace RatHabitat
                 new Color(1f, 0.48f, 0.34f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
             if (game.ResetConfirmationPending)
             {
-                AddText(developerToolsCard, "This permanently clears the local save and rebuilds the default colony, habitat, clock, founders, and UI state.", 13, new Color(1f, 0.52f, 0.36f), TextAnchor.UpperLeft);
+                AddText(developerToolsCard, "This permanently clears the local save and rebuilds the default colony, tanks, clock, founders, and UI state.", 13, new Color(1f, 0.52f, 0.36f), TextAnchor.UpperLeft);
                 Button confirmReset = AddButtonTo(developerToolsCard, "CONFIRM DESTRUCTIVE RESET", true,
                     game.ConfirmFullReset, new Color(0.68f, 0.12f, 0.1f), 50f);
                 confirmReset.gameObject.name = "Developer.DestructiveReset.Confirm";

@@ -452,8 +452,8 @@ namespace RatHabitat
             string signText = definition.enclosure == RatEnclosure.MaleColony ? "Males" :
                 definition.enclosure == RatEnclosure.FemaleColony ? "Females" :
                 definition.enclosure == RatEnclosure.Nursery ? "Nursery" :
-                definition.enclosure == RatEnclosure.ForSale ? "For Sale" : "Breeding";
-            if (definition.enclosure == RatEnclosure.Pairing) signText = "Pairing Habitat";
+                definition.enclosure == RatEnclosure.ForSale ? "For Sale Tank" : "Breeding";
+            if (definition.enclosure == RatEnclosure.Pairing) signText = "Pairing Tank";
             float signHeight = 1.82f;
             // Every player-facing sign uses the same plaque dimensions as the
             // Pairing Habitat so each full-size enclosure reads as an equal

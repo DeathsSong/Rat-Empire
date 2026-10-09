@@ -247,6 +247,7 @@ namespace RatHabitat
                 BreedingSystem.CancelDedicatedSessionsForRat(save, rat.id, gameTime);
                 rat.removalDisposition = RatRemovalDisposition.Sold;
                 rat.removedAt = gameTime;
+                EnclosureSystem.ClearSaleReturnTank(rat);
                 rat.reproductiveState = ReproductiveState.Infertile;
                 rat.pregnancyId = null;
                 RatActivitySystem.SetCurrent(save, rat, "sold", "Sold", gameTime, "Automatically sold");
@@ -278,7 +279,7 @@ namespace RatHabitat
             if (rat.nursing || EnclosureSystem.HasDependentPinkies(save, rat.id))
                 return "nursing with dependent pinkies";
             if (rat.pairingHabitatAssigned)
-                return "assigned to Pairing Habitat";
+                return "assigned to Pairing Tank";
             return string.Empty;
         }
 
@@ -290,7 +291,7 @@ namespace RatHabitat
                 result.creditedDollars + ".";
             if (result.skippedRatCount <= 0) return message;
             if (result.soldRatCount == 0) message = "No rats automatically sold.";
-            message += " " + result.skippedRatCount + " left in For Sale: ";
+            message += " " + result.skippedRatCount + " left in For Sale Tank: ";
             if (skippedDetails != null && skippedDetails.Count > 0)
                 message += string.Join(", ", skippedDetails.ToArray());
             else

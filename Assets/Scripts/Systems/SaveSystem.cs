@@ -200,6 +200,7 @@ namespace RatHabitat
             save.EnsureLists();
             EventLogPolicy.Prune(save);
             EnsureMyRatsSortState(save);
+            EnclosureSystem.MigrateMissingSaleReturnTanks(save);
             ColonyFactory.MigrateLegacyStarterStats(save);
             StoreSystem.EnsureStoreState(save);
             LitterNameSystem.EnsureLitterNames(save);
@@ -491,6 +492,7 @@ namespace RatHabitat
                 save.EnsureLists();
                 EnsureMyRatsSortState(save);
                 EventLogPolicy.Prune(save);
+                EnclosureSystem.MigrateMissingSaleReturnTanks(save);
                 RatActivitySystem.EnsureSaveState(save,
                     save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs);
                 ColonyFactory.MigrateLegacyStarterStats(save);

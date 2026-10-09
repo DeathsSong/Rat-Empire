@@ -617,6 +617,7 @@ namespace RatHabitat
                 if (rat == null || !save.rats.Remove(rat)) continue;
                 rat.removalDisposition = RatRemovalDisposition.NaturalDeath;
                 rat.removedAt = gameTime;
+                EnclosureSystem.ClearSaleReturnTank(rat);
                 rat.reproductiveState = ReproductiveState.Infertile;
                 RatActivitySystem.SetCurrent(save, rat, "deceased", "Deceased", gameTime, "Died");
                 BreedingSystem.CancelPregnanciesForRat(save, rat.id, gameTime);

@@ -54,10 +54,10 @@ namespace RatHabitat
             RatEnclosure.Nursery, "Legacy Nursery", -HabitatColumnSpacing * 2f,
             new Color(0.72f, 0.62f, 0.48f), new Color(0.45f, 0.29f, 0.20f));
         private static readonly Definition BreedingDefinition = CreateFullHabitatDefinition(
-            RatEnclosure.Breeding, "For Sale", HabitatColumnSpacing * 2f,
+            RatEnclosure.Breeding, "For Sale Tank", HabitatColumnSpacing * 2f,
             new Color(0.50f, 0.58f, 0.72f), new Color(0.25f, 0.32f, 0.52f));
         private static readonly Definition PairingDefinition = CreateFullHabitatDefinition(
-            RatEnclosure.Pairing, "Pairing Habitat", HabitatColumnSpacing * 3f,
+            RatEnclosure.Pairing, "Pairing Tank", HabitatColumnSpacing * 3f,
             new Color(0.48f, 0.55f, 0.42f), new Color(0.23f, 0.34f, 0.25f));
 
         private static string activeBreedingMotherId;
@@ -132,6 +132,12 @@ namespace RatHabitat
             if (enclosure == RatEnclosure.Nursery)
                 return "Female Cage";
             return GetDefinition(enclosure).label;
+        }
+
+        public static bool CanReturnFromForSale(RatData rat)
+        {
+            return rat != null && rat.removalDisposition == RatRemovalDisposition.None &&
+                rat.enclosure == RatEnclosure.ForSale;
         }
 
         public static Vector3 NurseryNestPosition
@@ -377,6 +383,8 @@ namespace RatHabitat
                 }
                 if (rat.enclosure != desired)
                 {
+                    if (desired == RatEnclosure.ForSale)
+                        RecordPreviousSaleTank(rat, rat.enclosure);
                     rat.enclosure = desired;
                     changed = true;
                 }
@@ -516,10 +524,12 @@ namespace RatHabitat
             }
             if (rat.enclosure != RatEnclosure.ForSale && CountForSaleRats(save) >= Math.Max(0, capacity))
             {
-                reason = "The For Sale tank is full.";
+                reason = "The For Sale Tank is full.";
                 return false;
             }
 
+            if (rat.enclosure != RatEnclosure.ForSale)
+                RecordPreviousSaleTank(rat, rat.enclosure);
             rat.enclosure = RatEnclosure.ForSale;
             rat.pairingHabitatAssigned = false;
             return true;
@@ -559,7 +569,7 @@ namespace RatHabitat
             int current = CountForSaleRats(save);
             if (current + incoming > Math.Max(0, capacity))
             {
-                reason = "The For Sale tank needs " + (current + incoming) +
+                reason = "The For Sale Tank needs " + (current + incoming) +
                     " spaces but holds " + Math.Max(0, capacity) + ". No rats were moved.";
                 return false;
             }
@@ -567,6 +577,7 @@ namespace RatHabitat
             foreach (RatData rat in candidates)
             {
                 if (rat == null || rat.enclosure == RatEnclosure.ForSale) continue;
+                RecordPreviousSaleTank(rat, rat.enclosure);
                 rat.enclosure = RatEnclosure.ForSale;
                 rat.pairingHabitatAssigned = false;
                 moved++;
@@ -575,6 +586,119 @@ namespace RatHabitat
                 reason = skippedWithPinkies + " mother" + (skippedWithPinkies == 1 ? " with" : "s with") +
                     " dependent pinkies stayed with the litter.";
             return true;
+        }
+
+        /// <summary>
+        /// Restores a live For Sale rat to the tank it occupied before being
+        /// listed. Old saves without this field safely fall back to the rat's
+        /// sex-appropriate colony tank; this avoids an implicit move into the
+        /// capacity-limited Pairing Tank.
+        /// </summary>
+        public static bool TryReturnFromForSale(ColonySaveData save, RatData rat,
+            int pairingCapacity, out RatEnclosure destination, out string reason)
+        {
+            destination = RatEnclosure.FemaleColony;
+            reason = string.Empty;
+            if (save == null || save.rats == null || rat == null ||
+                rat.removalDisposition != RatRemovalDisposition.None ||
+                rat.enclosure != RatEnclosure.ForSale || !ContainsActiveRat(save, rat))
+            {
+                reason = "That rat is not currently in the For Sale Tank.";
+                return false;
+            }
+
+            destination = ResolvePreviousSaleTank(rat);
+            if (destination == RatEnclosure.Pairing && CountPairingRats(save) >= Math.Max(0, pairingCapacity))
+            {
+                reason = "The Pairing Tank is full (" + CountPairingRats(save) + "/" +
+                    Math.Max(0, pairingCapacity) + "). Upgrade Pairing Tank Capacity or move a rat out, then try again.";
+                PairingHabitatSystem.RecordCapacityBlocked(reason, save.clock == null ? 1f : save.clock.speed);
+                return false;
+            }
+
+            rat.enclosure = destination;
+            rat.pairingHabitatAssigned = destination == RatEnclosure.Pairing;
+            ClearSaleReturnTank(rat);
+            return true;
+        }
+
+        /// <summary>
+        /// Migrate legacy For Sale residents once. Their previous tank cannot
+        /// be reconstructed, so use the safest valid sex-appropriate colony
+        /// tank instead of guessing that they came from the Pairing Tank.
+        /// </summary>
+        public static bool MigrateMissingSaleReturnTanks(ColonySaveData save)
+        {
+            if (save == null) return false;
+            bool changed = false;
+            if (save.rats != null)
+            {
+                foreach (RatData rat in save.rats)
+                {
+                    if (rat == null || rat.enclosure != RatEnclosure.ForSale ||
+                        (rat.hasPreviousSaleTank && IsValidSaleReturnTank(rat.previousSaleTank))) continue;
+                    rat.previousSaleTank = FallbackSaleReturnTank(rat);
+                    rat.hasPreviousSaleTank = true;
+                    changed = true;
+                }
+            }
+            if (save.retiredRats != null)
+            {
+                foreach (RatData rat in save.retiredRats)
+                {
+                    if (rat == null || (!rat.hasPreviousSaleTank &&
+                        rat.previousSaleTank == RatEnclosure.FemaleColony)) continue;
+                    ClearSaleReturnTank(rat);
+                    changed = true;
+                }
+            }
+            return changed;
+        }
+
+        public static void ClearSaleReturnTank(RatData rat)
+        {
+            if (rat == null) return;
+            rat.previousSaleTank = RatEnclosure.FemaleColony;
+            rat.hasPreviousSaleTank = false;
+        }
+
+        private static bool ContainsActiveRat(ColonySaveData save, RatData rat)
+        {
+            foreach (RatData candidate in save.rats)
+                if (candidate != null && candidate.removalDisposition == RatRemovalDisposition.None &&
+                    (object.ReferenceEquals(candidate, rat) ||
+                     (!string.IsNullOrEmpty(rat.id) && candidate.id == rat.id)))
+                    return true;
+            return false;
+        }
+
+        private static RatEnclosure ResolvePreviousSaleTank(RatData rat)
+        {
+            return rat != null && rat.hasPreviousSaleTank && IsValidSaleReturnTank(rat.previousSaleTank)
+                ? rat.previousSaleTank
+                : FallbackSaleReturnTank(rat);
+        }
+
+        private static bool IsValidSaleReturnTank(RatEnclosure enclosure)
+        {
+            return enclosure == RatEnclosure.MaleColony || enclosure == RatEnclosure.FemaleColony ||
+                enclosure == RatEnclosure.Pairing;
+        }
+
+        private static RatEnclosure FallbackSaleReturnTank(RatData rat)
+        {
+            return rat != null && rat.sex == RatSex.Male
+                ? RatEnclosure.MaleColony
+                : RatEnclosure.FemaleColony;
+        }
+
+        private static void RecordPreviousSaleTank(RatData rat, RatEnclosure previousTank)
+        {
+            if (rat == null) return;
+            rat.previousSaleTank = IsValidSaleReturnTank(previousTank)
+                ? previousTank
+                : FallbackSaleReturnTank(rat);
+            rat.hasPreviousSaleTank = true;
         }
 
         public static bool TryPrepareForSaleBirth(ColonySaveData save, RatData mother,
@@ -616,9 +740,10 @@ namespace RatHabitat
             if (required > Math.Max(0, pairingCapacity))
             {
                 reason = "For Sale birth needs " + required + "/" + Math.Max(0, pairingCapacity) +
-                    " Pairing Habitat spaces. Purchase the Pairing Habitat Capacity upgrade in Upgrades " +
-                    "or use “Move All Out of Pairing Habitat” to free space; " +
+                    " Pairing Tank spaces. Purchase the Pairing Tank Capacity upgrade in Upgrades " +
+                    "or use “Move All Out of Pairing Tank” to free space; " +
                     "the pregnancy stays due and retries automatically.";
+                PairingHabitatSystem.RecordCapacityBlocked(reason, save.clock == null ? 1f : save.clock.speed);
                 return false;
             }
 

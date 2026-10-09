@@ -22,7 +22,7 @@ namespace RatHabitat
         private Func<bool> panelVisibilityHandler;
         private Action escapeHandler;
         private Action<string> diagnosticHandler;
-        private Action<float> zoomHandler;
+        private Action<float, Vector2> zoomHandler;
         private Action<Vector3> emptyWorldTapHandler;
         private Func<int, bool> habitatSwipeHandler;
         private Func<bool> modalOverlayHandler;
@@ -94,7 +94,7 @@ namespace RatHabitat
             Func<bool> panelVisible,
             Action onEscape,
             Action<string> onDiagnostic = null,
-            Action<float> onZoom = null,
+            Action<float, Vector2> onZoom = null,
             Action<Vector3> onEmptyWorldTap = null,
             Func<int, bool> onHabitatSwipe = null,
             Func<bool> isModalOverlayOpen = null)
@@ -263,7 +263,8 @@ namespace RatHabitat
                 else
                 {
                     float pinchDelta = (distance - lastPinchDistance) / PinchZoomPixelsPerStep;
-                    AdjustZoom(pinchDelta * ZoomInputStep);
+                    Vector2 midpoint = (first.position + second.position) * 0.5f;
+                    AdjustZoom(pinchDelta * ZoomInputStep, midpoint);
                 }
                 lastPinchDistance = distance;
                 return;
@@ -1152,12 +1153,14 @@ namespace RatHabitat
             // ScrollRect, consume mouse-wheel input. Keyboard zoom remains
             // available regardless of pointer location, while scrolling
             // outside UI continues to control the habitat camera.
+            Vector2 pointerPosition = Input.mousePosition;
             float wheelZoom = Input.mouseScrollDelta.y;
-            if (Mathf.Abs(wheelZoom) > 0.001f && IsPointerOverInteractiveUi(Input.mousePosition, -1)) wheelZoom = 0f;
-            float zoom = wheelZoom;
-            if (Input.GetKeyDown(KeyCode.Equals) || Input.GetKeyDown(KeyCode.KeypadPlus)) zoom += 1f;
-            if (Input.GetKeyDown(KeyCode.Minus) || Input.GetKeyDown(KeyCode.KeypadMinus)) zoom -= 1f;
-            if (Mathf.Abs(zoom) > 0.001f) AdjustZoom(zoom * ZoomInputStep);
+            float keyboardZoom = 0f;
+            if (Input.GetKeyDown(KeyCode.Equals) || Input.GetKeyDown(KeyCode.KeypadPlus)) keyboardZoom += 1f;
+            if (Input.GetKeyDown(KeyCode.Minus) || Input.GetKeyDown(KeyCode.KeypadMinus)) keyboardZoom -= 1f;
+            float zoom = wheelZoom + keyboardZoom;
+            if (Mathf.Abs(zoom) > 0.001f && IsPointerOverInteractiveUi(pointerPosition, -1)) zoom = 0f;
+            if (Mathf.Abs(zoom) > 0.001f) AdjustZoom(zoom * ZoomInputStep, pointerPosition);
 
             if (Input.GetKeyDown(KeyCode.Escape) && escapeHandler != null) escapeHandler();
         }
@@ -1168,13 +1171,13 @@ namespace RatHabitat
             targetCamera.transform.LookAt(cameraTarget + new Vector3(0f, 0.1f, 0f));
         }
 
-        private void AdjustZoom(float amount)
+        private void AdjustZoom(float amount, Vector2 screenPosition)
         {
             if (IsModalOverlayOpen()) return;
 
             if (zoomHandler != null)
             {
-                zoomHandler(amount);
+                zoomHandler(amount, screenPosition);
                 return;
             }
             if (targetCamera == null) return;

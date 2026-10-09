@@ -19,7 +19,7 @@ namespace RatHabitat
                 colonyCredits = GameConfig.StartingColonyCredits,
                 currencyInitialized = true,
                 storeInventoryInitialized = false,
-                pairingNextCheckRealTimestamp = now + GameConfig.PairingCheckIntervalMs,
+                pairingNextCheckRealTimestamp = now + GameConfig.PairingCheckIntervalRealMs,
                 pairingNextCheckGameTime = GameConfig.StartGameTimeMs + GameConfig.PairingCheckIntervalMs,
                 clock = new ClockData
                 {

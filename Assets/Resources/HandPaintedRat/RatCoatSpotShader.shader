@@ -21,6 +21,11 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
         _FaceMarkingStrength ("Face Marking Strength", Range(0, 1)) = 0
         _LegMarkingStrength ("Leg Marking Strength", Range(0, 1)) = 0
         _BellyMarkingStrength ("Belly Marking Strength", Range(0, 1)) = 0
+        _FaceMarkingVariation ("Face Marking Variation", Vector) = (0, 0, 1, 0)
+        _LegMarkingVariation ("Leg Marking Variation", Vector) = (0, 0.45, 1, 0)
+        _SpeckleSettings ("Stable Marking Speckles", Vector) = (0, 0, 0, 0)
+        _SpeckleColor ("Marking Speckle Color", Color) = (0.35, 0.30, 0.28, 1)
+        _SpeckleSeed ("Marking Speckle Seed", Float) = 0
         _RatModelBoundsMin ("Rat Model Bounds Min", Vector) = (0, 0, 0, 0)
         _RatModelBoundsSize ("Rat Model Bounds Size", Vector) = (1, 1, 1, 0)
     }
@@ -53,6 +58,11 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
         float _FaceMarkingStrength;
         float _LegMarkingStrength;
         float _BellyMarkingStrength;
+        float4 _FaceMarkingVariation;
+        float4 _LegMarkingVariation;
+        float4 _SpeckleSettings;
+        fixed4 _SpeckleColor;
+        float _SpeckleSeed;
         float4 _RatModelBoundsMin;
         float4 _RatModelBoundsSize;
         float4 _SpotMask_TexelSize;
@@ -76,6 +86,13 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
                 tex2D(_SpotMask, uv + float2(-texel.x, texel.y)).r +
                 tex2D(_SpotMask, uv - texel).r;
             return saturate((center + cardinals * 2.0 + diagonals) / 16.0);
+        }
+
+        float StableSpeckleHash(float2 value)
+        {
+            value = frac(value * float2(0.1031, 0.1030));
+            value += dot(value, value.yx + 33.33);
+            return frac((value.x + value.y) * value.x);
         }
 
         struct Input
@@ -206,13 +223,81 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // enough that a bilinear pixel at a torso/limb transition cannot
             // become a one-pixel white seam while the owned head and leg
             // regions remain available for real facial and sock markings.
-            float faceRegion = smoothstep(0.74, 0.98, featureMask.r);
-            float legRegion = smoothstep(0.78, 0.99, featureMask.g);
+            float faceRegion = smoothstep(0.66, 0.95, featureMask.r);
+            float legRegion = smoothstep(0.70, 0.96, featureMask.g);
             float bellyRegion = smoothstep(0.38, 0.86, featureMask.a);
             float featureVariation = sin(input.uv_MainTex.x * 23.0 +
                 input.uv_MainTex.y * 9.0 + _SpotSeed * 2.3) * 0.08 +
                 sin(input.uv_MainTex.y * 17.0 - input.uv_MainTex.x * 13.0 +
                 _SpotSeed * 4.1) * 0.05;
+            // Face marks stay attached to the UV-mapped head. The stable
+            // pattern selects one clear blaze, eye-mask, cheek, or forehead
+            // shape per rat instead of whitening every feature region.
+            float faceShape = _FaceMarkingVariation.x;
+            float faceCenterX = 0.2343 + _FaceMarkingVariation.y;
+            float faceScale = max(0.72, _FaceMarkingVariation.z);
+            float faceY = input.uv_MainTex.y;
+            float facePlacement = 0.0;
+            if (faceShape > 0.5 && faceShape < 1.5)
+            {
+                float faceDx = abs(input.uv_MainTex.x - faceCenterX);
+                float blazeBand = smoothstep(0.485, 0.525, faceY) *
+                    (1.0 - smoothstep(0.655, 0.695, faceY));
+                facePlacement = (1.0 - smoothstep(0.012 * faceScale,
+                    0.038 * faceScale, faceDx)) * blazeBand;
+            }
+            else if (faceShape >= 1.5 && faceShape < 2.5)
+            {
+                float faceDx = abs(input.uv_MainTex.x - faceCenterX);
+                float maskBand = smoothstep(0.515, 0.540, faceY) *
+                    (1.0 - smoothstep(0.610, 0.642, faceY));
+                facePlacement = (1.0 - smoothstep(0.045 * faceScale,
+                    0.092 * faceScale, faceDx)) * maskBand;
+            }
+            else if (faceShape >= 2.5 && faceShape < 3.5)
+            {
+                float leftCheekDistance = length(float2(
+                    (input.uv_MainTex.x - (0.1836 + _FaceMarkingVariation.y)) /
+                        (0.040 * faceScale),
+                    (faceY - 0.535) / (0.026 * faceScale)));
+                float rightCheekDistance = length(float2(
+                    (input.uv_MainTex.x - (0.2850 + _FaceMarkingVariation.y)) /
+                        (0.040 * faceScale),
+                    (faceY - 0.535) / (0.026 * faceScale)));
+                float leftCheek = 1.0 - smoothstep(0.72, 1.18, leftCheekDistance);
+                float rightCheek = 1.0 - smoothstep(0.72, 1.18, rightCheekDistance);
+                if (_FaceMarkingVariation.w < -0.5) rightCheek = 0.0;
+                else if (_FaceMarkingVariation.w > 0.5) leftCheek = 0.0;
+                facePlacement = max(leftCheek, rightCheek);
+            }
+            else if (faceShape >= 3.5 && faceShape < 4.5)
+            {
+                float foreheadDistance = length(float2(
+                    (input.uv_MainTex.x - faceCenterX) / (0.060 * faceScale),
+                    (faceY - 0.642) / (0.032 * faceScale)));
+                facePlacement = 1.0 - smoothstep(0.72, 1.18, foreheadDistance);
+            }
+            faceRegion *= facePlacement;
+
+            // The existing leg ownership mask clips this stable UV field to
+            // paws/legs only. Different thresholds create
+            // soft socks, partial boots, or broader leg coverage without
+            // adding renderers, decals, or animated shader noise.
+            float legPattern = _LegMarkingVariation.x;
+            if (legPattern > 0.5)
+            {
+                float phaseBias = (_LegMarkingVariation.w / 6.2831853 - 0.5) * 0.16;
+                float legField = saturate(0.5 + featureVariation *
+                    (3.0 + _LegMarkingVariation.z * 1.5) + phaseBias);
+                float legCoverage = smoothstep(_LegMarkingVariation.y,
+                    min(0.98, _LegMarkingVariation.y + 0.34), legField);
+                if (legPattern < 1.5)
+                    legRegion *= lerp(0.58, 1.0, legCoverage);
+                else if (legPattern < 2.5)
+                    legRegion *= legCoverage;
+                else
+                    legRegion *= smoothstep(0.12, 0.88, legField);
+            }
             faceRegion *= 0.90 + 0.10 *
                 (sin(input.uv_MainTex.x * 17.0 + _SpotSeed) * 0.5 + 0.5);
             legRegion *= 0.86 + 0.14 *
@@ -240,6 +325,54 @@ Shader "Rat Habitat/Hand Painted Rat Coat"
             // them out of this coat shader prevents body masks, markings, or
             // fallback textures from recoloring the tail or the rump.
             fixed3 coatWithMarkings = lerp(painted.rgb, _SpotColor.rgb, whiteBlend);
+
+            // Speckles are a stable, shader-only overlay shared by the
+            // existing body/face/belly/leg marking coverage. A uniform gate
+            // skips the procedural work for most rats, and all coordinates
+            // are UV-anchored so markings cannot flicker as the rat moves.
+            if (_SpeckleSettings.x > 0.5 && whiteBlend > 0.005)
+            {
+                float speckleFrequency = _SpeckleSettings.z;
+                float2 speckleGrid = input.uv_MainTex *
+                    float2(speckleFrequency, speckleFrequency * 0.72);
+                float2 speckleCell = floor(speckleGrid);
+                float2 speckleLocal = frac(speckleGrid);
+                float2 speckleSeedOffset = float2(_SpeckleSeed * 31.7,
+                    _SpeckleSeed * 47.9);
+                float cellChance = StableSpeckleHash(speckleCell + speckleSeedOffset);
+                if (cellChance < _SpeckleSettings.y)
+                {
+                    float randomX = StableSpeckleHash(speckleCell + speckleSeedOffset +
+                        float2(19.1, 7.7));
+                    float randomY = StableSpeckleHash(speckleCell + speckleSeedOffset +
+                        float2(3.7, 29.3));
+                    float shapeVariation = StableSpeckleHash(speckleCell + speckleSeedOffset +
+                        float2(41.3, 13.9));
+                    float tintVariation = StableSpeckleHash(speckleCell + speckleSeedOffset +
+                        float2(11.7, 53.1));
+                    float2 speckleCenter = lerp(float2(0.18, 0.18),
+                        float2(0.82, 0.82), float2(randomX, randomY));
+                    float radius = lerp(0.18, 0.31, shapeVariation) *
+                        _SpeckleSettings.w;
+                    float aspect = lerp(0.68, 1.48, tintVariation);
+                    float speckleDistance = length((speckleLocal - speckleCenter) /
+                        float2(radius * aspect, radius));
+                    float fleck = 1.0 - smoothstep(0.58, 1.02, speckleDistance);
+
+                    // Derivative expansion keeps a few flecks along the
+                    // feathered edge of a mark without painting the rest of
+                    // the coat. It also lets face and limb marks share the
+                    // same behavior despite their different UV sizes.
+                    float expandedMarking = saturate(whiteBlend +
+                        max(fwidth(whiteBlend), 0.008) * 1.35);
+                    float markingCoverage = smoothstep(0.025, 0.34, expandedMarking);
+                    float fleckOpacity = fleck * markingCoverage * 0.68;
+                    fixed3 fleckColor = lerp(_SpeckleColor.rgb, _AccentColor.rgb,
+                        0.05 + tintVariation * 0.18);
+                    fleckColor *= 0.92 + shapeVariation * 0.14;
+                    coatWithMarkings = lerp(coatWithMarkings, fleckColor, fleckOpacity);
+                }
+            }
 
             // The source texture contains eye detail, but its hue can be
             // recolored when the whole imported mesh is tinted. Restore a

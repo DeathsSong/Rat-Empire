@@ -122,7 +122,8 @@ namespace RatHabitat
             int pairingIndex = 0;
             foreach (var rat in save.rats)
             {
-                if (rat == null || string.IsNullOrEmpty(rat.id)) continue;
+                if (rat == null || string.IsNullOrEmpty(rat.id) ||
+                    rat.removalDisposition != RatRemovalDisposition.None) continue;
                 liveIds.Add(rat.id);
                 try
                 {
@@ -561,7 +562,8 @@ namespace RatHabitat
         {
             root = null;
             GameObject ratRoot;
-            if (string.IsNullOrEmpty(ratId) || !ratRoots.TryGetValue(ratId, out ratRoot) || ratRoot == null) return false;
+            if (string.IsNullOrEmpty(ratId) || !ratRoots.TryGetValue(ratId, out ratRoot) ||
+                ratRoot == null || !ratRoot.activeSelf) return false;
             root = ratRoot.transform;
             return true;
         }
@@ -800,8 +802,22 @@ namespace RatHabitat
             foreach (var id in removed)
             {
                 RatHabitatBehavior behavior;
-                if (behaviors.TryGetValue(id, out behavior) && behavior != null) behavior.PlayDyingOnce();
-                if (ratRoots[id] != null) Destroy(ratRoots[id]);
+                if (behaviors.TryGetValue(id, out behavior) && behavior != null)
+                    behavior.enabled = false;
+                RatVisualController controller;
+                if (visualControllers.TryGetValue(id, out controller) && controller != null)
+                    controller.enabled = false;
+                GameObject root = ratRoots[id];
+                if (root != null)
+                {
+                    // Destroy is deferred until end-of-frame. Hide the retired
+                    // visual and disable its hit surfaces/behavior immediately
+                    // so it cannot remain visible, selectable, or moving.
+                    foreach (Collider collider in root.GetComponentsInChildren<Collider>(true))
+                        if (collider != null) collider.enabled = false;
+                    root.SetActive(false);
+                    Destroy(root);
+                }
                 ratRoots.Remove(id);
                 visualControllers.Remove(id);
                 behaviors.Remove(id);
@@ -812,6 +828,13 @@ namespace RatHabitat
                 pinkieGroundedSelectionBoundsVersions.Remove(id);
                 configuredSelectionBoundsVersions.Remove(id);
                 presentationFailureWarnings.Remove(id);
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                pinkiePlacementDiagnostics.Remove(id);
+                pinkiePlacementWarnings.Remove(id);
+                pinkieInputIsolationAudits.Remove(id);
+                lastPinkieGroundedPositions.Remove(id);
+                lastPinkieGroundedFrames.Remove(id);
+#endif
             }
         }
 
@@ -841,7 +864,8 @@ namespace RatHabitat
             {
                 foreach (var rat in rats)
                 {
-                    if (rat != null && rat.stage == RatStage.Pinkie && !string.IsNullOrEmpty(rat.id))
+                    if (rat != null && rat.removalDisposition == RatRemovalDisposition.None &&
+                        rat.stage == RatStage.Pinkie && !string.IsNullOrEmpty(rat.id))
                     {
                         pinkies.Add(rat);
                     }

@@ -226,6 +226,15 @@ namespace RatHabitat
             Texture2D eyeMask = useCoatShader
                 ? GetOrCreateEyeRegionMask()
                 : null;
+            Color markingColor = useCoatShader ? ResolveMarkingColor(rat) : Color.white;
+            Vector4 speckleSettings = Vector4.zero;
+            Color speckleColor = markingColor;
+            float speckleSeed = 0f;
+            if (useCoatShader)
+            {
+                ResolveMarkingSpeckles(rat, spotted, markingColor,
+                    out speckleSettings, out speckleColor, out speckleSeed);
+            }
             // This is deliberately null in normal play. The audit is useful
             // when investigating material regressions, but constructing its
             // renderer/texture/color summary for every rat is expensive in
@@ -326,8 +335,14 @@ namespace RatHabitat
                                 : eyeMask);
                         }
                         material.SetFloat("_SpotSeed", SpotSeed01(string.IsNullOrEmpty(rat.id) ? rat.name : rat.id));
-                        material.SetColor("_SpotColor", ResolveMarkingColor(rat));
+                        material.SetColor("_SpotColor", markingColor);
                         material.SetFloat("_SpotStrength", spotted ? 1f : 0f);
+                        if (material.HasProperty("_SpeckleSettings"))
+                            material.SetVector("_SpeckleSettings", speckleSettings);
+                        if (material.HasProperty("_SpeckleColor"))
+                            material.SetColor("_SpeckleColor", speckleColor);
+                        if (material.HasProperty("_SpeckleSeed"))
+                            material.SetFloat("_SpeckleSeed", speckleSeed);
                         Vector3 modelBoundsMin;
                         Vector3 modelBoundsSize;
                         if (TryGetRendererLocalBounds(renderer, out modelBoundsMin, out modelBoundsSize))
@@ -348,14 +363,30 @@ namespace RatHabitat
                             float faceStrength;
                             float legStrength;
                             float bellyStrength;
-                            ResolveFeatureMarkingStrengths(rat.markingFamily,
-                                out faceStrength, out legStrength, out bellyStrength);
+                            if (spotted)
+                                ResolveFeatureMarkingStrengths(rat.markingFamily,
+                                    out faceStrength, out legStrength, out bellyStrength);
+                            else
+                            {
+                                faceStrength = 0f;
+                                legStrength = 0f;
+                                bellyStrength = 0f;
+                            }
+                            Vector4 faceVariation;
+                            Vector4 legVariation;
+                            ResolveFeatureMarkingVariation(rat, rat.markingFamily,
+                                ref faceStrength, ref legStrength, ref bellyStrength,
+                                out faceVariation, out legVariation);
                             if (material.HasProperty("_FaceMarkingStrength"))
                                 material.SetFloat("_FaceMarkingStrength", faceStrength);
                             if (material.HasProperty("_LegMarkingStrength"))
                                 material.SetFloat("_LegMarkingStrength", legStrength);
                             if (material.HasProperty("_BellyMarkingStrength"))
                                 material.SetFloat("_BellyMarkingStrength", bellyStrength);
+                            if (material.HasProperty("_FaceMarkingVariation"))
+                                material.SetVector("_FaceMarkingVariation", faceVariation);
+                            if (material.HasProperty("_LegMarkingVariation"))
+                                material.SetVector("_LegMarkingVariation", legVariation);
                         }
                         if (material.HasProperty("_PinkEyeMode"))
                         {
@@ -520,6 +551,172 @@ namespace RatHabitat
                 default:
                     break;
             }
+        }
+
+        /// <summary>
+        /// Chooses a single stable face shape and a leg pattern for this rat.
+        /// These are material uniforms, not scene objects or animated state;
+        /// the rat ID plus genotype/family makes them identical after reload.
+        /// Vector layout: face=(shape, horizontal offset, scale, cheek side),
+        /// legs=(pattern, threshold, frequency, phase).
+        /// </summary>
+        private static void ResolveFeatureMarkingVariation(
+            RatData rat,
+            string family,
+            ref float faceStrength,
+            ref float legStrength,
+            ref float bellyStrength,
+            out Vector4 faceVariation,
+            out Vector4 legVariation)
+        {
+            faceVariation = Vector4.zero;
+            legVariation = Vector4.zero;
+            string normalized = GeneticsSystem.NormalizeMarkingFamily(
+                family, rat == null ? null : rat.genotype);
+            if (normalized == "Solid" || normalized == "Self" ||
+                normalized == "Albino masking")
+            {
+                faceStrength = 0f;
+                legStrength = 0f;
+                bellyStrength = 0f;
+                return;
+            }
+
+            string identity = (rat == null ? string.Empty :
+                (string.IsNullOrEmpty(rat.id) ? rat.name : rat.id)) + "|" +
+                (rat == null ? string.Empty : GenotypeSummary(rat.genotype)) + "|" +
+                normalized + "|feature-placement-v1";
+            var random = new OrganicSpotRandom((uint)StableSpotSeed(identity));
+
+            // When a family can express face, legs, and belly features, pick
+            // two of those channels for this rat. Named focal families keep
+            // their defining feature and vary only the secondary placement.
+            bool faceIsDefining = normalized == "Blaze" ||
+                normalized == "Lightning blaze Siamese" ||
+                normalized == "Badger blaze Siamese" || normalized == "Mask" ||
+                normalized == "Black-eye white" || normalized == "Capped";
+            bool legIsDefining = normalized == "Berkshire" || normalized == "Irish" ||
+                normalized == "Variberk";
+            bool hasFace = faceStrength > 0.01f;
+            bool hasLegs = legStrength > 0.01f;
+            bool hasBelly = bellyStrength > 0.01f;
+            if (hasFace && hasLegs && hasBelly)
+            {
+                if (faceIsDefining)
+                {
+                    if (random.NextInt(0, 2) == 0) legStrength = 0f;
+                    else bellyStrength = 0f;
+                }
+                else if (legIsDefining)
+                {
+                    if (random.NextInt(0, 2) == 0) faceStrength = 0f;
+                    else bellyStrength = 0f;
+                }
+                else
+                {
+                    switch (random.NextInt(0, 3))
+                    {
+                        case 0: faceStrength = 0f; break;
+                        case 1: legStrength = 0f; break;
+                        default: bellyStrength = 0f; break;
+                    }
+                }
+            }
+
+            if (faceStrength > 0.01f)
+            {
+                int faceShape;
+                switch (normalized)
+                {
+                    case "Blaze":
+                    case "Lightning blaze Siamese":
+                    case "Badger blaze Siamese":
+                        faceShape = 1; // blaze
+                        break;
+                    case "Mask":
+                    case "Black-eye white":
+                        faceShape = 2; // eye mask
+                        break;
+                    case "Capped":
+                        faceShape = 4; // forehead cap
+                        break;
+                    default:
+                        // Mixed/patch families can express a cheek, blaze,
+                        // mask, or forehead patch, but each rat gets only one.
+                        faceShape = random.NextInt(1, 5);
+                        break;
+                }
+
+                float horizontalOffset = random.Range(-0.022f, 0.022f);
+                float faceScale = random.Range(0.88f, 1.28f);
+                float cheekSide = random.NextInt(0, 3) - 1;
+                faceVariation = new Vector4(faceShape, horizontalOffset, faceScale, cheekSide);
+                faceStrength = Mathf.Clamp01(faceStrength * random.Range(0.94f, 1.16f));
+            }
+
+            if (legStrength > 0.01f)
+            {
+                // 0 keeps a soft all-leg marking; 1-3 make individualized
+                // sock/boot-like patches within the existing leg UV mask.
+                float legPattern = random.NextInt(0, 4);
+                legVariation = new Vector4(legPattern,
+                    random.Range(0.32f, 0.62f),
+                    random.Range(0.72f, 1.32f),
+                    random.Range(0f, Mathf.PI * 2f));
+                legStrength = Mathf.Clamp01(legStrength * random.Range(0.92f, 1.16f));
+            }
+
+            bellyStrength = Mathf.Clamp01(bellyStrength * random.Range(0.90f, 1.12f));
+        }
+
+        /// <summary>
+        /// Gives a minority of visibly marked rats a stable shader-only
+        /// speckle pattern. The shader clips flecks to the existing body and
+        /// feature marking coverage, so genetics, marking families, and
+        /// gameplay/pricing data remain unchanged. Vector layout is
+        /// (enabled, cell density, cell frequency, fleck size scale).
+        /// </summary>
+        private static void ResolveMarkingSpeckles(
+            RatData rat,
+            bool hasVisibleMarkings,
+            Color markingColor,
+            out Vector4 settings,
+            out Color speckleColor,
+            out float seed)
+        {
+            settings = Vector4.zero;
+            speckleColor = markingColor;
+            seed = 0f;
+            if (rat == null || !hasVisibleMarkings || rat.phenotype == null ||
+                IsAlbinoLikePhenotype(rat))
+                return;
+
+            string family = GeneticsSystem.NormalizeMarkingFamily(
+                rat.markingFamily, rat.genotype);
+            if (family == "Self" || family == "Solid" || family == "Albino masking")
+                return;
+
+            string identity = (string.IsNullOrEmpty(rat.id) ? rat.name : rat.id) + "|" +
+                GenotypeSummary(rat.genotype) + "|" + family + "|marking-speckles-v1";
+            seed = SpotSeed01(identity);
+            var random = new OrganicSpotRandom((uint)StableSpotSeed(identity));
+
+            // Roughly one in four marked rats gets flecks. Keeping activation
+            // selective avoids making speckles a second default marking layer.
+            if (random.NextInt(0, 4) != 0)
+                return;
+
+            settings = new Vector4(
+                1f,
+                random.Range(0.035f, 0.085f),
+                random.Range(27f, 42f),
+                random.Range(0.82f, 1.28f));
+
+            Color coat = ParseColor(rat.phenotype.coatColorHex, Color.gray);
+            Color accent = ParseColor(rat.phenotype.accentHex, coat);
+            speckleColor = Color.Lerp(coat, markingColor, random.Range(0.36f, 0.54f));
+            speckleColor = Color.Lerp(speckleColor, accent, random.Range(0.08f, 0.20f));
+            speckleColor.a = 1f;
         }
 
         private static bool TryGetRendererLocalBounds(
@@ -1114,10 +1311,13 @@ namespace RatHabitat
         private const int OrganicSpotMaskHeight = 64;
         private static readonly Vector2[] OrganicSpotAnchors =
         {
-            new Vector2(0.19f, 0.16f),
-            new Vector2(0.34f, 0.27f),
-            new Vector2(0.48f, 0.15f),
-            new Vector2(0.59f, 0.28f),
+            // The imported body island spans lengthwise and around the torso.
+            // Different rows/ends cover back, side, belly, shoulder, and rump
+            // lanes; each individual patch is still feathered and irregular.
+            new Vector2(0.10f, 0.12f), new Vector2(0.18f, 0.31f),
+            new Vector2(0.27f, 0.20f), new Vector2(0.34f, 0.36f),
+            new Vector2(0.43f, 0.11f), new Vector2(0.51f, 0.29f),
+            new Vector2(0.61f, 0.17f), new Vector2(0.68f, 0.33f),
         };
 
         private static readonly Vector2[] HoodedSpotAnchors =
@@ -1157,7 +1357,7 @@ namespace RatHabitat
             string identity = (rat == null ? string.Empty :
                 (string.IsNullOrEmpty(rat.id) ? rat.name : rat.id)) + "|" +
                 (rat == null ? string.Empty : GenotypeSummary(rat.genotype)) + "|" +
-                family + "|organic-patterns-v5";
+                family + "|organic-patterns-v6";
             if (organicSpotPatternCache.TryGetValue(identity, out Texture2D cached) && cached != null)
                 return cached;
 
@@ -1336,13 +1536,13 @@ namespace RatHabitat
             int patchCount = minimumCount + random.NextInt(0, 3);
             for (int patchIndex = 0; patchIndex < patchCount; patchIndex++)
             {
-                Vector2 anchor = anchors[patchIndex % anchors.Length];
+                Vector2 anchor = anchors[random.NextInt(0, anchors.Length)];
                 Vector2 center = new Vector2(
-                    Mathf.Clamp(anchor.x + random.Range(-0.035f, 0.035f), 0.06f, 0.70f),
-                    Mathf.Clamp(anchor.y + random.Range(-0.035f, 0.035f), 0.055f, 0.385f));
-                Vector2 radius = new Vector2(random.Range(0.035f, 0.085f), random.Range(0.022f, 0.055f));
-                float rotation = random.Range(-0.6f, 0.6f);
-                int pointCount = random.NextInt(8, 15);
+                    Mathf.Clamp(anchor.x + random.Range(-0.075f, 0.075f), 0.045f, 0.715f),
+                    Mathf.Clamp(anchor.y + random.Range(-0.060f, 0.060f), 0.045f, 0.395f));
+                Vector2 radius = new Vector2(random.Range(0.025f, 0.105f), random.Range(0.016f, 0.071f));
+                float rotation = random.Range(-1.05f, 1.05f);
+                int pointCount = random.NextInt(7, 18);
                 Vector2[] polygon = new Vector2[pointCount];
                 float cos = Mathf.Cos(rotation);
                 float sin = Mathf.Sin(rotation);
@@ -1367,8 +1567,23 @@ namespace RatHabitat
             float maxY,
             ref OrganicSpotRandom random)
         {
+            float originalCenterX = (minX + maxX) * 0.5f;
+            float originalCenterY = (minY + maxY) * 0.5f;
+            float halfWidth = (maxX - minX) * random.Range(0.42f, 0.59f);
+            float halfHeight = (maxY - minY) * random.Range(0.42f, 0.59f);
+            float centerX = originalCenterX + random.Range(-0.035f, 0.035f);
+            float centerY = originalCenterY + random.Range(-0.023f, 0.023f);
+            minX = Mathf.Clamp(centerX - halfWidth, 0.01f, 0.99f);
+            maxX = Mathf.Clamp(centerX + halfWidth, minX + 0.015f, 0.99f);
+            minY = Mathf.Clamp(centerY - halfHeight, 0.01f, 0.99f);
+            maxY = Mathf.Clamp(centerY + halfHeight, minY + 0.015f, 0.99f);
             float xJitter = Mathf.Min(0.030f, (maxX - minX) * 0.16f);
             float yJitter = Mathf.Min(0.024f, (maxY - minY) * 0.16f);
+            float rotation = random.Range(-0.16f, 0.16f);
+            float cosine = Mathf.Cos(rotation);
+            float sine = Mathf.Sin(rotation);
+            float regionCenterX = (minX + maxX) * 0.5f;
+            float regionCenterY = (minY + maxY) * 0.5f;
             // Use a denser, uneven perimeter so broad families such as
             // hooded and bareback do not turn into four-sided UV decals.
             // The mask is generated once per stable rat identity, so this
@@ -1382,16 +1597,29 @@ namespace RatHabitat
                 float bottomX = Mathf.Lerp(maxX, minX, t);
                 float leftY = Mathf.Lerp(maxY, minY, t);
                 float rightY = Mathf.Lerp(minY, maxY, t);
-                polygon[sample] = new Vector2(topX + random.Range(-xJitter, xJitter),
-                    minY + random.Range(-yJitter, yJitter));
-                polygon[edgeSamples + sample] = new Vector2(
-                    maxX + random.Range(-xJitter, xJitter), rightY + random.Range(-yJitter, yJitter));
-                polygon[edgeSamples * 2 + sample] = new Vector2(
-                    bottomX + random.Range(-xJitter, xJitter), maxY + random.Range(-yJitter, yJitter));
-                polygon[edgeSamples * 3 + sample] = new Vector2(
-                    minX + random.Range(-xJitter, xJitter), leftY + random.Range(-yJitter, yJitter));
+                polygon[sample] = RotateAround(new Vector2(
+                    topX + random.Range(-xJitter, xJitter),
+                    minY + random.Range(-yJitter, yJitter)), regionCenterX, regionCenterY, cosine, sine);
+                polygon[edgeSamples + sample] = RotateAround(new Vector2(
+                    maxX + random.Range(-xJitter, xJitter),
+                    rightY + random.Range(-yJitter, yJitter)), regionCenterX, regionCenterY, cosine, sine);
+                polygon[edgeSamples * 2 + sample] = RotateAround(new Vector2(
+                    bottomX + random.Range(-xJitter, xJitter),
+                    maxY + random.Range(-yJitter, yJitter)), regionCenterX, regionCenterY, cosine, sine);
+                polygon[edgeSamples * 3 + sample] = RotateAround(new Vector2(
+                    minX + random.Range(-xJitter, xJitter),
+                    leftY + random.Range(-yJitter, yJitter)), regionCenterX, regionCenterY, cosine, sine);
             }
             PaintOrganicPolygon(pixels, polygon);
+        }
+
+        private static Vector2 RotateAround(
+            Vector2 point, float centerX, float centerY, float cosine, float sine)
+        {
+            float x = point.x - centerX;
+            float y = point.y - centerY;
+            return new Vector2(centerX + x * cosine - y * sine,
+                centerY + x * sine + y * cosine);
         }
 
         private static void FeatherOrganicPattern(Color32[] pixels)

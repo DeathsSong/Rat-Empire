@@ -70,9 +70,19 @@ namespace RatHabitat
         public const float HealthDeclinePerDay = 0.035f;
         public const float FertilityDeclinePerDay = 0.06f;
         public const long BreedingCooldownMs = 30L * 1000L;
-        // Automatic Pairing Habitat attempts are rate-limited in real time,
-        // independent of the accelerated simulation/calendar speed.
+        // Legacy simulation-time cadence. At 1x, 30 in-game seconds equal
+        // 0.5 real seconds (60 game seconds pass per real second). Keep this
+        // value for the save compatibility field and use the explicit real
+        // interval below for scheduling at every speed.
         public const long PairingCheckIntervalMs = 30L * 1000L;
+        // Preserve the former 1x pairing opportunity cadence without letting
+        // accelerated clocks create catch-up bursts: one wall-clock check per
+        // 500 ms, regardless of the selected simulation speed.
+        public const long PairingCheckIntervalRealMs = 500L;
+        public static long NextPairingCheckRealTimestamp(long realNow)
+        {
+            return realNow + PairingCheckIntervalRealMs;
+        }
         // Applies to a resolved Pairing Habitat attempt, including a failed
         // conception. This is serialized on each RatData record so a save or
         // reload cannot cause the same pair to retry immediately.
@@ -112,9 +122,9 @@ namespace RatHabitat
         // as unattributed rather than calling it GPU time.
         public const float PerformanceUnattributedFrameGapThresholdMs = 50f;
         public const int PerformanceLogRecentDisplayCount = 8;
-        // Roll independently for each new market listing. A 50% chance keeps
-        // solid founders available while making marked rats a regular find.
-        public const float StoreFounderMarkingChance = 0.50f;
+        // Roll independently for each new market listing. About 15% receive a
+        // marking; the remaining listings keep a solid coat.
+        public const float StoreFounderMarkingChance = 0.15f;
         // Both new-game starters share one solid visual coat while their
         // underlying black/dilution alleles remain independently generated.
         public const string StarterSolidCoatColorVariant = "agouti";

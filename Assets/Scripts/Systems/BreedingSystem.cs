@@ -344,6 +344,59 @@ namespace RatHabitat
         }
 
         /// <summary>
+        /// Returns whether a female's timestamp-defined fertile window touched
+        /// the closed interval (fromGameTime, throughGameTime]. Pairing checks
+        /// are wall-clock rate limited, so at 3x one rendered/check interval
+        /// can cross a complete fertile boundary. Only the window is latched;
+        /// age, pregnancy, recovery, cooldown, and session rules are still
+        /// evaluated at the current authoritative game time.
+        /// </summary>
+        public static bool FertileWindowOverlapsInterval(
+            RatData rat, long fromGameTime, long throughGameTime)
+        {
+            if (rat == null || rat.sex != RatSex.Female || throughGameTime <= fromGameTime)
+                return false;
+
+            long cycleMs = Math.Max(1L, (long)(GameConfig.EstrousCycleDays * GameConfig.GameDayMs));
+            long windowMs = Math.Max(1L, (long)(GameConfig.EstrousFertileWindowDays * GameConfig.GameDayMs));
+            long intervalMs = throughGameTime - fromGameTime;
+            if (intervalMs >= cycleMs) return true;
+
+            long phase = (fromGameTime - rat.estrousCycleAnchorGameTime) % cycleMs;
+            if (phase < 0L) phase += cycleMs;
+            if (phase < windowMs) return true;
+
+            long untilNextWindow = cycleMs - phase;
+            return untilNextWindow <= intervalMs;
+        }
+
+        /// <summary>
+        /// Applies current reproductive eligibility while recovering only a
+        /// fertile-window boundary that was crossed since the prior scheduled
+        /// check. This prevents 3x clock jumps from turning a briefly sampled
+        /// window into a missed breeding opportunity.
+        /// </summary>
+        public static bool IsBreedEligibleAtOpportunity(
+            ColonySaveData save, RatData rat, long gameTime,
+            long opportunityWindowStartGameTime, out string reason)
+        {
+            ReproductiveStatus status = GetReproductiveStatus(save, rat, gameTime);
+            reason = status.eligibilityReason;
+            if (status.canBreed) return true;
+
+            if (rat != null && rat.sex == RatSex.Female &&
+                status.state == ReproductiveState.Fertile &&
+                !string.IsNullOrEmpty(reason) &&
+                reason.StartsWith("Outside the fertile window", StringComparison.Ordinal) &&
+                FertileWindowOverlapsInterval(rat, opportunityWindowStartGameTime, gameTime))
+            {
+                reason = string.Empty;
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>
         /// Single source of truth for the player-facing reproductive state and
         /// the corresponding breeding eligibility. Keeping these decisions in
         /// one result prevents an adult who is still below her randomized
@@ -1687,6 +1740,48 @@ namespace RatHabitat
         }
     }
 
+    public struct PairingSpeedDiagnosticsSnapshot
+    {
+        public long checks;
+        public long eligiblePairsFound;
+        public long pairingAttempts;
+        public long cooldownBlockedChecks;
+        public long cooldownBlockedCandidates;
+        public long capacityBlockedAttempts;
+        public long conceptionRolls;
+        public long successfulConceptions;
+        public long failedConceptionRolls;
+        public long skippedChecks;
+        public long recoveredFertileWindows;
+    }
+
+    public struct PairingDiagnosticsSnapshot
+    {
+        public long checks;
+        public long checksWithEligiblePair;
+        public long checksWithoutEligiblePair;
+        public long pairSelections;
+        public long conceptionRolls;
+        public long failedConceptionRolls;
+        public long successfulConceptions;
+        public long blockedResolutionAttempts;
+        public long blockedPregnancyCandidates;
+        public long blockedRecoveryCandidates;
+        public long blockedCooldownCandidates;
+        public long blockedFertileWindowCandidates;
+        public long blockedAgeCandidates;
+        public long blockedSessionCandidates;
+        public long blockedOtherCandidates;
+        public long capacityBlockedMoves;
+        public long routeFailures;
+        public int lastEligibleMales;
+        public int lastEligibleFemales;
+        public int lastEligiblePairCombinations;
+        public int lastPairingOccupants;
+        public int lastPairingCapacity;
+        public string lastNoPairReason;
+    }
+
     /// <summary>
     /// Handles the real-time automatic pairing pass. Rat assignment and
     /// pregnancy records remain owned by RatData/BreedingSystem; this class
@@ -1694,11 +1789,103 @@ namespace RatHabitat
     /// </summary>
     public static class PairingHabitatSystem
     {
-        // Pairing may be scheduled every 30 in-game seconds (about 48
-        // opportunities per real second at the fastest clock rate). Reuse
-        // these main-thread scratch lists instead of allocating each check.
+        // Reuse the main-thread scratch lists instead of allocating each check.
         private static readonly List<RatData> MaleCandidates = new List<RatData>();
         private static readonly List<RatData> FemaleCandidates = new List<RatData>();
+        private static PairingDiagnosticsSnapshot diagnostics;
+        // Fixed three-speed buckets avoid allocations in the periodic pairing
+        // loop. The selected saved speed is recorded at each decision point.
+        private static readonly PairingSpeedDiagnosticsSnapshot[] diagnosticsBySpeed =
+            new PairingSpeedDiagnosticsSnapshot[3];
+
+        public static PairingDiagnosticsSnapshot Diagnostics { get { return diagnostics; } }
+
+        public static void ResetDiagnostics()
+        {
+            diagnostics = new PairingDiagnosticsSnapshot();
+            for (int index = 0; index < diagnosticsBySpeed.Length; index++)
+                diagnosticsBySpeed[index] = new PairingSpeedDiagnosticsSnapshot();
+        }
+
+        public static void RecordCapacityBlocked(string reason)
+        {
+            RecordCapacityBlocked(reason, GrowthSystem.RuntimeSimulationSpeed);
+        }
+
+        public static void RecordCapacityBlocked(string reason, float speed)
+        {
+            diagnostics.capacityBlockedMoves++;
+            diagnosticsBySpeed[SpeedBucketIndex(speed)].capacityBlockedAttempts++;
+            diagnostics.lastNoPairReason = string.IsNullOrEmpty(reason) ? "Pairing Tank capacity is full." : reason;
+        }
+
+        public static void RecordRouteFailure()
+        {
+            diagnostics.routeFailures++;
+        }
+
+        public static void RecordSkippedChecks(float speed, long skippedChecks)
+        {
+            if (skippedChecks <= 0L) return;
+            diagnosticsBySpeed[SpeedBucketIndex(speed)].skippedChecks += skippedChecks;
+        }
+
+        public static PairingSpeedDiagnosticsSnapshot DiagnosticsForSpeed(float speed)
+        {
+            return diagnosticsBySpeed[SpeedBucketIndex(speed)];
+        }
+
+        private static int SpeedBucketIndex(float speed)
+        {
+            switch ((int)GrowthSystem.NormalizeSpeed(speed))
+            {
+                case 2: return 1;
+                case 3: return 2;
+                default: return 0;
+            }
+        }
+
+        private static float SaveSimulationSpeed(ColonySaveData save)
+        {
+            return save == null || save.clock == null
+                ? GrowthSystem.RuntimeSimulationSpeed
+                : GrowthSystem.NormalizeSpeed(save.clock.speed);
+        }
+
+        public static string DiagnosticsSummary(ColonySaveData save)
+        {
+            PairingDiagnosticsSnapshot value = diagnostics;
+            int capacity = UpgradeSystem.PairingHabitatCapacity(save);
+            int occupants = CountPairingOccupants(save);
+            string lastReason = string.IsNullOrEmpty(value.lastNoPairReason) ? "none" : value.lastNoPairReason;
+            return "Pairing checks " + value.checks + " • eligible checks " + value.checksWithEligiblePair +
+                " • no-pair checks " + value.checksWithoutEligiblePair + " • last eligible M/F " +
+                value.lastEligibleMales + "/" + value.lastEligibleFemales + " (" +
+                value.lastEligiblePairCombinations + " combinations) • Pairing Tank " + occupants + "/" + capacity +
+                " • pair selections " + value.pairSelections + " • conception rolls " + value.conceptionRolls +
+                " (failed " + value.failedConceptionRolls + ", successful " + value.successfulConceptions +
+                ") • blocked before roll " + value.blockedResolutionAttempts + " • candidate blocks pregnancy/recovery/cooldown/window/age/session/other " +
+                value.blockedPregnancyCandidates + "/" + value.blockedRecoveryCandidates + "/" +
+                value.blockedCooldownCandidates + "/" + value.blockedFertileWindowCandidates + "/" +
+                value.blockedAgeCandidates + "/" + value.blockedSessionCandidates + "/" +
+                value.blockedOtherCandidates + " • capacity blocks " + value.capacityBlockedMoves +
+                " • route failures " + value.routeFailures + " • last no-pair/block reason: " + lastReason +
+                "\nPer-speed • " + FormatSpeedDiagnostics("1x", diagnosticsBySpeed[0]) +
+                " • " + FormatSpeedDiagnostics("2x", diagnosticsBySpeed[1]) +
+                " • " + FormatSpeedDiagnostics("3x", diagnosticsBySpeed[2]);
+        }
+
+        private static string FormatSpeedDiagnostics(string label, PairingSpeedDiagnosticsSnapshot value)
+        {
+            return label + " checks/eligible pairs/attempts=" + value.checks + "/" +
+                value.eligiblePairsFound + "/" + value.pairingAttempts +
+                " cooldown-blocked checks/candidates=" + value.cooldownBlockedChecks + "/" +
+                value.cooldownBlockedCandidates + " capacity blocks=" +
+                value.capacityBlockedAttempts + " rolls/conceptions=" + value.conceptionRolls + "/" +
+                value.successfulConceptions + " failed=" + value.failedConceptionRolls +
+                " skipped checks=" + value.skippedChecks +
+                " recovered windows=" + value.recoveredFertileWindows;
+        }
 
         /// <summary>
         /// Selects one eligible male/female pair without resolving conception.
@@ -1708,31 +1895,96 @@ namespace RatHabitat
         /// </summary>
         public static bool TryChoosePair(ColonySaveData save, long gameTime, out RatData male, out RatData female)
         {
+            return TryChoosePair(save, gameTime, gameTime, SaveSimulationSpeed(save), out male, out female);
+        }
+
+        public static bool TryChoosePair(
+            ColonySaveData save, long opportunityWindowStartGameTime, long gameTime,
+            float speed, out RatData male, out RatData female)
+        {
+            diagnostics.checks++;
+            PairingSpeedDiagnosticsSnapshot speedDiagnostics =
+                diagnosticsBySpeed[SpeedBucketIndex(speed)];
+            speedDiagnostics.checks++;
+            diagnosticsBySpeed[SpeedBucketIndex(speed)] = speedDiagnostics;
+            long cooldownCandidatesBeforeCheck = diagnostics.blockedCooldownCandidates;
             male = null;
             female = null;
-            if (save == null) return false;
+            MaleCandidates.Clear();
+            FemaleCandidates.Clear();
+            diagnostics.lastEligibleMales = 0;
+            diagnostics.lastEligibleFemales = 0;
+            diagnostics.lastEligiblePairCombinations = 0;
+            diagnostics.lastPairingOccupants = CountPairingOccupants(save);
+            diagnostics.lastPairingCapacity = UpgradeSystem.PairingHabitatCapacity(save);
+            diagnostics.lastNoPairReason = string.Empty;
+            if (save == null)
+            {
+                diagnostics.checksWithoutEligiblePair++;
+                diagnostics.lastNoPairReason = "No colony save is loaded.";
+                return false;
+            }
             // Maintenance/load owns the full reproductive reconciliation.
             // Candidate eligibility below is timestamp-authoritative and
             // uses the cached pregnancy/session indexes; a pairing attempt
             // must not trigger birth recovery or rebuild all colony history.
-            MaleCandidates.Clear();
-            FemaleCandidates.Clear();
             foreach (var rat in save.rats)
             {
-                if (rat == null || (rat.stage != RatStage.Adult && rat.stage != RatStage.Mature) ||
+                if (rat == null || rat.removalDisposition != RatRemovalDisposition.None ||
+                    (rat.stage != RatStage.Adult && rat.stage != RatStage.Mature) ||
                     rat.enclosure != RatEnclosure.Pairing) continue;
 
-                string reason;
-                if (!BreedingSystem.IsBreedEligible(save, rat, gameTime, out reason)) continue;
+                BreedingSystem.ReproductiveStatus reproductiveStatus =
+                    BreedingSystem.GetReproductiveStatus(save, rat, gameTime);
+                string reason = reproductiveStatus.eligibilityReason;
+                if (!reproductiveStatus.canBreed)
+                {
+                    bool recoveredWindow = rat.sex == RatSex.Female &&
+                        reproductiveStatus.state == ReproductiveState.Fertile &&
+                        !string.IsNullOrEmpty(reason) &&
+                        reason.StartsWith("Outside the fertile window", StringComparison.Ordinal) &&
+                        BreedingSystem.FertileWindowOverlapsInterval(
+                            rat, opportunityWindowStartGameTime, gameTime);
+                    if (!recoveredWindow)
+                    {
+                        RecordCandidateBlock(reason, speed);
+                        continue;
+                    }
+                    speedDiagnostics = diagnosticsBySpeed[SpeedBucketIndex(speed)];
+                    speedDiagnostics.recoveredFertileWindows++;
+                    diagnosticsBySpeed[SpeedBucketIndex(speed)] = speedDiagnostics;
+                }
                 if (rat.sex == RatSex.Male) MaleCandidates.Add(rat);
                 else if (rat.sex == RatSex.Female) FemaleCandidates.Add(rat);
             }
 
+            diagnostics.lastEligibleMales = MaleCandidates.Count;
+            diagnostics.lastEligibleFemales = FemaleCandidates.Count;
+            diagnostics.lastEligiblePairCombinations = MaleCandidates.Count * FemaleCandidates.Count;
+            speedDiagnostics = diagnosticsBySpeed[SpeedBucketIndex(speed)];
+            speedDiagnostics.eligiblePairsFound += diagnostics.lastEligiblePairCombinations;
+            diagnosticsBySpeed[SpeedBucketIndex(speed)] = speedDiagnostics;
             Shuffle(MaleCandidates);
             Shuffle(FemaleCandidates);
             int pairCount = Mathf.Min(MaleCandidates.Count, FemaleCandidates.Count);
-            if (pairCount <= 0) return false;
+            if (pairCount <= 0)
+            {
+                if (diagnostics.blockedCooldownCandidates > cooldownCandidatesBeforeCheck)
+                {
+                    speedDiagnostics = diagnosticsBySpeed[SpeedBucketIndex(speed)];
+                    speedDiagnostics.cooldownBlockedChecks++;
+                    diagnosticsBySpeed[SpeedBucketIndex(speed)] = speedDiagnostics;
+                }
+                diagnostics.checksWithoutEligiblePair++;
+                diagnostics.lastNoPairReason = NoPairReason(MaleCandidates.Count, FemaleCandidates.Count);
+                return false;
+            }
 
+            diagnostics.checksWithEligiblePair++;
+            diagnostics.pairSelections++;
+            speedDiagnostics = diagnosticsBySpeed[SpeedBucketIndex(speed)];
+            speedDiagnostics.pairingAttempts++;
+            diagnosticsBySpeed[SpeedBucketIndex(speed)] = speedDiagnostics;
             male = MaleCandidates[0];
             female = FemaleCandidates[0];
             return true;
@@ -1795,14 +2047,18 @@ namespace RatHabitat
             conceptionSucceeded = false;
             reason = string.Empty;
             createdPregnancy = null;
+            float attemptSpeed = SaveSimulationSpeed(save);
             if (save == null || female == null || male == null)
             {
                 reason = "The pairing rats are no longer available.";
+                diagnostics.blockedResolutionAttempts++;
                 return false;
             }
             if (female.enclosure != RatEnclosure.Pairing || male.enclosure != RatEnclosure.Pairing)
             {
-                reason = "Both rats must be in the Pairing Habitat.";
+                reason = "Both rats must be in the Pairing Tank.";
+                diagnostics.blockedResolutionAttempts++;
+                diagnostics.blockedOtherCandidates++;
                 return false;
             }
 
@@ -1811,11 +2067,13 @@ namespace RatHabitat
             if (!CanResolveParticipant(save, female, gameTime, allowFertilityWindowElapsed, out femaleReason))
             {
                 reason = ColonyFactory.DisplayName(female) + ": " + femaleReason;
+                RecordResolutionBlock(femaleReason, attemptSpeed);
                 return false;
             }
             if (!CanResolveParticipant(save, male, gameTime, false, out maleReason))
             {
                 reason = ColonyFactory.DisplayName(male) + ": " + maleReason;
+                RecordResolutionBlock(maleReason, attemptSpeed);
                 return false;
             }
 
@@ -1825,13 +2083,20 @@ namespace RatHabitat
                 pregnancyChance,
                 0f,
                 Mathf.Clamp01(pregnancyChance));
-            if (UnityEngine.Random.value > chance)
+            diagnostics.conceptionRolls++;
+            PairingSpeedDiagnosticsSnapshot speedDiagnostics =
+                diagnosticsBySpeed[SpeedBucketIndex(attemptSpeed)];
+            speedDiagnostics.conceptionRolls++;
+            if (chance <= 0f || UnityEngine.Random.value > chance)
             {
                 // A failed resolution is still a real biological attempt.
                 // Persist a cooldown on both participants so the next
                 // scheduled pairing pass cannot immediately select the same
                 // pair again or replay the interaction every frame.
                 ApplyPairingAttemptCooldown(female, male, gameTime);
+                diagnostics.failedConceptionRolls++;
+                speedDiagnostics.failedConceptionRolls++;
+                diagnosticsBySpeed[SpeedBucketIndex(attemptSpeed)] = speedDiagnostics;
                 return true;
             }
 
@@ -1846,7 +2111,66 @@ namespace RatHabitat
             // the same pair from being staged again during the current cycle.
             ApplyPairingAttemptCooldown(female, male, gameTime);
             conceptionSucceeded = true;
+            diagnostics.successfulConceptions++;
+            speedDiagnostics.successfulConceptions++;
+            diagnosticsBySpeed[SpeedBucketIndex(attemptSpeed)] = speedDiagnostics;
             return true;
+        }
+
+        private static void RecordCandidateBlock(string reason, float speed)
+        {
+            switch (ClassifyBlock(reason))
+            {
+                case PairingBlockKind.Pregnancy: diagnostics.blockedPregnancyCandidates++; break;
+                case PairingBlockKind.Recovery: diagnostics.blockedRecoveryCandidates++; break;
+                case PairingBlockKind.Cooldown:
+                    diagnostics.blockedCooldownCandidates++;
+                    diagnosticsBySpeed[SpeedBucketIndex(speed)].cooldownBlockedCandidates++;
+                    break;
+                case PairingBlockKind.FertileWindow: diagnostics.blockedFertileWindowCandidates++; break;
+                case PairingBlockKind.Age: diagnostics.blockedAgeCandidates++; break;
+                case PairingBlockKind.Session: diagnostics.blockedSessionCandidates++; break;
+                default: diagnostics.blockedOtherCandidates++; break;
+            }
+        }
+
+        private static void RecordResolutionBlock(string reason, float speed)
+        {
+            diagnostics.blockedResolutionAttempts++;
+            RecordCandidateBlock(reason, speed);
+        }
+
+        private enum PairingBlockKind { Other, Pregnancy, Recovery, Cooldown, FertileWindow, Age, Session }
+
+        private static PairingBlockKind ClassifyBlock(string reason)
+        {
+            if (string.IsNullOrEmpty(reason)) return PairingBlockKind.Other;
+            if (reason.IndexOf("pregnan", StringComparison.OrdinalIgnoreCase) >= 0) return PairingBlockKind.Pregnancy;
+            if (reason.IndexOf("recover", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                reason.IndexOf("nursing", StringComparison.OrdinalIgnoreCase) >= 0) return PairingBlockKind.Recovery;
+            if (reason.IndexOf("cooldown", StringComparison.OrdinalIgnoreCase) >= 0) return PairingBlockKind.Cooldown;
+            if (reason.IndexOf("fertile window", StringComparison.OrdinalIgnoreCase) >= 0) return PairingBlockKind.FertileWindow;
+            if (reason.IndexOf("age", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                reason.IndexOf("immature", StringComparison.OrdinalIgnoreCase) >= 0) return PairingBlockKind.Age;
+            if (reason.IndexOf("session", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                reason.IndexOf("occupied", StringComparison.OrdinalIgnoreCase) >= 0) return PairingBlockKind.Session;
+            return PairingBlockKind.Other;
+        }
+
+        private static string NoPairReason(int eligibleMales, int eligibleFemales)
+        {
+            if (eligibleMales == 0 && eligibleFemales == 0) return "No eligible males or females in Pairing Tank.";
+            if (eligibleMales == 0) return "No eligible male in Pairing Tank.";
+            return "No eligible female in Pairing Tank.";
+        }
+
+        private static int CountPairingOccupants(ColonySaveData save)
+        {
+            if (save == null || save.rats == null) return 0;
+            int count = 0;
+            foreach (RatData rat in save.rats)
+                if (rat != null && rat.enclosure == RatEnclosure.Pairing) count++;
+            return count;
         }
 
         private static bool CanResolveParticipant(

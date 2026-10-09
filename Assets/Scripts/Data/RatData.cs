@@ -228,6 +228,11 @@ namespace RatHabitat
         public string pregnancyId;
         public long breedingCooldownUntil;
         public RatEnclosure enclosure = RatEnclosure.FemaleColony;
+        // Tank occupied immediately before the current For Sale assignment.
+        // The separate flag lets old JSON saves distinguish a missing value
+        // from a legitimate MaleColony/FemaleColony enum default.
+        public RatEnclosure previousSaleTank = RatEnclosure.FemaleColony;
+        public bool hasPreviousSaleTank;
         // Player-assigned Pairing Habitat placement is independent of sex,
         // age, fertility, and reproductive state. Keep it explicit so an
         // enclosure reconciliation cannot infer a different destination.
@@ -462,6 +467,11 @@ namespace RatHabitat
         // default of keeping the screen awake.
         public bool keepScreenAwake = true;
         public bool keepScreenAwakePreferenceInitialized;
+        // When enabled, newborns keep the generated names assigned during
+        // birth and the player is not stopped by the litter naming prompt.
+        // Missing in older saves defaults to false, preserving their manual
+        // naming behavior.
+        public bool autoNamePinkies;
         public ClockData clock = new ClockData();
         public List<string> ratIds = new List<string>();
         public List<RatData> rats = new List<RatData>();
