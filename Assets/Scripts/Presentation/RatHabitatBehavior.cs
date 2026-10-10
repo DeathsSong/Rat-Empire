@@ -46,6 +46,12 @@ namespace RatHabitat
     public sealed class RatHabitatBehavior : MonoBehaviour
     {
         private static readonly List<RatHabitatBehavior> activeBehaviors = new List<RatHabitatBehavior>();
+        // Ambient movement destinations use a coarse reservation grid. Target
+        // selection checks only the candidate's 3x3 neighborhood (never the
+        // whole colony), and reservations exist only while a rat is traveling.
+        private static readonly Dictionary<long, int> ambientTargetCellCounts =
+            new Dictionary<long, int>(512);
+        private static readonly int[] ambientDirectionCounts = new int[5 * 8];
 
         private HabitatBuilder habitat;
         private RatData rat;
@@ -107,6 +113,10 @@ namespace RatHabitat
         private int pairingRouteWaypointIndex;
         private readonly List<Vector3> nestDetourWaypoints = new List<Vector3>();
         private int nestDetourWaypointIndex;
+        private readonly Vector3[] nestDetourCorners = new Vector3[4];
+        private Vector3 nestDetourGoal;
+        private bool nestDetourEscaping;
+        private bool nestRoutePlanningFailed;
         private float pairingInteractionRemaining;
         private bool nursingInteractionActive;
         private float nursingInteractionRemaining;
@@ -124,6 +134,17 @@ namespace RatHabitat
         private float lastActualWorldMovementSpeed;
         private float spacingTimer;
         private float pendingBehaviorTimeSeconds;
+        private float blockedTravelSeconds;
+        private string blockedMovementTargetId;
+        private int movementDecisionOrdinal;
+        private float movementDecisionPhaseSeconds;
+        private float movementDecisionTimerSeconds;
+        private bool hasAmbientTargetReservation;
+        private long ambientTargetReservationCell;
+        private RatEnclosure ambientTargetReservationEnclosure;
+        private int ambientTargetReservationDirection;
+
+        public int BlockedTargetRecoveryCount { get; private set; }
 
         private const float MinimumWalkSpeed = 0.55f;
         private const float MaximumWalkSpeed = 0.92f;
@@ -131,6 +152,8 @@ namespace RatHabitat
         private const float WalkAnimationPlaybackScale = 0.513f;
         private const float RunSpeed = 1.65f;
         private const float ArrivalDistance = 0.24f;
+        private const float NestWaypointEpsilon = 0.00001f;
+        private const float NestCornerRoutePadding = 0.12f;
         private const float MinimumRatSpacing = 0.82f;
         private const float MovementFacingThreshold = 0.0025f;
         private const float MovementTurnSpeed = 360f;
@@ -138,6 +161,12 @@ namespace RatHabitat
         private const float MinimumSniffDuration = 1.0f;
         private const float MaximumSniffDuration = 3.0f;
         private const float SpacingRefreshIntervalSeconds = 0.12f;
+        private const float BlockedTargetRecoverySeconds = 0.65f;
+        private const float MaximumSpacingCorrectionUnitsPerPass = 0.06f;
+        private const float AmbientTargetGridCellSize = 1.75f;
+        private const int AmbientTargetCellCapacity = 3;
+        private const int AmbientTargetCandidatesPerDecision = 14;
+        private const int AmbientDirectionBucketCount = 8;
 
         public RatBehaviorState State { get { return state; } }
         public bool PairingApproachAtTarget { get { return pairingApproachActive && pairingApproachArrived; } }
@@ -148,9 +177,28 @@ namespace RatHabitat
         public float BaseWorldMovementSpeed { get { return movementSpeed; } }
         public float TargetWorldMovementSpeed
         {
-            get { return movementSpeed * GrowthSystem.RuntimeSimulationMultiplier; }
+            get
+            {
+                if (!IsWalkingState(state) && !pairingApproachActive && !birthApproachActive &&
+                    !nursingCareMovementActive) return 0f;
+                return GrowthSystem.SimulationVisibleMovementSpeed(
+                    movementSpeed, Time.unscaledDeltaTime);
+            }
         }
         public float ActualWorldMovementSpeed { get { return lastActualWorldMovementSpeed; } }
+        public Vector3 MovementTargetPositionForDiagnostics { get { return targetPosition; } }
+        public float MovementDecisionPhaseSeconds { get { return movementDecisionPhaseSeconds; } }
+        public float MovementDecisionTimerSeconds { get { return movementDecisionTimerSeconds; } }
+        public bool HasAmbientTargetReservation { get { return hasAmbientTargetReservation; } }
+        public int AmbientTargetCellCrowdForDiagnostics
+        {
+            get
+            {
+                return hasAmbientTargetReservation
+                    ? GetAmbientTargetCellCount(ambientTargetReservationCell)
+                    : 0;
+            }
+        }
 
         public static string GetMovementDiagnosticReadout()
         {
@@ -161,13 +209,14 @@ namespace RatHabitat
                     candidate.rat.stage == RatStage.Pinkie) continue;
 
                 return string.Format(
-                "Rat {0}: speed {1:0.#}x | movement multiplier {5:0.#}x | clock {4:0.###} real s/game h | actual {2:0.00} u/s | target {3:0.00} u/s | movement follows game-time fast-forward",
+                "Rat {0}: speed {1:0.#}x | movement multiplier {5:0.#}x | clock {4:0.###} real s/game h | actual {2:0.00} u/s | safe visible target {3:0.00} u/s | 3x presentation cap {6:0.##} u/frame",
                 ColonyFactory.DisplayName(candidate.rat),
                     GrowthSystem.RuntimeSimulationSpeed,
                     candidate.ActualWorldMovementSpeed,
                     candidate.TargetWorldMovementSpeed,
                     GrowthSystem.RealSecondsPerGameHour(GrowthSystem.RuntimeSimulationSpeed),
-                    GrowthSystem.RuntimeSimulationMultiplier);
+                    GrowthSystem.RuntimeSimulationMultiplier,
+                    GrowthSystem.MaximumThreeXVisibleMovementUnitsPerFrame);
             }
 
             return string.Format(
@@ -235,16 +284,19 @@ namespace RatHabitat
 
         private void OnDisable()
         {
+            ReleaseAmbientTargetReservation();
             activeBehaviors.Remove(this);
         }
 
         private void OnDestroy()
         {
+            ReleaseAmbientTargetReservation();
             activeBehaviors.Remove(this);
         }
 
         public void Configure(HabitatBuilder builder, RatData data)
         {
+            if (rat != data) ReleaseAmbientTargetReservation();
             habitat = builder;
             rat = data;
             if (rat == null) return;
@@ -254,6 +306,7 @@ namespace RatHabitat
                 // Presenter normally does not add this component for Pinkies;
                 // this guard keeps a stale component inert during any unusual
                 // stage rollback or transition race.
+                ReleaseAmbientTargetReservation();
                 currentTarget = null;
                 state = RatBehaviorState.Idle;
                 configured = false;
@@ -283,6 +336,9 @@ namespace RatHabitat
             {
                 seed = StableSeed(rat.id);
                 random = new System.Random(seed);
+                movementDecisionOrdinal = 0;
+                movementDecisionPhaseSeconds = NextMovementFloat(0f, 0.9f);
+                movementDecisionTimerSeconds = movementDecisionPhaseSeconds;
                 previousPositionForFacing = transform.position;
                 hasPreviousPositionForFacing = true;
                 foodPersonality = NextFloat(0.75f, 1.35f);
@@ -294,7 +350,13 @@ namespace RatHabitat
                 restNeed = NextFloat(0.12f, 0.55f);
                 exploreNeed = NextFloat(0.15f, 0.7f);
                 microAnimationPhase = NextFloat(0f, Mathf.PI * 2f);
-                behaviorClockSeconds = 0f;
+                // Seeded per-rat phase offsets keep large colonies from
+                // running their spacing/target decisions in lockstep.
+                behaviorClockSeconds = NextFloat(0f, 6f);
+                spacingTimer = NextFloat(0f, SpacingRefreshIntervalSeconds);
+                blockedTravelSeconds = 0f;
+                blockedMovementTargetId = null;
+                BlockedTargetRecoveryCount = 0;
                 nextInvestigationAllowedAt = behaviorClockSeconds + NextFloat(0.7f, 2.4f);
                 configuredStage = rat.stage;
                 configuredEnclosure = rat.enclosure;
@@ -316,6 +378,7 @@ namespace RatHabitat
                 animatorLookupAttempted = false;
                 microAnimationRoot = null;
                 microAnimationBound = false;
+                ReleaseAmbientTargetReservation();
                 currentTarget = null;
                 nursingInteractionActive = false;
                 nursingInteractionRemaining = 0f;
@@ -338,6 +401,7 @@ namespace RatHabitat
                     birthApproachActive = false;
                     birthApproachArrived = false;
                 }
+                ReleaseAmbientTargetReservation();
                 currentTarget = null;
                 nursingInteractionActive = false;
                 nursingInteractionRemaining = 0f;
@@ -383,6 +447,7 @@ namespace RatHabitat
                 (rat.stage != RatStage.Adult && rat.stage != RatStage.Mature) ||
                 rat.enclosure != RatEnclosure.Pairing || nursingInteractionActive || nursingCareRestActive) return false;
 
+            ReleaseAmbientTargetReservation();
             pairingApproachActive = true;
             pairingApproachArrived = false;
             pairingInteractionActive = false;
@@ -427,6 +492,7 @@ namespace RatHabitat
                 rat.stage == RatStage.Pinkie || !EnclosureSystem.HasNest(rat.enclosure) ||
                 pairingApproachActive || nursingInteractionActive) return false;
 
+            ReleaseAmbientTargetReservation();
             birthApproachActive = true;
             birthApproachArrived = false;
             birthWalkAnimationActive = false;
@@ -448,6 +514,26 @@ namespace RatHabitat
         }
 
         /// <summary>
+        /// Reconciles the route state with the authoritative world position.
+        /// A route can reach the caregiver zone while its final movement step
+        /// misses the internal arrival threshold; once physically in the nest,
+        /// hold the mother there until the birth transaction commits.
+        /// </summary>
+        public bool ConfirmBirthApproachArrivalAtNest()
+        {
+            if (!configured || rat == null || !EnclosureSystem.HasNest(rat.enclosure) ||
+                !EnclosureSystem.IsInsideNestCaregiverZone(rat.enclosure, transform.position))
+                return false;
+
+            birthApproachActive = true;
+            birthApproachArrived = true;
+            birthWalkAnimationActive = false;
+            currentTarget = null;
+            FaceBirthNest(0f);
+            return true;
+        }
+
+        /// <summary>
         /// Ends the pre-birth route after BreedingSystem has created the
         /// litter. The mother remains at her actual arrival position and
         /// transitions into the normal inner-zone caregiving loop.
@@ -462,6 +548,21 @@ namespace RatHabitat
                 BeginCaregivingCycle();
             else
                 BeginTravel();
+        }
+
+        /// <summary>
+        /// Cancels only the presentation route. The authoritative pregnancy
+        /// remains pending and GameBootstrap clears its persisted approach
+        /// flag before scheduling a safe retry.
+        /// </summary>
+        public void CancelBirthApproach()
+        {
+            if (!birthApproachActive) return;
+            birthApproachActive = false;
+            birthApproachArrived = false;
+            birthWalkAnimationActive = false;
+            currentTarget = null;
+            BeginTravel();
         }
 
         /// <summary>
@@ -498,6 +599,7 @@ namespace RatHabitat
         private bool ConfigureNursingInteraction(Vector3 pupPosition, string interactionId,
             float durationSeconds)
         {
+            ReleaseAmbientTargetReservation();
             nursingInteractionActive = true;
             nursingInteractionRemaining = Mathf.Max(0.75f, durationSeconds);
             nursingInteractionAnimation = NursingSystem.AnimationStateFor(interactionId);
@@ -533,11 +635,15 @@ namespace RatHabitat
             if (!configured || rat == null || !rat.nursing || !EnclosureSystem.HasNest(rat.enclosure))
                 return;
 
+            ReleaseAmbientTargetReservation();
             nursingCareRestActive = true;
             nursingCareMovementActive = true;
             nursingInteractionActive = false;
             nursingInteractionRemaining = 0f;
-            Vector3 nestSide = EnclosureSystem.GetNestCaregiverPosition(rat.enclosure);
+            // Nursing mothers should not keep the shared birth-arrival point
+            // occupied after their birth completes. Reuse the existing
+            // deterministic-per-behavior caregiver target selection.
+            Vector3 nestSide = NextCaregivingTarget();
             currentTarget = new RatBehaviorTarget
             {
                 id = "nursing-nest-rest",
@@ -559,6 +665,7 @@ namespace RatHabitat
             if (!configured || rat == null || !rat.nursing || !EnclosureSystem.HasNest(rat.enclosure))
                 return;
 
+            ReleaseAmbientTargetReservation();
             // Real nursing interactions remain owned by NursingSystem. This
             // branch only supplies visible movement and rest between those
             // persisted interactions.
@@ -588,20 +695,19 @@ namespace RatHabitat
 
         private Vector3 NextCaregivingTarget()
         {
-            Bounds zone;
             RatEnclosure enclosure = rat == null ? RatEnclosure.FemaleColony : rat.enclosure;
-            if (!EnclosureSystem.TryGetNestCaregiverBounds(
-                enclosure, NestBodyMarginForMovement(), out zone))
-                return EnclosureSystem.GetNestCaregiverPosition(enclosure);
-
-            Vector3 candidate = zone.center;
-            float minimumDistance = Mathf.Min(0.55f, Mathf.Max(0.18f, zone.extents.x * 0.45f));
+            Vector3 candidate = EnclosureSystem.GetNestCaregiverPosition(enclosure);
+            const float minimumDistance = 0.24f;
             for (int attempt = 0; attempt < 8; attempt++)
             {
-                candidate = new Vector3(
-                    NextFloat(zone.min.x, zone.max.x),
-                    transform.position.y,
-                    NextFloat(zone.min.z, zone.max.z));
+                float angle = NextFloat(0f, Mathf.PI * 2f);
+                // Keep the mother close to her own litter instead of sending
+                // her to an arbitrary point across the caregiver zone. This
+                // lets several mothers and pinkie families share the nest.
+                float radius = NextFloat(0.30f, 0.58f);
+                candidate = EnclosureSystem.GetNestFamilyCaregiverPosition(
+                    enclosure, rat.nursingLitterId, angle, radius,
+                    NestBodyMarginForMovement());
                 if (!hasLastNursingCareTarget ||
                     Vector2.Distance(new Vector2(candidate.x, candidate.z),
                         new Vector2(lastNursingCareTarget.x, lastNursingCareTarget.z)) >= minimumDistance)
@@ -667,6 +773,7 @@ namespace RatHabitat
         public void PlayDyingOnce()
         {
             if (!configured || state == RatBehaviorState.Dying) return;
+            ReleaseAmbientTargetReservation();
             currentTarget = null;
             deathPoseHeld = false;
             if (animator != null) animator.speed = GrowthSystem.RuntimeAnimationPlaybackMultiplier;
@@ -692,7 +799,19 @@ namespace RatHabitat
 
         private void UpdateCore()
         {
+            UpdateCore(Time.unscaledDeltaTime);
+        }
+
+        private void UpdateCore(float realDeltaSeconds)
+        {
             if (!configured || rat == null || habitat == null) return;
+            realDeltaSeconds = Mathf.Max(0f, realDeltaSeconds);
+            // This per-rat timer is deliberately advanced once per rendered
+            // update in unscaled seconds, not inside the accelerated behavior
+            // substep loop. It staggers ambient decisions without changing
+            // calendar or special-route timing.
+            movementDecisionTimerSeconds = Mathf.Max(0f,
+                movementDecisionTimerSeconds - realDeltaSeconds);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             // This isolation switch is an A/B experiment, so do not accumulate
             // a visual behavior backlog while the subsystem is disabled.
@@ -710,10 +829,10 @@ namespace RatHabitat
                 AuditAnimatorOnce();
             }
 
-            // Preserve the original contract: actual transform locomotion and
-            // rat timers consume the same fast-forward delta as the calendar.
-            // AI decisions are capped below; movement time is not.
-            float deltaTime = GrowthSystem.SimulationBehaviorDeltaSeconds(Time.unscaledDeltaTime);
+            // Timers and the calendar retain the full fast-forward delta.
+            // Visible 3x locomotion has a separate per-frame spatial budget so
+            // the authored speed cannot become a tank-sized transform jump.
+            float deltaTime = GrowthSystem.SimulationBehaviorDeltaSeconds(realDeltaSeconds);
             if (deltaTime <= 0f)
             {
                 pendingBehaviorTimeSeconds = 0f;
@@ -746,6 +865,8 @@ namespace RatHabitat
             float movementStepDeltaTime = simulationSteps <= 0 ? 0f : deltaTime / simulationSteps;
             float visualMovementTimeBudgetSeconds =
                 GrowthSystem.SimulationMovementTimeBudget(deltaTime);
+            float visibleMovementDistanceBudget =
+                GrowthSystem.SimulationVisibleMovementDistanceBudget(realDeltaSeconds);
             ApplySimulationAnimationSpeed();
 
             if (state == RatBehaviorState.Dying)
@@ -769,6 +890,7 @@ namespace RatHabitat
                     birthApproachActive = false;
                     birthApproachArrived = false;
                 }
+                ReleaseAmbientTargetReservation();
                 configuredEnclosure = rat.enclosure;
                 currentTarget = null;
                 nursingInteractionActive = false;
@@ -798,7 +920,8 @@ namespace RatHabitat
                 {
                     long movementSample = RuntimePerformanceDiagnostics.Begin(
                         PerformanceProbeArea.WorldMovementIntegration);
-                    try { UpdateBirthApproach(movementStepDeltaTime, ref visualMovementTimeBudgetSeconds); }
+                    try { UpdateBirthApproach(movementStepDeltaTime, ref visualMovementTimeBudgetSeconds,
+                        ref visibleMovementDistanceBudget); }
                     finally { RuntimePerformanceDiagnostics.End(
                         PerformanceProbeArea.WorldMovementIntegration, movementSample); }
                     continue;
@@ -810,7 +933,8 @@ namespace RatHabitat
                     {
                         long movementSample = RuntimePerformanceDiagnostics.Begin(
                             PerformanceProbeArea.WorldMovementIntegration);
-                        try { UpdatePairingApproach(movementStepDeltaTime, ref visualMovementTimeBudgetSeconds); }
+                        try { UpdatePairingApproach(movementStepDeltaTime, ref visualMovementTimeBudgetSeconds,
+                            ref visibleMovementDistanceBudget); }
                         finally { RuntimePerformanceDiagnostics.End(
                             PerformanceProbeArea.WorldMovementIntegration, movementSample); }
                     }
@@ -823,13 +947,14 @@ namespace RatHabitat
                 switch (state)
                 {
                     case RatBehaviorState.Idle:
-                        if (stateTimer <= 0f) BeginTravel();
+                        if (stateTimer <= 0f && movementDecisionTimerSeconds <= 0f) BeginTravel();
                         break;
                     case RatBehaviorState.Wander:
                     case RatBehaviorState.WalkToTarget:
                     case RatBehaviorState.Run:
                         UpdateTravel(stepDeltaTime, movementStepDeltaTime,
-                            ref visualMovementTimeBudgetSeconds);
+                            realDeltaSeconds, ref visualMovementTimeBudgetSeconds,
+                            ref visibleMovementDistanceBudget);
                         break;
                     case RatBehaviorState.Investigate:
                         UpdateInvestigation(stepDeltaTime);
@@ -866,22 +991,27 @@ namespace RatHabitat
 
         private void LateUpdateCore()
         {
-            if (!configured || rat == null || animator == null) return;
+            LateUpdateCore(Time.unscaledDeltaTime);
+        }
+
+        private void LateUpdateCore(float realDeltaSeconds)
+        {
+            if (!configured || rat == null) return;
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             if (RuntimePerformanceDiagnostics.IsIsolationActive(PerformanceIsolationMode.RatAnimation))
             {
-                animator.speed = 0f;
+                if (animator != null) animator.speed = 0f;
                 lastAppliedAnimatorSpeed = 0f;
             }
 #endif
-            float realDelta = Time.unscaledDeltaTime;
-            if (diagnosticsHavePreviousPosition && realDelta > 0.0001f)
+            if (diagnosticsHavePreviousPosition && realDeltaSeconds > 0.0001f)
             {
                 lastActualWorldMovementSpeed = Vector3.Distance(
-                    transform.position, diagnosticsPreviousPosition) / realDelta;
+                    transform.position, diagnosticsPreviousPosition) / realDeltaSeconds;
             }
             diagnosticsPreviousPosition = transform.position;
             diagnosticsHavePreviousPosition = true;
+            if (animator == null) return;
             UpdateMovementFacingFromPositionDelta();
             // A removed rat does not receive a fake death loop. Clear the
             // additive offsets so removal remains the only dying behavior.
@@ -1034,27 +1164,38 @@ namespace RatHabitat
 
         private void BeginTravelCore()
         {
+            ReleaseAmbientTargetReservation();
             nestDetourWaypoints.Clear();
             nestDetourWaypointIndex = 0;
+            nestDetourEscaping = false;
+            blockedTravelSeconds = 0f;
             if (rat != null && rat.nursing && EnclosureSystem.HasNest(rat.enclosure))
             {
                 BeginCaregivingCycle();
                 return;
             }
             currentTarget = ChooseTarget();
+            if (currentTarget != null && currentTarget.id != blockedMovementTargetId)
+                blockedMovementTargetId = null;
             if (currentTarget == null)
             {
-                targetPosition = RandomAssignedPosition();
-                EnterState(ShouldRun() ? RatBehaviorState.Run : RatBehaviorState.Wander, NextFloat(6f, 14f));
+                targetPosition = ChooseCrowdAwareFloorPosition();
+                ReserveAmbientTarget(targetPosition);
+                ScheduleNextMovementDecision();
+                EnterState(ShouldRun() ? RatBehaviorState.Run : RatBehaviorState.Wander,
+                    NextMovementFloat(6f, 14f));
                 return;
             }
 
-            float angle = NextFloat(0f, Mathf.PI * 2f);
-            float radius = currentTarget.kind == RatBehaviorTargetKind.Tunnel ? 1.0f : NextFloat(0.65f, 1.15f);
-            Vector3 approach = currentTarget.position + new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle)) * radius;
-            targetPosition = ClampToNestSafePosition(approach);
+            float radius = currentTarget.kind == RatBehaviorTargetKind.Tunnel ? 1.0f : 0.9f;
+            targetPosition = ChooseCrowdAwareTargetApproach(currentTarget.position, radius);
+            ReserveAmbientTarget(targetPosition);
+            ScheduleNextMovementDecision();
             travelTimer = 0f;
-            EnterState(ShouldRun() ? RatBehaviorState.Run : RatBehaviorState.WalkToTarget, NextFloat(7f, 18f));
+            EnterState(currentTarget == null
+                    ? (ShouldRun() ? RatBehaviorState.Run : RatBehaviorState.Wander)
+                    : (ShouldRun() ? RatBehaviorState.Run : RatBehaviorState.WalkToTarget),
+                NextMovementFloat(7f, 18f));
         }
 
         private RatBehaviorTarget ChooseTarget()
@@ -1080,19 +1221,32 @@ namespace RatHabitat
             List<RatBehaviorTarget> targets = habitat.GetBehaviorTargets(rat == null ? RatEnclosure.FemaleColony : rat.enclosure);
             if (targets == null || targets.Count == 0) return null;
 
+            // Most trips are exploratory floor roaming. Utility objects still
+            // attract rats more strongly as a need rises, but no global need
+            // score can force an entire colony onto the same prop/path.
+            float strongestNeed = Mathf.Max(Mathf.Max(foodNeed, waterNeed),
+                Mathf.Max(restNeed, exploreNeed));
+            float utilityTripChance = Mathf.Lerp(0.16f, 0.58f, strongestNeed);
+            if (NextMovementFloat(0f, 1f) > utilityTripChance) return null;
+
             RatBehaviorTarget best = null;
             float bestScore = float.MinValue;
             Vector3 current = transform.position;
+            RatEnclosure enclosure = rat == null ? RatEnclosure.FemaleColony : rat.enclosure;
             foreach (var candidate in targets)
             {
                 if (candidate == null) continue;
+                if (!string.IsNullOrEmpty(blockedMovementTargetId) &&
+                    candidate.id == blockedMovementTargetId) continue;
                 // Pinkies have no movement behavior. Therefore any Nest
                 // target is exclusively reserved for their fixed birth
                 // placement and must never be selected by this controller.
                 if (candidate.kind == RatBehaviorTargetKind.Nest) continue;
                 float distance = Vector3.Distance(new Vector3(current.x, 0f, current.z), new Vector3(candidate.position.x, 0f, candidate.position.z));
                 float need = NeedFor(candidate.kind);
-                float score = need * 2.6f - distance * 0.075f + NextFloat(-0.22f, 0.22f) * (0.5f + exploreNeed);
+                int crowd = CountNearbyAmbientTargets(enclosure, candidate.position);
+                float score = need * 2.6f - distance * 0.075f - crowd * 0.035f +
+                    NextMovementFloat(-0.55f, 0.55f) * (0.5f + exploreNeed);
                 float availableAt;
                 if (!string.IsNullOrEmpty(candidate.id) && targetCooldowns.TryGetValue(candidate.id, out availableAt) && behaviorClockSeconds < availableAt)
                 {
@@ -1106,6 +1260,233 @@ namespace RatHabitat
                 }
             }
             return best;
+        }
+
+        private Vector3 ChooseCrowdAwareFloorPosition()
+        {
+            RatEnclosure enclosure = rat == null ? RatEnclosure.FemaleColony : rat.enclosure;
+            EnclosureSystem.Definition definition = EnclosureSystem.GetDefinition(enclosure);
+            Vector3 best = EnclosureSystem.GetNearestOpenFloorPosition(enclosure,
+                transform.position, 0.48f);
+            float bestScore = float.MaxValue;
+            int bestCellCrowd = int.MaxValue;
+            Vector3 current = transform.position;
+
+            for (int attempt = 0; attempt < AmbientTargetCandidatesPerDecision; attempt++)
+            {
+                Vector3 candidate = new Vector3(
+                    MovementFloat(definition.minX + 0.55f, definition.maxX - 0.55f),
+                    current.y,
+                    MovementFloat(definition.minZ + 0.55f, definition.maxZ - 0.55f));
+                candidate = ClampToNestSafePosition(candidate);
+                if (EnclosureSystem.IsInsideAdultNestExclusion(enclosure, candidate, 0.06f)) continue;
+
+                long cellKey;
+                int cellX;
+                int cellZ;
+                GetAmbientTargetCell(enclosure, candidate, out cellKey, out cellX, out cellZ);
+                int sameCellCrowd = GetAmbientTargetCellCount(cellKey);
+                if (sameCellCrowd >= AmbientTargetCellCapacity) continue;
+
+                int nearbyCrowd = CountNearbyAmbientTargets(enclosure, cellX, cellZ);
+                int directionBucket = MovementDirectionBucket(current, candidate);
+                int directionCrowd = GetAmbientDirectionCount(enclosure, directionBucket);
+                float score = sameCellCrowd * 18f + nearbyCrowd * 2.5f +
+                    directionCrowd * 1.35f + MovementFloat(0f, 0.8f);
+                if (score >= bestScore) continue;
+
+                best = candidate;
+                bestScore = score;
+                bestCellCrowd = sameCellCrowd;
+                if (sameCellCrowd == 0 && nearbyCrowd == 0 && directionCrowd <= 1) break;
+            }
+
+            // A full target cell is only possible in a very small/custom
+            // enclosure. Retry a bounded neighborhood search before falling
+            // back to a legal floor point; never loop or scan the colony.
+            if (bestCellCrowd >= AmbientTargetCellCapacity)
+                best = EnclosureSystem.GetNearestOpenFloorPosition(enclosure, best, 0.48f);
+            return best;
+        }
+
+        private Vector3 ChooseCrowdAwareTargetApproach(Vector3 target, float radius)
+        {
+            RatEnclosure enclosure = rat == null ? RatEnclosure.FemaleColony : rat.enclosure;
+            Vector3 best = EnclosureSystem.GetNearestOpenFloorPosition(enclosure,
+                new Vector3(target.x, transform.position.y, target.z), 0.48f);
+            float bestScore = float.MaxValue;
+            int bestCellCrowd = int.MaxValue;
+
+            for (int attempt = 0; attempt < AmbientTargetCandidatesPerDecision; attempt++)
+            {
+                float angle = MovementFloat(0f, Mathf.PI * 2f);
+                float candidateRadius = radius * MovementFloat(0.72f, 1.32f);
+                Vector3 candidate = target + new Vector3(
+                    Mathf.Cos(angle) * candidateRadius, 0f,
+                    Mathf.Sin(angle) * candidateRadius);
+                candidate.y = transform.position.y;
+                candidate = ClampToNestSafePosition(candidate);
+                if (EnclosureSystem.IsInsideAdultNestExclusion(enclosure, candidate, 0.06f)) continue;
+
+                long cellKey;
+                int cellX;
+                int cellZ;
+                GetAmbientTargetCell(enclosure, candidate, out cellKey, out cellX, out cellZ);
+                int sameCellCrowd = GetAmbientTargetCellCount(cellKey);
+                int nearbyCrowd = CountNearbyAmbientTargets(enclosure, cellX, cellZ);
+                int directionCrowd = GetAmbientDirectionCount(enclosure,
+                    MovementDirectionBucket(transform.position, candidate));
+                float score = sameCellCrowd * 18f + nearbyCrowd * 2.5f +
+                    directionCrowd * 1.35f + MovementFloat(0f, 0.8f);
+                if (sameCellCrowd >= AmbientTargetCellCapacity) score += 100f;
+                if (score >= bestScore) continue;
+
+                best = candidate;
+                bestScore = score;
+                bestCellCrowd = sameCellCrowd;
+                if (sameCellCrowd == 0 && nearbyCrowd == 0 && directionCrowd <= 1) break;
+            }
+
+            if (bestCellCrowd >= AmbientTargetCellCapacity)
+            {
+                currentTarget = null;
+                return ChooseCrowdAwareFloorPosition();
+            }
+            return best;
+        }
+
+        private static int GetAmbientTargetCellCount(long key)
+        {
+            int count;
+            return ambientTargetCellCounts.TryGetValue(key, out count) ? count : 0;
+        }
+
+        private static void GetAmbientTargetCell(RatEnclosure enclosure, Vector3 position,
+            out long key, out int cellX, out int cellZ)
+        {
+            EnclosureSystem.Definition definition = EnclosureSystem.GetDefinition(enclosure);
+            cellX = Mathf.Max(0, Mathf.FloorToInt((position.x - definition.minX) / AmbientTargetGridCellSize));
+            cellZ = Mathf.Max(0, Mathf.FloorToInt((position.z - definition.minZ) / AmbientTargetGridCellSize));
+            key = (((long)((int)enclosure & 0xffff)) << 32) |
+                (((long)(cellX & 0xffff)) << 16) | (uint)(cellZ & 0xffff);
+        }
+
+        private static int CountNearbyAmbientTargets(RatEnclosure enclosure, Vector3 position)
+        {
+            long ignored;
+            int cellX;
+            int cellZ;
+            GetAmbientTargetCell(enclosure, position, out ignored, out cellX, out cellZ);
+            return CountNearbyAmbientTargets(enclosure, cellX, cellZ);
+        }
+
+        private static int CountNearbyAmbientTargets(RatEnclosure enclosure, int cellX, int cellZ)
+        {
+            int total = 0;
+            for (int xOffset = -1; xOffset <= 1; xOffset++)
+            {
+                for (int zOffset = -1; zOffset <= 1; zOffset++)
+                {
+                    int x = cellX + xOffset;
+                    int z = cellZ + zOffset;
+                    if (x < 0 || z < 0) continue;
+                    long key = (((long)((int)enclosure & 0xffff)) << 32) |
+                        (((long)(x & 0xffff)) << 16) | (uint)(z & 0xffff);
+                    total += GetAmbientTargetCellCount(key);
+                }
+            }
+            return total;
+        }
+
+        private static int MovementDirectionBucket(Vector3 from, Vector3 to)
+        {
+            float angle = Mathf.Atan2(to.z - from.z, to.x - from.x);
+            if (angle < 0f) angle += Mathf.PI * 2f;
+            return Mathf.Clamp(Mathf.FloorToInt(angle * (AmbientDirectionBucketCount / (Mathf.PI * 2f))),
+                0, AmbientDirectionBucketCount - 1);
+        }
+
+        private static int GetAmbientDirectionCount(RatEnclosure enclosure, int direction)
+        {
+            int enclosureIndex = Mathf.Clamp((int)enclosure, 0, 4);
+            return ambientDirectionCounts[enclosureIndex * AmbientDirectionBucketCount + direction];
+        }
+
+        private void ReserveAmbientTarget(Vector3 destination)
+        {
+            if (rat == null) return;
+            ReleaseAmbientTargetReservation();
+            int cellX;
+            int cellZ;
+            GetAmbientTargetCell(rat.enclosure, destination, out ambientTargetReservationCell,
+                out cellX, out cellZ);
+            ambientTargetReservationEnclosure = rat.enclosure;
+            ambientTargetReservationDirection = MovementDirectionBucket(transform.position, destination);
+            int currentCount;
+            ambientTargetCellCounts.TryGetValue(ambientTargetReservationCell, out currentCount);
+            ambientTargetCellCounts[ambientTargetReservationCell] = currentCount + 1;
+            int directionIndex = Mathf.Clamp((int)ambientTargetReservationEnclosure, 0, 4) *
+                AmbientDirectionBucketCount + ambientTargetReservationDirection;
+            ambientDirectionCounts[directionIndex]++;
+            hasAmbientTargetReservation = true;
+        }
+
+        private void ReleaseAmbientTargetReservation()
+        {
+            if (!hasAmbientTargetReservation) return;
+            int count;
+            if (ambientTargetCellCounts.TryGetValue(ambientTargetReservationCell, out count))
+            {
+                if (count <= 1) ambientTargetCellCounts.Remove(ambientTargetReservationCell);
+                else ambientTargetCellCounts[ambientTargetReservationCell] = count - 1;
+            }
+            int directionIndex = Mathf.Clamp((int)ambientTargetReservationEnclosure, 0, 4) *
+                AmbientDirectionBucketCount + ambientTargetReservationDirection;
+            ambientDirectionCounts[directionIndex] = Mathf.Max(0, ambientDirectionCounts[directionIndex] - 1);
+            hasAmbientTargetReservation = false;
+        }
+
+        private void ScheduleNextMovementDecision()
+        {
+            movementDecisionTimerSeconds = Mathf.Max(movementDecisionTimerSeconds,
+                NextMovementFloat(0.18f, 0.85f));
+        }
+
+        private bool TrackBlockedAmbientTarget(float requestedDistance, float movedDistance,
+            float realDeltaSeconds)
+        {
+            // Special routes own their own watchdogs. Ambient recovery must
+            // never reset a valid nursing, courtship or birth interaction.
+            if (birthApproachActive || pairingApproachActive || nursingInteractionActive ||
+                nursingCareRestActive || nursingCareMovementActive) return false;
+            if (requestedDistance <= 0.000001f || realDeltaSeconds <= 0f) return false;
+
+            // Relative progress includes ordinary ~0.005-unit 1x frames and
+            // much smaller slow steps. No absolute 0.015-unit gate, and no
+            // accelerated time in this watchdog.
+            if (movedDistance < requestedDistance * 0.1f)
+                blockedTravelSeconds += realDeltaSeconds;
+            else
+                blockedTravelSeconds = 0f;
+
+            // A proven impossible route needs a new ambient goal immediately,
+            // not a current-position waypoint followed by endless retries.
+            if (!nestRoutePlanningFailed && blockedTravelSeconds < BlockedTargetRecoverySeconds) return false;
+
+            blockedTravelSeconds = 0f;
+            nestRoutePlanningFailed = false;
+            BlockedTargetRecoveryCount++;
+            ReleaseAmbientTargetReservation();
+            if (currentTarget != null && !string.IsNullOrEmpty(currentTarget.id))
+            {
+                blockedMovementTargetId = currentTarget.id;
+                targetCooldowns[currentTarget.id] = behaviorClockSeconds + NextFloat(30f, 60f);
+            }
+            currentTarget = null;
+            nestDetourWaypoints.Clear();
+            nestDetourWaypointIndex = 0;
+            BeginTravel();
+            return true;
         }
 
         private float NeedFor(RatBehaviorTargetKind kind)
@@ -1124,13 +1505,16 @@ namespace RatHabitat
         private void UpdateTravel(
             float deltaTime,
             float movementDeltaTime,
-            ref float visualMovementTimeBudgetSeconds)
+            float realDeltaSeconds,
+            ref float visualMovementTimeBudgetSeconds,
+            ref float visibleMovementDistanceBudget)
         {
             travelTimer += deltaTime;
             Vector3 toTarget = targetPosition - transform.position;
             toTarget.y = 0f;
             if (toTarget.sqrMagnitude <= ArrivalDistance * ArrivalDistance)
             {
+                ReleaseAmbientTargetReservation();
                 if (nursingInteractionActive)
                 {
                     EnterState(RatBehaviorState.Interact, nursingInteractionRemaining);
@@ -1170,6 +1554,7 @@ namespace RatHabitat
             {
                 nursingCareRestActive = false;
                 nursingCareMovementActive = false;
+                ReleaseAmbientTargetReservation();
                 currentTarget = null;
                 if (ShouldStartAmbientInvestigation(0.24f)) BeginAmbientInvestigation();
                 else EnterState(RatBehaviorState.Idle, NextIdleDuration(1.1f, 3.8f));
@@ -1182,18 +1567,22 @@ namespace RatHabitat
             bool usesRootMotion = animator != null && animator.applyRootMotion;
             if (!usesRootMotion)
             {
-                // Use the selected simulation delta for the real position
-                // write, but clamp the step so a 2x/3x frame can never jump
-                // past the destination and start oscillating around it.
+                // Use the selected simulation delta, constrained by the
+                // 3x-only visible distance budget. This leaves 1x/2x untouched
+                // and prevents a high-speed frame from hitting many clamps.
                 long movementSample = RuntimePerformanceDiagnostics.Begin(
                     PerformanceProbeArea.WorldMovementIntegration);
                 try
                 {
+                    Vector3 before = transform.position;
                     Vector3 nextPosition = GrowthSystem.SimulationMovementTargetPosition(
                         transform.position, targetPosition, movementSpeed,
-                        movementDeltaTime, ref visualMovementTimeBudgetSeconds);
+                        movementDeltaTime, ref visualMovementTimeBudgetSeconds,
+                        ref visibleMovementDistanceBudget);
                     float step = Vector3.Distance(transform.position, nextPosition);
                     transform.position = MoveTowardAvoidingNest(transform.position, nextPosition, step);
+                    float moved = Vector3.Distance(before, transform.position);
+                    if (TrackBlockedAmbientTarget(step, moved, realDeltaSeconds)) return;
                 }
                 finally
                 {
@@ -1205,21 +1594,23 @@ namespace RatHabitat
             // 1,440x real time, which otherwise forces this cosmetic pass on
             // every rendered frame. Keep the correction responsive at normal
             // speed but schedule it on a real-time interval at every speed.
-            spacingTimer -= Time.unscaledDeltaTime;
+            spacingTimer -= realDeltaSeconds;
             if (spacingTimer <= 0f)
             {
                 spacingTimer = SpacingRefreshIntervalSeconds;
-                ResolveSpacing(deltaTime);
+                ResolveSpacing(realDeltaSeconds);
             }
         }
 
         private void UpdatePairingApproach(
             float movementDeltaTime,
-            ref float visualMovementTimeBudgetSeconds)
+            ref float visualMovementTimeBudgetSeconds,
+            ref float visibleMovementDistanceBudget)
         {
             FacePairingPoint(movementDeltaTime);
             float remainingStep = GrowthSystem.SimulationMovementStep(
-                movementSpeed, movementDeltaTime, ref visualMovementTimeBudgetSeconds);
+                movementSpeed, movementDeltaTime, ref visualMovementTimeBudgetSeconds,
+                ref visibleMovementDistanceBudget);
             int waypointGuard = 0;
             while (remainingStep > 0.0001f && !pairingApproachArrived && waypointGuard++ < 8)
             {
@@ -1262,7 +1653,8 @@ namespace RatHabitat
 
         private void UpdateBirthApproach(
             float movementDeltaTime,
-            ref float visualMovementTimeBudgetSeconds)
+            ref float visualMovementTimeBudgetSeconds,
+            ref float visibleMovementDistanceBudget)
         {
             if (birthApproachArrived)
             {
@@ -1295,7 +1687,8 @@ namespace RatHabitat
                 transform.rotation, facing, MovementTurnSpeed * Mathf.Max(0f, movementDeltaTime));
             Vector3 next = GrowthSystem.SimulationMovementTargetPosition(
                 transform.position, destination, movementSpeed,
-                movementDeltaTime, ref visualMovementTimeBudgetSeconds);
+                movementDeltaTime, ref visualMovementTimeBudgetSeconds,
+                ref visibleMovementDistanceBudget);
             // The mother is the only adult allowed to use the nest during this
             // explicit route. Keep every movement step inside cage bounds and
             // project it into the safe inner caregiver area.
@@ -1552,19 +1945,47 @@ namespace RatHabitat
             bool adultSized = rat.stage == RatStage.Adult || rat.stage == RatStage.Mature ||
                 rat.stage == RatStage.Elderly;
             float minimum = adultSized ? MinimumRatSpacing : MinimumRatSpacing * 0.78f;
+            float correctionBudget = MaximumSpacingCorrectionUnitsPerPass;
             foreach (var other in activeBehaviors)
             {
+                if (correctionBudget <= 0.0001f) break;
                 if (other == null || other == this || other.rat == null || other.rat.stage == RatStage.Pinkie) continue;
                 if (other.pairingApproachActive) continue;
+                if (other.rat.enclosure != rat.enclosure) continue;
                 Vector3 offset = transform.position - other.transform.position;
                 offset.y = 0f;
                 float distance = offset.magnitude;
-                if (distance <= 0.001f || distance >= minimum) continue;
-                if (other.rat.enclosure != rat.enclosure) continue;
-                float correction = (minimum - distance) * Mathf.Clamp01(deltaTime * 5f);
-                transform.position = ClampToAssignedEnclosure(
+                if (distance >= minimum) continue;
+                if (distance <= 0.001f)
+                {
+                    offset = DeterministicSeparationDirection(rat.id, other.rat.id);
+                    distance = 0f;
+                }
+                float boundedDelta = Mathf.Min(Mathf.Max(0f, deltaTime),
+                    SpacingRefreshIntervalSeconds);
+                float correction = Mathf.Min(
+                    (minimum - distance) * Mathf.Clamp01(boundedDelta * 5f),
+                    correctionBudget);
+                transform.position = ClampToNestSafePosition(
                     transform.position + offset.normalized * correction);
+                correctionBudget -= correction;
             }
+        }
+
+        private static Vector3 DeterministicSeparationDirection(string firstId, string secondId)
+        {
+            string first = firstId ?? string.Empty;
+            string second = secondId ?? string.Empty;
+            bool firstComesFirst = string.CompareOrdinal(first, second) < 0;
+            uint hash = 2166136261u;
+            for (int index = 0; index < first.Length; index++)
+                hash = (hash ^ first[index]) * 16777619u;
+            hash = (hash ^ 0xFFu) * 16777619u;
+            for (int index = 0; index < second.Length; index++)
+                hash = (hash ^ second[index]) * 16777619u;
+            float angle = (hash % 36000u) * (Mathf.PI * 2f / 36000f);
+            Vector3 direction = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle));
+            return firstComesFirst ? direction : -direction;
         }
 
         private void EnterState(RatBehaviorState next, float duration)
@@ -1821,7 +2242,10 @@ namespace RatHabitat
 
         private bool ShouldRun()
         {
-            return random != null && random.NextDouble() < 0.12;
+            float individualRunBias = Mathf.InverseLerp(0.75f, 1.35f, explorePersonality);
+            float runChance = Mathf.Lerp(0.07f, 0.20f, individualRunBias) +
+                Mathf.Clamp01(exploreNeed) * 0.035f;
+            return NextMovementFloat(0f, 1f) < runChance;
         }
 
         private Vector3 RandomAssignedPosition()
@@ -1855,179 +2279,199 @@ namespace RatHabitat
         /// </summary>
         private Vector3 MoveTowardAvoidingNest(Vector3 current, Vector3 desired, float movementStep)
         {
+            nestRoutePlanningFailed = false;
             RatEnclosure enclosure = rat == null ? RatEnclosure.FemaleColony : rat.enclosure;
             if (nursingInteractionActive || nursingCareRestActive || nursingCareMovementActive)
             {
-                // If a saved position is outside the inner zone, let the
-                // normal movement step approach it first. Only project once
-                // the step reaches the zone, so recovery never teleports the
-                // mother to an inner point.
                 if (!EnclosureSystem.IsInsideNestCaregiverZone(enclosure, current, 0.42f) &&
                     !EnclosureSystem.IsInsideNestCaregiverZone(enclosure, desired, 0.42f))
                     return EnclosureSystem.ClampToEnclosureAllowNest(enclosure, desired);
                 return EnclosureSystem.ClampToNestCaregiverZone(enclosure, desired);
             }
             if (!EnclosureSystem.HasNest(enclosure)) return ClampToAssignedEnclosure(desired);
+            if (movementStep <= 0f) return current;
 
-            if (nestDetourWaypointIndex < nestDetourWaypoints.Count)
+            // Courtship must route to its current approach waypoint, never to
+            // the unrelated ambient target that was selected before courtship.
+            Vector3 goal = pairingApproachActive
+                ? (pairingRouteWaypointIndex < pairingRouteWaypoints.Count
+                    ? pairingRouteWaypoints[pairingRouteWaypointIndex] : pairingApproachTarget)
+                : targetPosition;
+            goal.y = current.y;
+            if (EnclosureSystem.IsInsideAdultNestExclusion(enclosure, goal))
+                return FailedNestRoute(current);
+            float clearance = EnclosureSystem.AdultNestRouteClearance;
+            if (EnclosureSystem.IsInsideAdultNestExclusion(enclosure, goal, clearance))
+                goal = EnclosureSystem.GetNearestOpenFloorPosition(enclosure, goal, 0.48f, clearance);
+            if (nestDetourWaypointIndex < nestDetourWaypoints.Count &&
+                (goal-nestDetourGoal).sqrMagnitude > 0.000001f)
+                ClearNestDetour();
+
+            float remaining = movementStep;
+            // At most four corners/escape/goal legs. Spend the same movement
+            // budget across turns instead of skipping corners within the
+            // general 0.24-unit interaction arrival radius.
+            for (int leg = 0; leg < 8 && remaining > NestWaypointEpsilon; leg++)
             {
-                Vector3 waypoint = nestDetourWaypoints[nestDetourWaypointIndex];
-                Vector3 toWaypoint = waypoint - current;
-                toWaypoint.y = 0f;
-                if (toWaypoint.sqrMagnitude <= ArrivalDistance * ArrivalDistance)
+                if (nestDetourWaypointIndex < nestDetourWaypoints.Count)
                 {
-                    nestDetourWaypointIndex++;
-                    if (nestDetourWaypointIndex >= nestDetourWaypoints.Count)
+                    Vector3 waypoint = nestDetourWaypoints[nestDetourWaypointIndex];
+                    waypoint.y = current.y;
+                    float distance = Vector3.Distance(current, waypoint);
+                    if (distance <= NestWaypointEpsilon)
                     {
-                        nestDetourWaypoints.Clear();
-                        nestDetourWaypointIndex = 0;
-                        return ClampToAssignedEnclosure(desired);
+                        nestDetourWaypointIndex++;
+                        nestDetourEscaping = false;
+                        continue;
                     }
-                    waypoint = nestDetourWaypoints[nestDetourWaypointIndex];
-                    toWaypoint = waypoint - current;
-                    toWaypoint.y = 0f;
+                    Vector3 next = Vector3.MoveTowards(current, waypoint, remaining);
+                    if (!nestDetourEscaping &&
+                        !EnclosureSystem.IsNestSafeRoute(enclosure, current, next, clearance))
+                    {
+                        // A changed nest footprint or a spacing nudge invalidated
+                        // this leg. Replan, without following a stale segment.
+                        ClearNestDetour();
+                        continue;
+                    }
+                    next = ClampToAssignedEnclosure(next);
+                    float moved = Vector3.Distance(current, next);
+                    if (moved <= 0.000001f) return FailedNestRoute(current);
+                    current = next;
+                    remaining = Mathf.Max(0f, remaining-moved);
+                    if (Vector3.Distance(current,waypoint) > NestWaypointEpsilon) return current;
+                    nestDetourWaypointIndex++;
+                    nestDetourEscaping = false;
+                    continue;
                 }
-                if (toWaypoint.sqrMagnitude <= 0.0001f) return ClampToAssignedEnclosure(current);
-                return ClampToAssignedEnclosure(current + toWaypoint.normalized * Mathf.Min(movementStep, toWaypoint.magnitude));
-            }
 
-            bool currentInside = EnclosureSystem.IsInsideAdultNestExclusion(enclosure, current, 0.04f);
-            Vector3 finalDestination = targetPosition;
-            finalDestination.y = current.y;
-            bool destinationInside = EnclosureSystem.IsInsideAdultNestExclusion(enclosure, finalDestination, 0.04f);
-            if (!currentInside && !destinationInside &&
-                EnclosureSystem.IsNestSafeRoute(enclosure, current, finalDestination, 0.04f))
-            {
-                return ClampToAssignedEnclosure(desired);
+                ClearNestDetour();
+                nestDetourGoal = goal;
+                if (EnclosureSystem.IsInsideAdultNestExclusion(enclosure, current, clearance))
+                {
+                    // Walk out of a stale position or the clearance shell. The
+                    // requested escape must be nonzero and outside the SAME
+                    // exclusion used by the planner, not just the raw renderer.
+                    Vector3 escape = EnclosureSystem.GetNearestOpenFloorPosition(
+                        enclosure, current, 0.48f, clearance);
+                    if ((escape-current).sqrMagnitude <= NestWaypointEpsilon*NestWaypointEpsilon ||
+                        EnclosureSystem.IsInsideAdultNestExclusion(enclosure, escape, clearance))
+                        return FailedNestRoute(current);
+                    nestDetourWaypoints.Add(escape);
+                    nestDetourEscaping = true;
+                }
+                else if (EnclosureSystem.IsNestSafeRoute(enclosure, current, goal, clearance))
+                {
+                    return ClampToAssignedEnclosure(Vector3.MoveTowards(current,goal,remaining));
+                }
+                else if (!TryBuildNestDetour(enclosure, current, goal))
+                {
+                    return FailedNestRoute(current);
+                }
             }
+            return current;
+        }
 
-            if (currentInside)
-            {
-                // A stale save or a previously rejected route may leave the
-                // root on the obstacle. Walk to the nearest open floor edge;
-                // do not snap it to a habitat spawn point.
-                nestDetourWaypoints.Add(EnclosureSystem.GetNearestOpenFloorPosition(
-                    enclosure, current, 0.48f));
-            }
-            else if (!TryBuildNestDetour(enclosure, current, finalDestination))
-            {
-                // A defensive fallback keeps the rat moving along a safe
-                // edge even if a future nest or enclosure is too constrained
-                // for a two-corner route.
-                nestDetourWaypoints.Add(EnclosureSystem.GetNearestOpenFloorPosition(
-                    enclosure, current, 0.48f));
-            }
-
+        private void ClearNestDetour()
+        {
+            nestDetourWaypoints.Clear();
             nestDetourWaypointIndex = 0;
-            if (nestDetourWaypoints.Count == 0) return ClampToAssignedEnclosure(desired);
-            Vector3 firstWaypoint = nestDetourWaypoints[0];
-            Vector3 toFirstWaypoint = firstWaypoint - current;
-            toFirstWaypoint.y = 0f;
-            if (toFirstWaypoint.sqrMagnitude <= 0.0001f) return ClampToAssignedEnclosure(current);
-            return ClampToAssignedEnclosure(current + toFirstWaypoint.normalized * Mathf.Min(movementStep, toFirstWaypoint.magnitude));
+            nestDetourEscaping = false;
+        }
+
+        private Vector3 FailedNestRoute(Vector3 current)
+        {
+            ClearNestDetour();
+            nestRoutePlanningFailed = true;
+            return current;
         }
 
         private bool TryBuildNestDetour(RatEnclosure enclosure, Vector3 start, Vector3 end)
         {
-            Vector3 nest;
-            float radiusX;
-            float radiusZ;
-            GetNestExclusion(enclosure, out nest, out radiusX, out radiusZ);
-            Bounds bounds = new Bounds(nest, new Vector3(radiusX * 2f, 1f, radiusZ * 2f));
-            if (enclosure == RatEnclosure.Pairing)
-            {
-                Bounds actualBounds;
-                if (EnclosureSystem.TryGetPairingNestAvoidanceBounds(0.24f, out actualBounds)) bounds = actualBounds;
-            }
-            else
-            {
-                bounds.Expand(new Vector3(0.24f, 0f, 0.24f));
-            }
+            Bounds bounds;
+            float clearance = EnclosureSystem.AdultNestRouteClearance;
+            if (!EnclosureSystem.TryGetAdultNestExclusionBounds(enclosure,
+                clearance+NestCornerRoutePadding, out bounds)) return false;
+            nestDetourCorners[0] = new Vector3(bounds.min.x,start.y,bounds.min.z);
+            nestDetourCorners[1] = new Vector3(bounds.min.x,start.y,bounds.max.z);
+            nestDetourCorners[2] = new Vector3(bounds.max.x,start.y,bounds.min.z);
+            nestDetourCorners[3] = new Vector3(bounds.max.x,start.y,bounds.max.z);
+            for (int index = 0; index < nestDetourCorners.Length; index++)
+                nestDetourCorners[index] = EnclosureSystem.ClampToEnclosureBounds(
+                    enclosure,nestDetourCorners[index],0.48f);
 
-            Vector3[] rawCorners =
-            {
-                new Vector3(bounds.min.x, start.y, bounds.min.z),
-                new Vector3(bounds.min.x, start.y, bounds.max.z),
-                new Vector3(bounds.max.x, start.y, bounds.min.z),
-                new Vector3(bounds.max.x, start.y, bounds.max.z),
-            };
-            Vector3[] corners = new Vector3[rawCorners.Length];
-            for (int index = 0; index < rawCorners.Length; index++)
-            {
-                corners[index] = EnclosureSystem.ClampToEnclosureBounds(enclosure, rawCorners[index], 0.48f);
-            }
-
-            var best = new List<Vector3>();
+            int bestFirst = -1;
+            int bestSecond = -1;
             float bestLength = float.MaxValue;
-            for (int first = 0; first < corners.Length; first++)
+            for (int first = 0; first < nestDetourCorners.Length; first++)
             {
-                if (!IsNestDetourPointAllowed(enclosure, corners[first])) continue;
-                if (EnclosureSystem.IsNestSafeRoute(enclosure, start, corners[first], 0.02f) &&
-                    EnclosureSystem.IsNestSafeRoute(enclosure, corners[first], end, 0.02f))
+                Vector3 a = nestDetourCorners[first];
+                if (!IsNestDetourPointAllowed(enclosure,a) ||
+                    !EnclosureSystem.IsNestSafeRoute(enclosure,start,a,clearance)) continue;
+                float startLength = Vector3.Distance(start,a);
+                if (EnclosureSystem.IsNestSafeRoute(enclosure,a,end,clearance))
                 {
-                    ConsiderNestDetour(new List<Vector3> { corners[first] }, start, end, ref best, ref bestLength);
+                    float length = startLength+Vector3.Distance(a,end);
+                    if (length < bestLength)
+                    {
+                        bestLength = length;
+                        bestFirst = first;
+                        bestSecond = -1;
+                    }
                 }
-                for (int second = 0; second < corners.Length; second++)
+                for (int second = 0; second < nestDetourCorners.Length; second++)
                 {
-                    if (first == second || !IsNestDetourPointAllowed(enclosure, corners[second])) continue;
-                    if (!EnclosureSystem.IsNestSafeRoute(enclosure, start, corners[first], 0.02f) ||
-                        !EnclosureSystem.IsNestSafeRoute(enclosure, corners[first], corners[second], 0.02f) ||
-                        !EnclosureSystem.IsNestSafeRoute(enclosure, corners[second], end, 0.02f)) continue;
-                    ConsiderNestDetour(new List<Vector3> { corners[first], corners[second] },
-                        start, end, ref best, ref bestLength);
+                    Vector3 b = nestDetourCorners[second];
+                    if (first == second || !IsNestDetourPointAllowed(enclosure,b) ||
+                        !EnclosureSystem.IsNestSafeRoute(enclosure,a,b,clearance) ||
+                        !EnclosureSystem.IsNestSafeRoute(enclosure,b,end,clearance)) continue;
+                    float length = startLength+Vector3.Distance(a,b)+Vector3.Distance(b,end);
+                    if (length >= bestLength) continue;
+                    bestLength = length;
+                    bestFirst = first;
+                    bestSecond = second;
                 }
             }
-
-            if (best.Count == 0) return false;
-            nestDetourWaypoints.AddRange(best);
+            if (bestFirst < 0) return false;
+            nestDetourWaypoints.Add(nestDetourCorners[bestFirst]);
+            if (bestSecond >= 0) nestDetourWaypoints.Add(nestDetourCorners[bestSecond]);
+            nestDetourGoal = end;
             return true;
-        }
-
-        private static void ConsiderNestDetour(List<Vector3> candidate, Vector3 start, Vector3 end,
-            ref List<Vector3> best, ref float bestLength)
-        {
-            float length = Vector3.Distance(start, candidate[0]);
-            for (int index = 1; index < candidate.Count; index++)
-                length += Vector3.Distance(candidate[index - 1], candidate[index]);
-            length += Vector3.Distance(candidate[candidate.Count - 1], end);
-            if (length < bestLength)
-            {
-                bestLength = length;
-                best = candidate;
-            }
         }
 
         private static bool IsNestDetourPointAllowed(RatEnclosure enclosure, Vector3 point)
         {
-            return EnclosureSystem.IsInside(enclosure, point, 0.48f) &&
-                !EnclosureSystem.IsInsideAdultNestExclusion(enclosure, point, 0.03f);
-        }
-
-        private static void GetNestExclusion(RatEnclosure enclosure, out Vector3 center,
-            out float radiusX, out float radiusZ)
-        {
-            center = EnclosureSystem.GetNestPosition(enclosure);
-            radiusX = enclosure == RatEnclosure.Pairing
-                ? EnclosureSystem.PairingNestAdultExclusionRadiusX
-                : EnclosureSystem.NestAdultExclusionRadiusX;
-            radiusZ = enclosure == RatEnclosure.Pairing
-                ? EnclosureSystem.PairingNestAdultExclusionRadiusZ
-                : EnclosureSystem.NestAdultExclusionRadiusZ;
-
-            Bounds bounds;
-            if (enclosure == RatEnclosure.Pairing &&
-                EnclosureSystem.TryGetPairingNestAvoidanceBounds(0f, out bounds))
-            {
-                center = bounds.center;
-                radiusX = bounds.extents.x + 0.02f;
-                radiusZ = bounds.extents.z + 0.02f;
-            }
+            return EnclosureSystem.IsInside(enclosure,point,0.48f) &&
+                !EnclosureSystem.IsInsideAdultNestExclusion(enclosure,point,
+                    EnclosureSystem.AdultNestRouteClearance);
         }
 
         private float NextFloat(float minimum, float maximum)
         {
             if (random == null) return (minimum + maximum) * 0.5f;
             return minimum + (float)random.NextDouble() * (maximum - minimum);
+        }
+
+        private float NextMovementFloat(float minimum, float maximum)
+        {
+            return minimum + MovementFloat(0f, 1f) * (maximum - minimum);
+        }
+
+        private float MovementFloat(float minimum, float maximum)
+        {
+            unchecked
+            {
+                uint value = (uint)seed;
+                value ^= (uint)(++movementDecisionOrdinal) * 0x9E3779B9u;
+                value ^= (uint)state * 0x85EBCA6Bu;
+                value ^= (uint)Mathf.Max(0, Mathf.FloorToInt(behaviorClockSeconds * 4f)) * 0xC2B2AE35u;
+                value ^= value >> 16;
+                value *= 0x7FEB352Du;
+                value ^= value >> 15;
+                value *= 0x846CA68Bu;
+                value ^= value >> 16;
+                float unit = (value & 0x00FFFFFFu) / 16777216f;
+                return minimum + unit * (maximum - minimum);
+            }
         }
 
         private static int StableSeed(string value)

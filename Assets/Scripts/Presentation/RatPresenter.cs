@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -15,6 +16,7 @@ namespace RatHabitat
         private readonly Dictionary<string, RatVisualController> visualControllers = new Dictionary<string, RatVisualController>();
         private readonly Dictionary<string, RatHabitatBehavior> behaviors = new Dictionary<string, RatHabitatBehavior>();
         private readonly Dictionary<string, RatData> liveRats = new Dictionary<string, RatData>();
+        private readonly List<SelectableEntity> rootRecoveryScratch = new List<SelectableEntity>();
         // Pinkies are static nest occupants.  Keep a runtime world-space
         // anchor per stable rat ID so animation evaluation, nursing checks,
         // and harmless UI/presentation refreshes cannot re-solve their X/Z
@@ -130,9 +132,21 @@ namespace RatHabitat
                     liveRats[rat.id] = rat;
                     Vector3 position = GetPosition(rat, nestPosition, pinkieSlotById, ref pinkieIndex, ref maleIndex, ref femaleIndex, ref nurseryIndex, ref breedingIndex, ref pairingIndex);
 
+                    Transform indexedRoot;
                     GameObject root;
                     RatVisualController controller;
-                    if (!ratRoots.TryGetValue(rat.id, out root) || root == null || !visualControllers.TryGetValue(rat.id, out controller) || controller == null)
+                    bool hasRoot = TryGetRatRoot(rat.id, out indexedRoot) && indexedRoot != null;
+                    root = hasRoot ? indexedRoot.gameObject : null;
+                    bool hasController = visualControllers.TryGetValue(rat.id, out controller) && controller != null;
+                    if (hasRoot && !hasController)
+                    {
+                        controller = root.GetComponent<RatVisualController>();
+                        if (controller == null) controller = root.AddComponent<RatVisualController>();
+                        controller.Configure(visualFactory);
+                        visualControllers[rat.id] = controller;
+                        hasController = controller != null;
+                    }
+                    if (!hasRoot || !hasController)
                     {
                         CreateRatRoot(rat, position, out root, out controller);
                     }
@@ -562,8 +576,15 @@ namespace RatHabitat
         {
             root = null;
             GameObject ratRoot;
-            if (string.IsNullOrEmpty(ratId) || !ratRoots.TryGetValue(ratId, out ratRoot) ||
-                ratRoot == null || !ratRoot.activeSelf) return false;
+            if (string.IsNullOrEmpty(ratId)) return false;
+            if (ratRoots.TryGetValue(ratId, out ratRoot) && ratRoot != null &&
+                ratRoot.activeSelf && ratRoot.activeInHierarchy)
+            {
+                root = ratRoot.transform;
+                return true;
+            }
+
+            if (!TryRecoverRatRoot(ratId, null, out ratRoot)) return false;
             root = ratRoot.transform;
             return true;
         }
@@ -571,12 +592,134 @@ namespace RatHabitat
         public bool TryGetRatBehavior(string ratId, out RatHabitatBehavior behavior)
         {
             behavior = null;
-            if (string.IsNullOrEmpty(ratId) || !behaviors.TryGetValue(ratId, out behavior) || behavior == null || !behavior.isActiveAndEnabled)
+            if (string.IsNullOrEmpty(ratId)) return false;
+
+            if (behaviors.TryGetValue(ratId, out behavior) && behavior != null && behavior.isActiveAndEnabled)
+                return true;
+
+            // A presentation exception or a stage transition can leave a live
+            // rat root without a usable behavior-map entry. Recover from the
+            // authoritative live root instead of treating this as a permanent
+            // route failure (which can otherwise keep a due birth queued).
+            RatData rat;
+            GameObject root;
+            if (!liveRats.TryGetValue(ratId, out rat) || rat == null ||
+                rat.removalDisposition != RatRemovalDisposition.None || rat.stage == RatStage.Pinkie ||
+                !TryGetRatRoot(ratId, out Transform recoveredRoot) || recoveredRoot == null)
             {
                 behavior = null;
                 return false;
             }
-            return true;
+
+            root = recoveredRoot.gameObject;
+            EnsureBehaviorForStage(root, rat);
+            return behaviors.TryGetValue(ratId, out behavior) && behavior != null && behavior.isActiveAndEnabled;
+        }
+
+        /// <summary>
+        /// Birth recovery already has the authoritative live RatData record.
+        /// Use it to repair a stale presenter index when the stable visual root
+        /// still exists, rather than leaving a due mother waiting on an index
+        /// that can only be repopulated by a later full render.
+        /// </summary>
+        public bool TryGetRatBehavior(string ratId, RatData authoritativeRat,
+            out RatHabitatBehavior behavior)
+        {
+            if (TryGetRatBehavior(ratId, out behavior)) return true;
+            behavior = null;
+            if (string.IsNullOrEmpty(ratId) || authoritativeRat == null ||
+                !string.Equals(authoritativeRat.id, ratId, StringComparison.Ordinal) ||
+                authoritativeRat.removalDisposition != RatRemovalDisposition.None ||
+                authoritativeRat.stage == RatStage.Pinkie)
+                return false;
+
+            liveRats[ratId] = authoritativeRat;
+            if (!TryGetRatRoot(ratId, out Transform recoveredRoot) || recoveredRoot == null) return false;
+            GameObject root = recoveredRoot.gameObject;
+            EnsureBehaviorForStage(root, authoritativeRat);
+            return behaviors.TryGetValue(ratId, out behavior) && behavior != null && behavior.isActiveAndEnabled;
+        }
+
+        private bool TryRecoverRatRoot(string ratId, RatData authoritativeRat, out GameObject root)
+        {
+            root = null;
+            RatData rat = authoritativeRat;
+            if (rat == null) liveRats.TryGetValue(ratId, out rat);
+            if (rat == null || rat.removalDisposition != RatRemovalDisposition.None || rat.id != ratId)
+                return false;
+
+            rootRecoveryScratch.Clear();
+            GetComponentsInChildren(true, rootRecoveryScratch);
+            try
+            {
+                GameObject bestCandidate = null;
+                int bestScore = int.MinValue;
+                GameObject indexedRoot;
+                ratRoots.TryGetValue(ratId, out indexedRoot);
+                for (int index = 0; index < rootRecoveryScratch.Count; index++)
+                {
+                    SelectableEntity selectable = rootRecoveryScratch[index];
+                    if (selectable == null || selectable.kind != SelectableKind.Rat ||
+                        !string.Equals(selectable.entityId, ratId, StringComparison.Ordinal)) continue;
+                    GameObject candidate = selectable.gameObject;
+                    if (candidate == null || !candidate.activeSelf || !candidate.activeInHierarchy) continue;
+
+                    RatHabitatBehavior behavior = candidate.GetComponent<RatHabitatBehavior>();
+                    RatVisualController controller = candidate.GetComponent<RatVisualController>();
+                    int score = (behavior != null ? 1 : 0) +
+                        (behavior != null && behavior.isActiveAndEnabled ? 2 : 0) +
+                        (controller != null ? 1 : 0) +
+                        (controller != null && controller.isActiveAndEnabled ? 2 : 0) +
+                        (candidate == indexedRoot ? 4 : 0);
+                    if (score <= bestScore) continue;
+                    bestScore = score;
+                    bestCandidate = candidate;
+                }
+
+                if (bestCandidate == null) return false;
+
+                // The stable selection marker is the scene-side rat ID.
+                // Prefer the existing root with its live movement behavior,
+                // then remove abandoned duplicate roots so a stale stationary
+                // visual cannot remain in the nest after index recovery.
+                ratRoots[ratId] = bestCandidate;
+                liveRats[ratId] = rat;
+                SelectableEntity bestSelectable = bestCandidate.GetComponent<SelectableEntity>();
+                if (bestSelectable != null)
+                    bestSelectable.Configure(SelectableKind.Rat, ratId, ColonyFactory.DisplayName(rat));
+                RatVisualController bestController = bestCandidate.GetComponent<RatVisualController>();
+                if (bestController == null) bestController = bestCandidate.AddComponent<RatVisualController>();
+                bestController.Configure(EnsureVisualFactory());
+                visualControllers[ratId] = bestController;
+                root = bestCandidate;
+
+                for (int index = 0; index < rootRecoveryScratch.Count; index++)
+                {
+                    SelectableEntity selectable = rootRecoveryScratch[index];
+                    if (selectable == null || selectable.kind != SelectableKind.Rat ||
+                        !string.Equals(selectable.entityId, ratId, StringComparison.Ordinal) ||
+                        selectable.gameObject == bestCandidate) continue;
+                    RetireDuplicateRatRoot(selectable.gameObject);
+                }
+                return true;
+            }
+            finally
+            {
+                rootRecoveryScratch.Clear();
+            }
+        }
+
+        private static void RetireDuplicateRatRoot(GameObject duplicate)
+        {
+            if (duplicate == null) return;
+            foreach (RatHabitatBehavior behavior in duplicate.GetComponents<RatHabitatBehavior>())
+                if (behavior != null) behavior.enabled = false;
+            foreach (RatVisualController controller in duplicate.GetComponents<RatVisualController>())
+                if (controller != null) controller.enabled = false;
+            foreach (Collider collider in duplicate.GetComponentsInChildren<Collider>(true))
+                if (collider != null) collider.enabled = false;
+            duplicate.SetActive(false);
+            Destroy(duplicate);
         }
 
         public bool BeginNursingInteraction(string motherId, string pupId, string interactionId,
@@ -682,6 +825,7 @@ namespace RatHabitat
                 if (behavior == null) behavior = root.AddComponent<RatHabitatBehavior>();
                 behaviors[rat.id] = behavior;
             }
+            if (!behavior.enabled) behavior.enabled = true;
             behavior.Configure(habitat, rat);
         }
 

@@ -8,6 +8,53 @@ using UnityEngine.UI;
 
 namespace RatHabitat
 {
+    /// <summary>
+    /// Runtime-only ownership of each tank's shared delivery approach point.
+    /// Pregnancy records remain authoritative; this prevents concurrent live
+    /// approaches from stacking on that point. The reservation is released as
+    /// soon as a birth completes and never excludes nursing mothers or litters
+    /// from the shared nest.
+    /// </summary>
+    public sealed class BirthQueueReservations
+    {
+        private readonly Dictionary<RatEnclosure, string> occupants =
+            new Dictionary<RatEnclosure, string>();
+
+        public int Count { get { return occupants.Count; } }
+
+        public bool TryGetOccupant(RatEnclosure enclosure, out string motherId)
+        {
+            return occupants.TryGetValue(enclosure, out motherId);
+        }
+
+        public bool IsReservedBy(RatEnclosure enclosure, string motherId)
+        {
+            return !string.IsNullOrEmpty(motherId) && occupants.TryGetValue(enclosure, out string occupant) &&
+                string.Equals(occupant, motherId, StringComparison.Ordinal);
+        }
+
+        public bool TryReserve(RatEnclosure enclosure, string motherId)
+        {
+            if (string.IsNullOrEmpty(motherId)) return false;
+            if (occupants.TryGetValue(enclosure, out string occupant))
+                return string.Equals(occupant, motherId, StringComparison.Ordinal);
+            occupants.Add(enclosure, motherId);
+            return true;
+        }
+
+        public bool Release(RatEnclosure enclosure, string motherId)
+        {
+            if (!IsReservedBy(enclosure, motherId)) return false;
+            occupants.Remove(enclosure);
+            return true;
+        }
+
+        public void Clear()
+        {
+            occupants.Clear();
+        }
+    }
+
     public enum DeveloperRatPreset
     {
         SolidBlack,
@@ -66,6 +113,25 @@ namespace RatHabitat
         // arrival, but must not trigger a full colony maintenance scan each frame.
         private readonly Dictionary<string, float> birthRetryAfterRealtime = new Dictionary<string, float>();
         private const float BirthRetryCooldownSeconds = 0.5f;
+        private const float BirthApproachStallTimeoutRealtimeSeconds = 12f;
+        private const float BirthApproachMaximumRealtimeSeconds = 90f;
+        private const float BirthApproachProgressDistance = 0.035f;
+        private readonly BirthQueueReservations birthQueueReservations = new BirthQueueReservations();
+        private readonly Dictionary<string, BirthApproachWatchdog> birthApproachWatchdogs =
+            new Dictionary<string, BirthApproachWatchdog>(StringComparer.Ordinal);
+        private readonly List<string> staleBirthApproachIds = new List<string>();
+        private bool birthQueueMaintenancePending;
+        // Reconcile a visible mother with stale presenter indexes on retry.
+        private bool birthPresentationRepairRequested;
+        private int birthQueueRouteFailures;
+        private int birthQueueRouteTimeouts;
+        private int birthQueueSuccessfulBirths;
+        private int birthQueueBlockedBirths;
+        private int birthQueueBlockedCapacity;
+        private int birthQueueBlockedNest;
+        private int birthQueueBlockedPresentation;
+        private int birthQueueBlockedRoute;
+        private int birthQueueBlockedOther;
         // Full-colony reconciliation is daily or deadline-driven. All age,
         // pregnancy, recovery, restock, and nursing state is evaluated against
         // the current authoritative game timestamp; skipped intervals are
@@ -138,6 +204,7 @@ namespace RatHabitat
         private float cameraZoomVelocity;
         private float habitatZoomOffset;
         private Vector3 habitatZoomFocusOffset;
+        private readonly TankCameraPanState tankCameraPanState = new TankCameraPanState();
         private bool cameraPresentationReady;
         private bool cameraFocusNest;
         private RatEnclosure cameraFocusNestEnclosure = RatEnclosure.Pairing;
@@ -183,12 +250,23 @@ namespace RatHabitat
             public Vector3 femaleTarget;
             public PairingApproachPhase phase;
             public float phaseTimeout;
-            public float lastCombinedDistance;
             public float stalledSeconds;
             public Vector3 lastMalePosition;
             public Vector3 lastFemalePosition;
-            public float lastMaleDistance;
-            public float lastFemaleDistance;
+            public bool femaleFertileWindowCommitted;
+            public bool femaleWindowRecoveryRecorded;
+            public float pairingSpeed;
+        }
+
+        private sealed class BirthApproachWatchdog
+        {
+            public PregnancyData pregnancy;
+            public RatData mother;
+            public string motherId;
+            public RatEnclosure enclosure;
+            public float elapsedRealtime;
+            public float stalledRealtime;
+            public Vector3 lastPosition;
         }
 
         private sealed class PairingApproachPlan
@@ -247,6 +325,7 @@ namespace RatHabitat
         private const int LiveEventDurationRealSeconds = 4;
 
         public ColonySaveData Save { get; private set; }
+        public string BirthQueueDiagnostics { get { return BuildBirthQueueDiagnostics(); } }
         private string liveEventMessage;
         private string liveEventCategory;
         private long liveEventExpiresAt;
@@ -628,7 +707,7 @@ namespace RatHabitat
             if (key == "growing")
                 return rat != null && rat.removalDisposition == RatRemovalDisposition.None && rat.stage == RatStage.Pinkie;
             return key == "sold" || key == "euthanized" || key == "deceased" ||
-                key == "breeding" || key == "pregnant" || key == "birth-approach" ||
+                key == "breeding" || key == "pregnant" || key == "birth-approach" || key == "birth-waiting" ||
                 key == "nursing" || key == "recovery";
         }
 
@@ -929,7 +1008,8 @@ namespace RatHabitat
                 interaction.enabled = true;
                 interaction.Configure(mainCamera, SelectEntity, IsSelectionPanelVisible, CloseBreeding,
                     ReportInputDiagnostic, AdjustHabitatZoomAtScreenPoint, FocusHabitatAtWorldPoint,
-                    TryNavigateHabitatSwipe, IsWorldInputBlockedByModal);
+                    TryNavigateHabitatSwipe, IsWorldInputBlockedByModal,
+                    PanHabitatCameraByScreenDelta);
             }
             catch (Exception exception)
             {
@@ -1117,24 +1197,42 @@ namespace RatHabitat
             RatData male, RatData female, long opportunityWindowStartGameTime)
         {
             if (pairingApproach != null || Save == null || male == null || female == null) return false;
+            float selectedSpeed = SimulationSpeed;
             if (male.sex != RatSex.Male || female.sex != RatSex.Female ||
                 male.enclosure != RatEnclosure.Pairing || female.enclosure != RatEnclosure.Pairing)
             {
+                PairingHabitatSystem.RecordApproachCancelled(selectedSpeed,
+                    "pair participants were not a male/female pair in the Pairing Tank");
                 return false;
             }
 
             string reason;
             if (!BreedingSystem.IsBreedEligibleAtOpportunity(
-                    Save, male, GameTime, opportunityWindowStartGameTime, out reason) ||
-                !BreedingSystem.IsBreedEligibleAtOpportunity(
-                    Save, female, GameTime, opportunityWindowStartGameTime, out reason)) return false;
+                    Save, male, GameTime, opportunityWindowStartGameTime, out reason))
+            {
+                PairingHabitatSystem.RecordApproachCancelled(selectedSpeed, "male eligibility: " + reason);
+                return false;
+            }
+            bool femaleWindowRecoveredAtSelection;
+            if (!BreedingSystem.IsBreedEligibleAtOpportunity(
+                    Save, female, GameTime, opportunityWindowStartGameTime, out reason,
+                    out femaleWindowRecoveredAtSelection))
+            {
+                PairingHabitatSystem.RecordApproachCancelled(selectedSpeed, "female eligibility: " + reason);
+                return false;
+            }
 
             Transform maleRoot;
             Transform femaleRoot;
             RatHabitatBehavior maleBehavior;
             RatHabitatBehavior femaleBehavior;
             if (!TryGetPairingParticipant(male.id, out maleRoot, out maleBehavior) ||
-                !TryGetPairingParticipant(female.id, out femaleRoot, out femaleBehavior)) return false;
+                !TryGetPairingParticipant(female.id, out femaleRoot, out femaleBehavior))
+            {
+                PairingHabitatSystem.RecordApproachCancelled(selectedSpeed,
+                    "a selected rat had no live presentation behavior");
+                return false;
+            }
 
             // Older saves or a previously failed direct approach can leave an
             // adult inside the nest footprint. Recover it to open floor before
@@ -1145,7 +1243,12 @@ namespace RatHabitat
             if (EnclosureSystem.IsInsideAdultNestExclusion(RatEnclosure.Pairing, femaleRoot.position, 0.12f))
                 femaleBehavior.RecoverAtSafeOpenFloor();
             if (EnclosureSystem.IsInsideAdultNestExclusion(RatEnclosure.Pairing, maleRoot.position, 0.12f) ||
-                EnclosureSystem.IsInsideAdultNestExclusion(RatEnclosure.Pairing, femaleRoot.position, 0.12f)) return false;
+                EnclosureSystem.IsInsideAdultNestExclusion(RatEnclosure.Pairing, femaleRoot.position, 0.12f))
+            {
+                PairingHabitatSystem.RecordApproachCancelled(selectedSpeed,
+                    "a participant could not be recovered to open floor");
+                return false;
+            }
 
             string pairKey = male.id + "|" + female.id;
             Vector3 excludedMaleTarget = pairingRouteRetryPairKey == pairKey
@@ -1162,7 +1265,9 @@ namespace RatHabitat
                 excludedFemaleTarget,
                 out plan))
             {
-                CancelPairingApproach("no reachable floor route around the nest");
+                PairingHabitatSystem.RecordApproachCancelled(selectedSpeed,
+                    "no reachable floor route around the nest");
+                PairingHabitatSystem.RecordRouteFailure(selectedSpeed);
                 return false;
             }
 
@@ -1174,11 +1279,18 @@ namespace RatHabitat
             // speed change would be applied twice to courtship movement.
             const float pairingRouteMultiplier = 1f;
             if (!maleBehavior.BeginPairingApproach(
-                maleTarget, femaleTarget, pairingRouteMultiplier, plan.maleWaypoints)) return false;
+                maleTarget, femaleTarget, pairingRouteMultiplier, plan.maleWaypoints))
+            {
+                PairingHabitatSystem.RecordApproachCancelled(selectedSpeed,
+                    "male movement behavior rejected the approach");
+                return false;
+            }
             if (!femaleBehavior.BeginPairingApproach(
                 femaleTarget, maleTarget, pairingRouteMultiplier, plan.femaleWaypoints))
             {
                 maleBehavior.CancelPairingApproach();
+                PairingHabitatSystem.RecordApproachCancelled(selectedSpeed,
+                    "female movement behavior rejected the approach");
                 return false;
             }
 
@@ -1190,14 +1302,14 @@ namespace RatHabitat
                 femaleTarget = femaleTarget,
                 phase = PairingApproachPhase.Walking,
                 phaseTimeout = PairingApproachTimeoutSeconds,
-                lastCombinedDistance = Vector3.Distance(maleRoot.position, maleTarget) +
-                    Vector3.Distance(femaleRoot.position, femaleTarget),
                 stalledSeconds = 0f,
                 lastMalePosition = maleRoot.position,
                 lastFemalePosition = femaleRoot.position,
-                lastMaleDistance = Vector3.Distance(maleRoot.position, maleTarget),
-                lastFemaleDistance = Vector3.Distance(femaleRoot.position, femaleTarget),
+                femaleFertileWindowCommitted = true,
+                femaleWindowRecoveryRecorded = femaleWindowRecoveredAtSelection,
+                pairingSpeed = selectedSpeed,
             };
+            PairingHabitatSystem.RecordApproachStarted(selectedSpeed);
             pairingRouteRetryPairKey = null;
             pairingRouteRetryCount = 0;
             pairingFailedMaleTarget = Vector3.zero;
@@ -1208,6 +1320,37 @@ namespace RatHabitat
             // cancellation history reflect the real interaction start.
             StatusMessage = string.Empty;
             return true;
+        }
+
+        private bool IsPairingApproachParticipantEligible(
+            RatData rat, bool isFemale, out string reason)
+        {
+            if (!isFemale || pairingApproach == null)
+                return BreedingSystem.IsBreedEligible(Save, rat, GameTime, out reason);
+
+            bool usedCommittedWindow;
+            bool eligible = BreedingSystem.IsBreedEligibleForCommittedPairingOpportunity(
+                Save, rat, GameTime, pairingApproach.femaleFertileWindowCommitted,
+                out reason, out usedCommittedWindow);
+            if (eligible && usedCommittedWindow && !pairingApproach.femaleWindowRecoveryRecorded)
+            {
+                PairingHabitatSystem.RecordRecoveredFertileWindow(pairingApproach.pairingSpeed);
+                pairingApproach.femaleWindowRecoveryRecorded = true;
+            }
+            return eligible;
+        }
+
+        private static void AdvancePairingApproachWatchdogs(
+            ref float phaseTimeout,
+            ref float stalledSeconds,
+            float unscaledDeltaSeconds,
+            bool walking,
+            bool eitherRatMoved)
+        {
+            float realSeconds = Mathf.Max(0f, unscaledDeltaSeconds);
+            phaseTimeout -= realSeconds;
+            if (walking)
+                stalledSeconds = eitherRatMoved ? 0f : stalledSeconds + realSeconds;
         }
 
         private void UpdatePairingApproach()
@@ -1234,21 +1377,30 @@ namespace RatHabitat
                 return;
             }
 
-            // Courtship timeout/stall timers use the same centralized
-            // behavior delta as the two rat movement controllers. This keeps
-            // a 2x/3x approach from moving quickly while waiting on a 1x
-            // timeout clock.
-            float deltaTime = GrowthSystem.SimulationBehaviorDeltaSeconds(Time.unscaledDeltaTime);
-            pairingApproach.phaseTimeout -= deltaTime;
+            // Courtship routing watchdogs are real-time presentation timers,
+            // not biology. Rat movement and every eligibility check continue
+            // to use accelerated simulation time, but these timers must not
+            // be consumed 60x/1,440x faster during fast-forward.
+            bool walking = pairingApproach.phase == PairingApproachPhase.Walking;
+            bool maleMoved = walking && Vector3.Distance(
+                maleRoot.position, pairingApproach.lastMalePosition) > PairingRoutePositionEpsilon;
+            bool femaleMoved = walking && Vector3.Distance(
+                femaleRoot.position, pairingApproach.lastFemalePosition) > PairingRoutePositionEpsilon;
+            AdvancePairingApproachWatchdogs(
+                ref pairingApproach.phaseTimeout,
+                ref pairingApproach.stalledSeconds,
+                Time.unscaledDeltaTime,
+                walking,
+                maleMoved || femaleMoved);
             if (pairingApproach.phase == PairingApproachPhase.Walking)
             {
                 string reason = string.Empty;
-                if (!BreedingSystem.IsBreedEligible(Save, male, GameTime, out reason))
+                if (!IsPairingApproachParticipantEligible(male, false, out reason))
                 {
                     CancelPairingApproach(FormatPairingEligibilityCancellation(reason));
                     return;
                 }
-                if (!BreedingSystem.IsBreedEligible(Save, female, GameTime, out reason))
+                if (!IsPairingApproachParticipantEligible(female, true, out reason))
                 {
                     CancelPairingApproach(FormatPairingEligibilityCancellation(reason));
                     return;
@@ -1257,15 +1409,15 @@ namespace RatHabitat
                 if (maleBehavior.PairingApproachAtTarget && femaleBehavior.PairingApproachAtTarget)
                 {
                     // Revalidate at the exact transition into the physical
-                    // interaction. A fertile window may have ended while the
-                    // rats were walking; that attempt must be cancelled
-                    // before sniffing/breeding begins.
-                    if (!BreedingSystem.IsBreedEligible(Save, female, GameTime, out reason))
+                    // interaction. The selected fertile-window opportunity is
+                    // committed through this approach, while every other
+                    // biological eligibility rule is checked live.
+                    if (!IsPairingApproachParticipantEligible(female, true, out reason))
                     {
                         CancelPairingApproach(FormatPairingEligibilityCancellation(reason));
                         return;
                     }
-                    if (!BreedingSystem.IsBreedEligible(Save, male, GameTime, out reason))
+                    if (!IsPairingApproachParticipantEligible(male, false, out reason))
                     {
                         CancelPairingApproach(FormatPairingEligibilityCancellation(reason));
                         return;
@@ -1275,6 +1427,7 @@ namespace RatHabitat
                     pairingApproach.phaseTimeout = PairingInteractionSeconds + 1.5f;
                     maleBehavior.BeginPairingInteraction(femaleRoot.position, PairingInteractionSeconds);
                     femaleBehavior.BeginPairingInteraction(maleRoot.position, PairingInteractionSeconds);
+                    PairingHabitatSystem.RecordInteractionStarted(pairingApproach.pairingSpeed);
                     RatActivitySystem.SetCurrent(Save, male, "breeding", "Breeding", GameTime,
                         "Breeding interaction started");
                     RatActivitySystem.SetCurrent(Save, female, "breeding", "Breeding", GameTime,
@@ -1287,28 +1440,12 @@ namespace RatHabitat
                     return;
                 }
 
-                float combinedDistance = Vector3.Distance(maleRoot.position, pairingApproach.maleTarget) +
-                    Vector3.Distance(femaleRoot.position, pairingApproach.femaleTarget);
-                float maleDistance = Vector3.Distance(maleRoot.position, pairingApproach.maleTarget);
-                float femaleDistance = Vector3.Distance(femaleRoot.position, pairingApproach.femaleTarget);
-                bool maleMoved = Vector3.Distance(maleRoot.position, pairingApproach.lastMalePosition) > PairingRoutePositionEpsilon;
-                bool femaleMoved = Vector3.Distance(femaleRoot.position, pairingApproach.lastFemalePosition) > PairingRoutePositionEpsilon;
-                bool distanceImproved = maleDistance < pairingApproach.lastMaleDistance - 0.003f ||
-                    femaleDistance < pairingApproach.lastFemaleDistance - 0.003f;
                 // A valid obstacle route can temporarily move farther from
-                // the final meeting point while it rounds a nest corner. Only
-                // treat it as stalled when neither root is moving, or when a
-                // root is moving without any route progress at all.
-                if ((!maleMoved && !femaleMoved) || (!distanceImproved && combinedDistance >= pairingApproach.lastCombinedDistance - 0.003f &&
-                    !maleMoved && !femaleMoved))
-                    pairingApproach.stalledSeconds += deltaTime;
-                else
-                    pairingApproach.stalledSeconds = 0f;
-                pairingApproach.lastCombinedDistance = combinedDistance;
+                // its meeting point while rounding the nest. Movement of
+                // either root resets the real-time stall timer; only a route
+                // with no world-space progress is considered stalled.
                 pairingApproach.lastMalePosition = maleRoot.position;
                 pairingApproach.lastFemalePosition = femaleRoot.position;
-                pairingApproach.lastMaleDistance = maleDistance;
-                pairingApproach.lastFemaleDistance = femaleDistance;
                 if (pairingApproach.stalledSeconds >= 2.5f)
                 {
                     CancelPairingApproach("the approach was blocked");
@@ -1334,6 +1471,7 @@ namespace RatHabitat
 
             if (maleBehavior.PairingInteractionComplete && femaleBehavior.PairingInteractionComplete)
             {
+                PairingHabitatSystem.RecordInteractionCompleted(pairingApproach.pairingSpeed);
                 ResolvePairingApproach(male, female, maleBehavior, femaleBehavior);
             }
             else if (pairingApproach.phaseTimeout <= 0f)
@@ -1351,13 +1489,15 @@ namespace RatHabitat
             bool conceptionSucceeded;
             string reason;
             PregnancyData createdPregnancy;
+            float diagnosticSpeed = pairingApproach == null ? SimulationSpeed : pairingApproach.pairingSpeed;
             bool resolved = PairingHabitatSystem.ResolvePair(
                 Save,
                 female,
                 male,
                 GameTime,
                 GameConfig.PairingPregnancyChance,
-                true,
+                pairingApproach != null && pairingApproach.femaleFertileWindowCommitted,
+                diagnosticSpeed,
                 out conceptionSucceeded,
                 out reason,
                 out createdPregnancy);
@@ -1453,7 +1593,9 @@ namespace RatHabitat
             bool fertileWindowEnded = failureLower.Contains("fertile window") &&
                 (failureLower.Contains("ended") || failureLower.Contains("outside"));
             bool routeFailure = failureLower.Contains("blocked") ||
-                failureLower.Contains("timed out") || failureLower.Contains("route");
+                failureLower.Contains("route") ||
+                (failureLower.Contains("approach") && failureLower.Contains("timed out"));
+            PairingHabitatSystem.RecordApproachCancelled(failedApproach.pairingSpeed, failureText);
 
             RatData cancelledMale = BreedingSystem.FindRat(Save, failedApproach.maleId);
             RatData cancelledFemale = BreedingSystem.FindRat(Save, failedApproach.femaleId);
@@ -1481,7 +1623,7 @@ namespace RatHabitat
             pairingApproach = null;
             if (routeFailure)
             {
-                PairingHabitatSystem.RecordRouteFailure();
+                PairingHabitatSystem.RecordRouteFailure(failedApproach.pairingSpeed);
                 string pairKey = failedApproach.maleId + "|" + failedApproach.femaleId;
                 if (pairingRouteRetryPairKey != pairKey)
                 {
@@ -1772,6 +1914,7 @@ namespace RatHabitat
         {
             due = default(TimedSimulationWorkDue);
             if (Save == null) return false;
+            due.Pregnancy = birthQueueMaintenancePending;
             long gameTime = GameTime;
             due.StoreRestock = Save.storeNextRestockGameTime > 0L &&
                 Save.storeNextRestockGameTime <= gameTime;
@@ -1790,21 +1933,36 @@ namespace RatHabitat
                 {
                     if (pregnancy == null || pregnancy.status != "pending" || pregnancy.dueAt > gameTime ||
                         !BirthRetryReady(pregnancy)) continue;
-
-                    // The due state itself is authoritative and still wakes
-                    // maintenance immediately. Once a route is active, only
-                    // arrival (or a missing route/visual) wakes the expensive
-                    // colony pass; travel progress is handled by the rat's
-                    // normal per-frame movement update.
-                    if (!pregnancy.birthApproachStarted)
+                    RatData mother = BreedingSystem.FindRat(Save, pregnancy.motherId);
+                    if (mother == null || mother.enclosure == RatEnclosure.ForSale ||
+                        !EnclosureSystem.HasNest(mother.enclosure))
                     {
                         due.Pregnancy = true;
                         break;
                     }
-                    RatData mother = BreedingSystem.FindRat(Save, pregnancy.motherId);
-                    if (mother == null || !EnclosureSystem.HasNest(mother.enclosure) || rats == null ||
+
+                    string occupantId;
+                    bool tankOccupied = birthQueueReservations.TryGetOccupant(mother.enclosure, out occupantId);
+                    if (tankOccupied && !string.Equals(occupantId, mother.id, StringComparison.Ordinal))
+                    {
+                        // Wake once to publish the waiting state. Thereafter
+                        // the active route's arrival/watchdog wakes resolution.
+                        if (!pregnancy.birthWaitingForNest)
+                        {
+                            due.Pregnancy = true;
+                            break;
+                        }
+                        continue;
+                    }
+
+                    // An unreserved due mother, a stale persisted route, or a
+                    // mother already at the nest needs a resolution pass. A
+                    // walking route is polled through the cheap watchdog only.
+                    if (!tankOccupied || !pregnancy.birthApproachStarted ||
+                        string.IsNullOrEmpty(mother.id) || !birthApproachWatchdogs.ContainsKey(mother.id) || rats == null ||
                         !rats.TryGetRatBehavior(mother.id, out RatHabitatBehavior birthBehavior) ||
-                        birthBehavior == null || !birthBehavior.BirthApproachActive || birthBehavior.BirthApproachAtNest)
+                        birthBehavior == null || !birthBehavior.BirthApproachActive ||
+                        birthBehavior.BirthApproachAtNest || TryGetMotherRootAtNest(mother, out _))
                     {
                         due.Pregnancy = true;
                         break;
@@ -1827,6 +1985,7 @@ namespace RatHabitat
         {
             if (pregnancy != null && !string.IsNullOrEmpty(pregnancy.id))
                 birthRetryAfterRealtime[pregnancy.id] = Time.unscaledTime + BirthRetryCooldownSeconds;
+            RecordBirthBlockedReason(reason);
             bool changed = BreedingSystem.MarkBirthBlocked(pregnancy, GameTime, reason);
             if (changed)
             {
@@ -1839,6 +1998,219 @@ namespace RatHabitat
                 StatusMessage = playerMessage;
             }
             return changed;
+        }
+
+        private bool UpdateBirthApproachWatchdogs()
+        {
+            if (Save == null || birthApproachWatchdogs.Count == 0) return false;
+            float delta = Mathf.Max(0f, Time.unscaledDeltaTime);
+            staleBirthApproachIds.Clear();
+            bool changed = false;
+            foreach (KeyValuePair<string, BirthApproachWatchdog> entry in birthApproachWatchdogs)
+            {
+                BirthApproachWatchdog watchdog = entry.Value;
+                PregnancyData pregnancy = watchdog == null ? null : watchdog.pregnancy;
+                RatData mother = watchdog == null ? null : watchdog.mother;
+                if (watchdog == null || pregnancy == null || pregnancy.status != "pending" ||
+                    mother == null || mother.removalDisposition != RatRemovalDisposition.None ||
+                    mother.enclosure != watchdog.enclosure)
+                {
+                    if (watchdog != null)
+                    {
+                        if (mother != null && rats != null &&
+                            rats.TryGetRatBehavior(mother.id, out RatHabitatBehavior staleBehavior) &&
+                            staleBehavior != null && staleBehavior.BirthApproachActive)
+                            staleBehavior.CancelBirthApproach();
+                        birthQueueReservations.Release(watchdog.enclosure, watchdog.motherId);
+                        if (pregnancy != null && pregnancy.status == "pending")
+                        {
+                            ClearBirthApproachState(pregnancy);
+                            pregnancy.birthWaitingForNest = true;
+                            if (mother != null)
+                                RatActivitySystem.SetCurrent(Save, mother,
+                                    "birth-waiting", "Waiting to give birth", GameTime);
+                            birthQueueRouteFailures++;
+                            MarkBirthBlockedAndScheduleRetry(pregnancy,
+                                "Birth approach became stale; pregnancy retained for retry.");
+                            birthQueueMaintenancePending = true;
+                            changed = true;
+                        }
+                    }
+                    staleBirthApproachIds.Add(entry.Key);
+                    continue;
+                }
+
+                RatHabitatBehavior behavior = null;
+                if (rats == null || !rats.TryGetRatBehavior(mother.id, mother, out behavior) || behavior == null ||
+                    !behavior.BirthApproachActive)
+                {
+                    if (TryGetMotherRootAtNest(mother, out Vector3 parkedPosition))
+                    {
+                        // A missing behavior component is not permission to
+                        // release a mother who has already reached the nest.
+                        // Keep the safe reservation and let the due-pregnancy
+                        // pass resolve from this confirmed world position.
+                        if (behavior != null) behavior.ConfirmBirthApproachArrivalAtNest();
+                        watchdog.lastPosition = parkedPosition;
+                        watchdog.elapsedRealtime = 0f;
+                        watchdog.stalledRealtime = 0f;
+                        birthQueueMaintenancePending = true;
+                        continue;
+                    }
+                    FailBirthApproach(watchdog, null,
+                        "Mother presentation route became unavailable; pregnancy retained for retry.", false);
+                    staleBirthApproachIds.Add(entry.Key);
+                    changed = true;
+                    continue;
+                }
+
+                // A final movement step can enter the nest zone without
+                // crossing the behavior's internal distance threshold. Treat
+                // that world-space position as arrival and stop the route.
+                if (!behavior.BirthApproachAtNest &&
+                    TryGetMotherRootAtNest(mother, out Vector3 arrivedPosition))
+                {
+                    behavior.ConfirmBirthApproachArrivalAtNest();
+                    watchdog.lastPosition = arrivedPosition;
+                    watchdog.stalledRealtime = 0f;
+                    birthQueueMaintenancePending = true;
+                }
+
+                // Arrival holds the one nest reservation until the authoritative
+                // birth transaction completes. Storage retries at the nest are
+                // not route stalls and must not send another mother into it.
+                if (behavior.BirthApproachAtNest)
+                {
+                    watchdog.stalledRealtime = 0f;
+                    watchdog.lastPosition = behavior.transform.position;
+                    continue;
+                }
+
+                watchdog.elapsedRealtime += delta;
+                Vector3 position = behavior.transform.position;
+                if (Vector3.Distance(position, watchdog.lastPosition) >= BirthApproachProgressDistance)
+                {
+                    watchdog.lastPosition = position;
+                    watchdog.stalledRealtime = 0f;
+                }
+                else
+                {
+                    watchdog.stalledRealtime += delta;
+                }
+
+                bool stalled = watchdog.stalledRealtime >= BirthApproachStallTimeoutRealtimeSeconds;
+                bool timedOut = watchdog.elapsedRealtime >= BirthApproachMaximumRealtimeSeconds;
+                if (!stalled && !timedOut) continue;
+
+                if (timedOut) birthQueueRouteTimeouts++;
+                FailBirthApproach(watchdog, behavior,
+                    timedOut
+                        ? "Birth route timed out; pregnancy remains due and will retry."
+                        : "Birth route stalled; pregnancy remains due and will retry.",
+                    true);
+                staleBirthApproachIds.Add(entry.Key);
+                changed = true;
+            }
+
+            for (int index = 0; index < staleBirthApproachIds.Count; index++)
+                birthApproachWatchdogs.Remove(staleBirthApproachIds[index]);
+            staleBirthApproachIds.Clear();
+            return changed;
+        }
+
+        private void FailBirthApproach(BirthApproachWatchdog watchdog,
+            RatHabitatBehavior behavior, string reason, bool routeWasActive)
+        {
+            if (watchdog == null) return;
+            if (behavior != null) behavior.CancelBirthApproach();
+            if (watchdog.pregnancy != null)
+            {
+                watchdog.pregnancy.birthApproachStarted = false;
+                watchdog.pregnancy.birthApproachStartedAt = 0L;
+                watchdog.pregnancy.birthWaitingForNest = true;
+            }
+            birthQueueReservations.Release(watchdog.enclosure, watchdog.motherId);
+            if (routeWasActive) birthQueueRouteFailures++;
+            birthQueueMaintenancePending = true;
+            if (watchdog.mother != null)
+                RatActivitySystem.SetCurrent(Save, watchdog.mother,
+                    "birth-waiting", "Waiting to give birth", GameTime);
+            MarkBirthBlockedAndScheduleRetry(watchdog.pregnancy, reason);
+        }
+
+        private void RecordBirthBlockedReason(string reason)
+        {
+            birthQueueBlockedBirths++;
+            if (string.IsNullOrEmpty(reason))
+            {
+                birthQueueBlockedOther++;
+                return;
+            }
+            if (reason.IndexOf("capacity", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                reason.IndexOf("full", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                reason.IndexOf("room", StringComparison.OrdinalIgnoreCase) >= 0)
+                birthQueueBlockedCapacity++;
+            else if (reason.IndexOf("nest", StringComparison.OrdinalIgnoreCase) >= 0)
+                birthQueueBlockedNest++;
+            else if (reason.IndexOf("presentation", StringComparison.OrdinalIgnoreCase) >= 0)
+                birthQueueBlockedPresentation++;
+            else if (reason.IndexOf("route", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                reason.IndexOf("stalled", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                reason.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0)
+                birthQueueBlockedRoute++;
+            else
+                birthQueueBlockedOther++;
+        }
+
+        private string BuildBirthQueueDiagnostics()
+        {
+            if (Save == null) return "Birth queue: colony data unavailable.";
+            System.Text.StringBuilder summary = new System.Text.StringBuilder(320);
+            summary.Append("Birth queue • ");
+            AppendBirthTankDiagnostics(summary, RatEnclosure.Pairing, "Pairing Tank");
+            summary.Append("; ");
+            AppendBirthTankDiagnostics(summary, RatEnclosure.FemaleColony, "Female Tank");
+            summary.Append("; ");
+            AppendBirthTankDiagnostics(summary, RatEnclosure.Nursery, "Nursery Tank");
+            summary.Append("; ");
+            AppendBirthTankDiagnostics(summary, RatEnclosure.MaleColony, "Male Tank");
+            summary.Append("; ");
+            AppendBirthTankDiagnostics(summary, RatEnclosure.ForSale, "For Sale Tank");
+            summary.Append("; route failures/timeouts ").Append(birthQueueRouteFailures).Append('/')
+                .Append(birthQueueRouteTimeouts).Append("; births ").Append(birthQueueSuccessfulBirths)
+                .Append("; blocked ").Append(birthQueueBlockedBirths).Append(" [capacity ")
+                .Append(birthQueueBlockedCapacity).Append(", nest ").Append(birthQueueBlockedNest)
+                .Append(", presentation ").Append(birthQueueBlockedPresentation).Append(", route ")
+                .Append(birthQueueBlockedRoute).Append(", other ").Append(birthQueueBlockedOther).Append(']');
+            return summary.ToString();
+        }
+
+        private void AppendBirthTankDiagnostics(System.Text.StringBuilder summary,
+            RatEnclosure enclosure, string label)
+        {
+            int dueCount = 0;
+            int queuedCount = 0;
+            int waitingCount = 0;
+            if (Save != null)
+            {
+                List<PregnancyData> pending = BreedingSystem.GetIndexedPendingPregnancies(Save);
+                for (int index = 0; index < pending.Count; index++)
+                {
+                    PregnancyData pregnancy = pending[index];
+                    if (pregnancy == null || pregnancy.status != "pending" || pregnancy.dueAt > GameTime) continue;
+                    RatData mother = BreedingSystem.FindRat(Save, pregnancy.motherId);
+                    if (mother == null || mother.enclosure != enclosure) continue;
+                    dueCount++;
+                    if (pregnancy.birthWaitingForNest) waitingCount++;
+                    if (pregnancy.birthWaitingForNest || birthQueueReservations.IsReservedBy(enclosure, mother.id))
+                        queuedCount++;
+                }
+            }
+            string activeMother;
+            bool active = birthQueueReservations.TryGetOccupant(enclosure, out activeMother);
+            summary.Append(label).Append(" due/queued/active/waiting ")
+                .Append(dueCount).Append('/').Append(queuedCount).Append('/')
+                .Append(active ? 1 : 0).Append('/').Append(waitingCount);
         }
 
         private void ScheduleNextNursingTick()
@@ -1993,6 +2365,7 @@ namespace RatHabitat
             RuntimePerformanceDiagnostics.End(PerformanceProbeArea.PairingMovement, pairingMovementSample);
             EndPerformanceSample();
             lastMovementFrameDurationMs = (Time.realtimeSinceStartup - frameSampleStartedAt) * 1000f;
+            bool birthWatchdogChanged = UpdateBirthApproachWatchdogs();
 
             bool stageChanged = false;
             bool reproductiveStateChanged = false;
@@ -2004,7 +2377,7 @@ namespace RatHabitat
             bool nursingChanged = false;
             bool nursingPassDue = !nursingScheduleInitialized || nextNursingTickGameTime <= GameTime;
             bool alertAnnouncementStateChanged = false;
-            bool birthSequenceChanged = false;
+            bool birthSequenceChanged = birthWatchdogChanged;
             bool birthBatchQueued = false;
             int completedSessionCount = 0;
             int births = 0;
@@ -2102,7 +2475,10 @@ namespace RatHabitat
                 {
                     long birthSample = RuntimePerformanceDiagnostics.Begin(PerformanceProbeArea.MaintenanceBirths);
                     BeginPerformanceSample("Rat Empire/Simulation/Pregnancy and Birth Deadlines");
-                    births = ProcessDuePregnanciesAtNest(out newLitters, out birthSequenceChanged);
+                    bool birthPassChanged;
+                    births = ProcessDuePregnanciesAtNest(out newLitters, out birthPassChanged);
+                    birthSequenceChanged |= birthPassChanged;
+                    birthQueueMaintenancePending = false;
                     RuntimePerformanceDiagnostics.End(PerformanceProbeArea.MaintenanceBirths, birthSample);
                     EndPerformanceSample();
                 }
@@ -2205,13 +2581,18 @@ namespace RatHabitat
                 ShowTransientRestockSaleAlert(storeRestockResult.autoSaleMessage);
             }
 
-            bool structuralPresentationChange = stageChanged || reproductiveStateChanged || enclosureChanged || births > 0;
+            bool structuralPresentationChange = stageChanged || reproductiveStateChanged || enclosureChanged ||
+                births > 0 || birthPresentationRepairRequested;
             if (structuralPresentationChange)
             {
                 BeginPerformanceSample("Rat Empire/Presentation Render");
                 try
                 {
-                    if (rats != null && habitat != null) rats.Render(Save, habitat.NestPosition);
+                    if (rats != null && habitat != null)
+                    {
+                        rats.Render(Save, habitat.NestPosition);
+                        birthPresentationRepairRequested = false;
+                    }
                 }
                 catch (Exception exception)
                 {
@@ -2388,6 +2769,7 @@ namespace RatHabitat
                     ToggleRatGroupSelection(entity.entityId);
                     return true;
                 }
+                tankCameraPanState.Recenter();
                 selectedRatId = entity.entityId;
                 selectedObjectId = null;
                 cameraFocusNest = false;
@@ -2748,36 +3130,31 @@ namespace RatHabitat
         public void MoveAllEligibleRatsToForSaleTank()
         {
             if (Save == null) return;
-            var alreadyInForSale = new HashSet<string>(StringComparer.Ordinal);
-            foreach (RatData existing in Save.rats)
-                if (existing != null && existing.enclosure == RatEnclosure.ForSale)
-                    alreadyInForSale.Add(existing.id);
             int moved;
             string reason;
+            List<RatData> movedRats;
             if (!EnclosureSystem.TryAssignAllSellableToForSale(Save, GameTime,
-                ForSaleHabitatCapacity, out moved, out reason))
+                ForSaleHabitatCapacity, out moved, out reason, out movedRats))
             {
                 StatusMessage = reason;
                 if (ui != null) ui.Refresh(true);
                 return;
             }
 
-            foreach (RatData rat in Save.rats)
+            StatusMessage = reason;
+            if (moved == 0)
             {
-                if (rat == null || rat.enclosure != RatEnclosure.ForSale ||
-                    alreadyInForSale.Contains(rat.id) ||
-                    !StoreSystem.CanSellRat(Save, rat, GameTime) ||
-                    EnclosureSystem.HasDependentPinkies(Save, rat.id)) continue;
+                if (ui != null) ui.Refresh(true);
+                return;
+            }
+
+            foreach (RatData rat in movedRats)
+            {
+                if (rat == null) continue;
                 RatActivitySystem.SetCurrent(Save, rat, "movement", "Moving tanks", GameTime,
                     "Moved to For Sale Tank");
             }
             EnclosureSystem.RecalculateAssignments(Save);
-            StatusMessage = moved == 0
-                ? (string.IsNullOrEmpty(reason)
-                    ? "All rats eligible for sale are already in the For Sale Tank."
-                    : reason)
-                : "Moved " + moved + " eligible rat" + (moved == 1 ? string.Empty : "s") +
-                    " to the For Sale Tank." + (string.IsNullOrEmpty(reason) ? string.Empty : " " + reason);
             SaveSystem.Save(Save);
             RefreshWorldAndUi(true);
         }
@@ -3273,6 +3650,7 @@ namespace RatHabitat
             int next = Mathf.Clamp(current + (direction < 0 ? -1 : 1), 0, HabitatPages.Length - 1);
             if (next == current) return false;
 
+            tankCameraPanState.Recenter();
             cameraView = HabitatPages[next];
             cameraFocusNest = false;
             cameraFollowSelectedRat = false;
@@ -3450,6 +3828,7 @@ namespace RatHabitat
 
         private void SetHabitatCameraView(HabitatCameraView view)
         {
+            tankCameraPanState.Recenter();
             cameraView = NormalizeHabitatView(view);
             cameraFocusNest = false;
             int settled = Array.IndexOf(HabitatPages, cameraView);
@@ -3483,6 +3862,8 @@ namespace RatHabitat
                 return;
             }
 
+            tankCameraPanState.Recenter();
+
             ClearPendingSelectionActions();
             habitatZoomOffset = 0f;
             habitatZoomFocusOffset = Vector3.zero;
@@ -3512,10 +3893,15 @@ namespace RatHabitat
         {
             RatData rat = BreedingSystem.FindRat(Save, ratId);
             if (rat == null) return false;
-            if (rat.isFavorite == isFavorite) return true;
-
             bool previous = rat.isFavorite;
-            rat.isFavorite = isFavorite;
+            string reason;
+            if (!RatFavoriteSystem.SetFavorite(Save, ratId, isFavorite, out reason))
+            {
+                StatusMessage = reason;
+                if (ui != null) ui.Refresh(true);
+                return false;
+            }
+            if (previous == isFavorite) return true;
             if (SaveSystem.Save(Save)) return true;
             rat.isFavorite = previous;
             return false;
@@ -3890,6 +4276,7 @@ namespace RatHabitat
                     string transferReason;
                     if (!MoveSaleBirthFamilyToPairing(mother, pregnancy, out transferReason))
                     {
+                        sequenceChanged |= ReleaseBirthApproachForMother(mother, pregnancy);
                         sequenceChanged |= MarkBirthBlockedAndScheduleRetry(pregnancy, transferReason);
                         continue;
                     }
@@ -3897,39 +4284,113 @@ namespace RatHabitat
                 }
                 if (!EnclosureSystem.HasNest(mother.enclosure))
                 {
+                    sequenceChanged |= ReleaseBirthApproachForMother(mother, pregnancy);
                     sequenceChanged |= MarkBirthBlockedAndScheduleRetry(pregnancy,
                         "No valid nest is available in the mother's tank; pregnancy retained.");
                     continue;
                 }
 
-                RatHabitatBehavior behavior;
-                if (!rats.TryGetRatBehavior(mother.id, out behavior) || behavior == null)
+                string currentOccupant;
+                if (birthQueueReservations.TryGetOccupant(mother.enclosure, out currentOccupant) &&
+                    !string.Equals(currentOccupant, mother.id, StringComparison.Ordinal))
                 {
-                    sequenceChanged |= MarkBirthBlockedAndScheduleRetry(pregnancy,
-                        "Mother presentation is not ready; pregnancy retained for retry.");
+                    // Only the tank's current reservation may approach its
+                    // caregiver position. All other due mothers remain
+                    // pregnant, visibly queued, and stationary.
+                    if (SetBirthWaitingForNest(pregnancy, mother)) sequenceChanged = true;
                     continue;
                 }
 
-                if (!pregnancy.birthApproachStarted || !behavior.BirthApproachActive)
+                if (!birthQueueReservations.TryReserve(mother.enclosure, mother.id))
                 {
-                    // Mark the persisted approach only after the live
-                    // behavior accepts the route. This prevents a stale
-                    // "Going to give birth" label when a presentation root
-                    // is temporarily unavailable during a rebuild.
+                    if (SetBirthWaitingForNest(pregnancy, mother)) sequenceChanged = true;
+                    continue;
+                }
+
+                RatHabitatBehavior behavior;
+                bool hasBehavior = rats.TryGetRatBehavior(mother.id, mother, out behavior) && behavior != null;
+                bool rootAtNest = TryGetMotherRootAtNest(mother, out _);
+                if (hasBehavior && rootAtNest)
+                    behavior.ConfirmBirthApproachArrivalAtNest();
+                bool arrivedAtNest = rootAtNest || (hasBehavior && behavior.BirthApproachAtNest);
+                if (!hasBehavior && !rootAtNest)
+                {
+                    string presentationFailureReason = "Mother presentation is not ready; pregnancy retained for retry.";
+                    string tankLabel = EnclosureSystem.GetDefinition(mother.enclosure).label;
+                    birthQueueReservations.Release(mother.enclosure, mother.id);
+                    birthApproachWatchdogs.Remove(mother.id);
+                    SetBirthWaitingForNest(pregnancy, mother);
+                    birthQueueRouteFailures++;
+                    Debug.LogWarning("[Rat Habitat] Birth presentation unavailable | pregnancyId=" +
+                        pregnancy.id + " | motherId=" + mother.id + " | tank=" + tankLabel +
+                        " | reason=" + presentationFailureReason + " | parkedAtNest=" + rootAtNest);
+                    birthPresentationRepairRequested = true;
+                    sequenceChanged = true;
+                    sequenceChanged |= MarkBirthBlockedAndScheduleRetry(pregnancy, presentationFailureReason);
+                    continue;
+                }
+
+                bool approachStartedNow = false;
+                if (hasBehavior && !behavior.BirthApproachActive && !rootAtNest)
+                {
                     Vector3 caregiverTarget = EnclosureSystem.GetNestCaregiverPosition(mother.enclosure);
                     if (!behavior.BeginBirthApproach(caregiverTarget))
                     {
+                        birthQueueReservations.Release(mother.enclosure, mother.id);
+                        birthApproachWatchdogs.Remove(mother.id);
+                        SetBirthWaitingForNest(pregnancy, mother);
+                        birthQueueRouteFailures++;
+                        sequenceChanged = true;
                         sequenceChanged |= MarkBirthBlockedAndScheduleRetry(pregnancy,
                             "Mother could not start a safe route to the nest; retrying.");
                         continue;
                     }
-                    birthRetryAfterRealtime.Remove(pregnancy.id);
+                    approachStartedNow = true;
+                }
+
+                // A mother whose transaction failed is still at the nest and
+                // owns this reservation. Keep the persisted waiting label on
+                // retries; only a newly started/resumed route clears it.
+                if (approachStartedNow || !pregnancy.birthApproachStarted)
+                {
+                    if (!arrivedAtNest) birthRetryAfterRealtime.Remove(pregnancy.id);
                     pregnancy.birthApproachStarted = true;
                     pregnancy.birthApproachStartedAt = GameTime;
-                    RatActivitySystem.SetCurrent(Save, mother, "birth-approach", "Going to give birth", GameTime);
+                    pregnancy.birthWaitingForNest = arrivedAtNest;
+                    RatActivitySystem.SetCurrent(Save, mother,
+                        arrivedAtNest ? "birth-waiting" : "birth-approach",
+                        arrivedAtNest ? "Waiting to give birth" : "Going to give birth", GameTime);
                     sequenceChanged = true;
                 }
-                if (!behavior.BirthApproachAtNest)
+                else if (arrivedAtNest && !pregnancy.birthWaitingForNest)
+                {
+                    // A stable visible root at the nest is an arrival even if
+                    // its behavior component could not be recovered or its
+                    // route's internal arrival flag was missed. Preserve the
+                    // real-time retry cooldown after transaction failures.
+                    pregnancy.birthWaitingForNest = true;
+                    RatActivitySystem.SetCurrent(Save, mother,
+                        "birth-waiting", "Waiting to give birth", GameTime);
+                    sequenceChanged = true;
+                }
+
+                if (hasBehavior && !arrivedAtNest && !birthApproachWatchdogs.ContainsKey(mother.id))
+                {
+                    birthApproachWatchdogs[mother.id] = new BirthApproachWatchdog
+                    {
+                        pregnancy = pregnancy,
+                        mother = mother,
+                        motherId = mother.id,
+                        enclosure = mother.enclosure,
+                        lastPosition = behavior.transform.position,
+                    };
+                }
+
+                if (approachStartedNow)
+                {
+                    RatActivitySystem.SetCurrent(Save, mother, "birth-approach", "Going to give birth", GameTime);
+                }
+                if (!arrivedAtNest)
                 {
                     // Do not replan or mark this as blocked on every unrelated
                     // maintenance pass. The live route continues and arrival
@@ -3939,25 +4400,101 @@ namespace RatHabitat
 
                 LitterData litter;
                 string reason;
-                if (!BreedingSystem.FinishPregnancyForBatch(
-                    Save, pregnancy.id, GameTime, out litter, out reason) || litter == null)
+                bool birthCommitted = BreedingSystem.FinishPregnancyForBatch(
+                    Save, pregnancy.id, GameTime, out litter, out reason);
+                if (!birthCommitted || litter == null)
                 {
-                    sequenceChanged |= MarkBirthBlockedAndScheduleRetry(pregnancy,
-                        string.IsNullOrEmpty(reason) ? "Birth transaction did not complete; pregnancy retained." : reason);
+                    string failureReason = string.IsNullOrWhiteSpace(reason)
+                        ? (birthCommitted
+                            ? "Birth transaction reported success without returning a litter."
+                            : "Birth transaction returned false without a reason.")
+                        : reason.Trim();
+                    string tankLabel = EnclosureSystem.GetDefinition(mother.enclosure).label;
+                    Debug.LogWarning("[Rat Habitat] FinishPregnancyForBatch failed | pregnancyId=" +
+                        pregnancy.id + " | motherId=" + mother.id + " | tank=" + tankLabel +
+                        " | reason=" + failureReason);
+
+                    // A transaction failure is not a route failure. Keep the
+                    // mother physically at the nest, retain her reservation
+                    // and persisted approach timestamp, and retry this same
+                    // pending pregnancy after the real-time retry cooldown.
+                    // The next queued mother cannot enter until this one has
+                    // committed successfully.
+                    pregnancy.birthWaitingForNest = true;
+                    sequenceChanged = true; // attempt count/time and retry state are authoritative
+                    sequenceChanged |= RatActivitySystem.SetCurrent(Save, mother,
+                        "birth-waiting", "Waiting to give birth", GameTime);
+                    sequenceChanged |= MarkBirthBlockedAndScheduleRetry(pregnancy, failureReason);
                     continue;
                 }
                 birthRetryAfterRealtime.Remove(pregnancy.id);
+                birthQueueReservations.Release(mother.enclosure, mother.id);
+                birthApproachWatchdogs.Remove(mother.id);
+                pregnancy.birthWaitingForNest = false;
+                pregnancy.birthApproachStarted = false;
+                pregnancy.birthApproachStartedAt = 0L;
+                birthQueueSuccessfulBirths++;
 
                 // FinishPregnancy has now written the litter and recovery
                 // deadline. Transition the existing root into caregiving at
                 // its actual arrival position before the render pass creates
                 // the new pinkie roots.
-                behavior.FinishBirthApproach();
+                if (hasBehavior) behavior.FinishBirthApproach();
                 newLitters.Add(litter);
                 sequenceChanged = true;
             }
 
             return newLitters.Count;
+        }
+
+        private bool SetBirthWaitingForNest(PregnancyData pregnancy, RatData mother)
+        {
+            if (pregnancy == null || mother == null) return false;
+            bool changed = !pregnancy.birthWaitingForNest || pregnancy.birthApproachStarted;
+            if (pregnancy.birthApproachStarted && rats != null &&
+                rats.TryGetRatBehavior(mother.id, out RatHabitatBehavior behavior) &&
+                behavior != null && behavior.BirthApproachActive)
+                behavior.CancelBirthApproach();
+            birthQueueReservations.Release(mother.enclosure, mother.id);
+            birthApproachWatchdogs.Remove(mother.id);
+            pregnancy.birthWaitingForNest = true;
+            pregnancy.birthApproachStarted = false;
+            pregnancy.birthApproachStartedAt = 0L;
+            changed |= RatActivitySystem.SetCurrent(Save, mother,
+                "birth-waiting", "Waiting to give birth", GameTime);
+            return changed;
+        }
+
+        private bool TryGetMotherRootAtNest(RatData mother, out Vector3 position)
+        {
+            position = Vector3.zero;
+            if (mother == null || rats == null || !EnclosureSystem.HasNest(mother.enclosure) ||
+                !rats.TryGetRatRoot(mother.id, out Transform root) || root == null) return false;
+            position = root.position;
+            return EnclosureSystem.IsInsideNestCaregiverZone(mother.enclosure, position);
+        }
+
+        private static void ClearBirthApproachState(PregnancyData pregnancy)
+        {
+            if (pregnancy == null) return;
+            pregnancy.birthApproachStarted = false;
+            pregnancy.birthApproachStartedAt = 0L;
+            pregnancy.birthWaitingForNest = false;
+        }
+
+        private bool ReleaseBirthApproachForMother(RatData mother, PregnancyData pregnancy)
+        {
+            if (mother == null) return false;
+            bool changed = pregnancy != null &&
+                (pregnancy.birthApproachStarted || pregnancy.birthWaitingForNest || pregnancy.birthApproachStartedAt != 0L);
+            if (rats != null && rats.TryGetRatBehavior(mother.id, out RatHabitatBehavior behavior) &&
+                behavior != null && behavior.BirthApproachActive)
+                behavior.CancelBirthApproach();
+            birthQueueReservations.Release(mother.enclosure, mother.id);
+            birthApproachWatchdogs.Remove(mother.id);
+            ClearBirthApproachState(pregnancy);
+            changed |= RatActivitySystem.SetCurrent(Save, mother, "pregnant", "Pregnant", GameTime);
+            return changed;
         }
 
         private bool MoveSaleBirthFamilyToPairing(RatData mother, PregnancyData pregnancy,
@@ -4311,7 +4848,8 @@ namespace RatHabitat
 
         public bool CanMoveRatToForSaleTank(RatData rat)
         {
-            return rat != null && rat.enclosure != RatEnclosure.ForSale && CanSellRat(rat) &&
+            return rat != null && rat.enclosure != RatEnclosure.ForSale &&
+                EnclosureSystem.CanEnterForSaleTank(Save, rat, GameTime) &&
                 !EnclosureSystem.HasDependentPinkies(Save, rat.id) &&
                 ForSaleHabitatCount < ForSaleHabitatCapacity;
         }
@@ -5085,6 +5623,7 @@ namespace RatHabitat
             Quaternion desiredRotation = normalCameraRotation;
             float desiredSize = normalCameraOrthographicSize;
             var selected = SelectedRat;
+            EnsureTankCameraPanFocus(selected);
             Transform ratRoot;
             Vector3 selectedFocusPoint;
             if (cameraFollowSelectedRat && selected != null &&
@@ -5102,7 +5641,8 @@ namespace RatHabitat
                     focusPoint += Vector3.up * PairingPinkieCameraLookTargetDownwardOffset;
                 }
                 Vector3 cameraForward = normalCameraRotation * Vector3.forward;
-                desiredPosition = focusPoint - cameraForward * normalCameraDistance;
+                desiredPosition = ClampCameraTargetToEnclosure(selected.enclosure,
+                    focusPoint + tankCameraPanState.Offset) - cameraForward * normalCameraDistance;
                 desiredSize = normalCameraOrthographicSize * (selectedPinkie
                     ? PinkieInspectionOrthographicMultiplier
                     : InspectionOrthographicMultiplier);
@@ -5112,7 +5652,8 @@ namespace RatHabitat
                 Vector3 focusPoint = EnclosureSystem.GetNestPosition(cameraFocusNestEnclosure) +
                     Vector3.up * 0.42f;
                 Vector3 cameraForward = normalCameraRotation * Vector3.forward;
-                desiredPosition = focusPoint - cameraForward * normalCameraDistance;
+                desiredPosition = ClampCameraTargetToEnclosure(cameraFocusNestEnclosure,
+                    focusPoint + tankCameraPanState.Offset) - cameraForward * normalCameraDistance;
                 desiredSize = normalCameraOrthographicSize * 0.58f;
             }
             else
@@ -5129,7 +5670,7 @@ namespace RatHabitat
                 float frameSize;
                 CalculateEnclosureFrame(enclosure, out frameTarget, out frameSize);
                 frameTarget = ClampCameraTargetToEnclosure(
-                    enclosure, frameTarget + habitatZoomFocusOffset);
+                    enclosure, frameTarget + habitatZoomFocusOffset + tankCameraPanState.Offset);
                 Vector3 cameraForward = normalCameraRotation * Vector3.forward;
                 desiredPosition = frameTarget - cameraForward * normalCameraDistance;
                 desiredSize = frameSize;
@@ -5262,6 +5803,75 @@ namespace RatHabitat
             // interpolation on every wheel or pinch sample.
         }
 
+        private void EnsureTankCameraPanFocus(RatData selected)
+        {
+            if (cameraFollowSelectedRat && selected != null)
+            {
+                tankCameraPanState.SetFocus(selected.enclosure, selected.id, false);
+                return;
+            }
+
+            if (cameraFocusNest && EnclosureSystem.HasNest(cameraFocusNestEnclosure))
+            {
+                tankCameraPanState.SetFocus(cameraFocusNestEnclosure, null, true);
+                return;
+            }
+
+            tankCameraPanState.SetFocus(EnclosureForCameraView(cameraView), null, false);
+        }
+
+        private Vector3 GetTankCameraPanBaseTarget(RatData selected, out RatEnclosure enclosure)
+        {
+            Transform ratRoot;
+            Vector3 focusPoint;
+            if (cameraFollowSelectedRat && selected != null &&
+                TryGetSelectedRatFocus(selected, out ratRoot, out focusPoint))
+            {
+                float verticalOffset = selected.stage == RatStage.Pinkie
+                    ? PinkieSelectedRatCameraVerticalOffset
+                    : SelectedRatCameraVerticalOffset;
+                focusPoint += Vector3.up * verticalOffset;
+                if (cameraView == HabitatCameraView.Pairing &&
+                    selected.enclosure == RatEnclosure.Pairing && selected.stage == RatStage.Pinkie)
+                    focusPoint += Vector3.up * PairingPinkieCameraLookTargetDownwardOffset;
+                enclosure = selected.enclosure;
+                return focusPoint;
+            }
+
+            if (cameraFocusNest && EnclosureSystem.HasNest(cameraFocusNestEnclosure))
+            {
+                enclosure = cameraFocusNestEnclosure;
+                return EnclosureSystem.GetNestPosition(enclosure) + Vector3.up * 0.42f;
+            }
+
+            enclosure = EnclosureForCameraView(cameraView);
+            Vector3 frameTarget;
+            float unusedSize;
+            CalculateEnclosureFrame(enclosure, out frameTarget, out unusedSize);
+            return ClampCameraTargetToEnclosure(enclosure, frameTarget + habitatZoomFocusOffset);
+        }
+
+        private void PanHabitatCameraByScreenDelta(Vector2 screenDelta)
+        {
+            if (!cameraPresentationReady || mainCamera == null ||
+                (ui != null && ui.IsModalOverlayOpen)) return;
+
+            RatData selected = SelectedRat;
+            EnsureTankCameraPanFocus(selected);
+            RatEnclosure enclosure;
+            Vector3 baseTarget = GetTankCameraPanBaseTarget(selected, out enclosure);
+            Vector3 currentTarget = ClampCameraTargetToEnclosure(
+                enclosure, baseTarget + tankCameraPanState.Offset);
+            Vector3 worldDrag = TankCameraPanMath.ScreenDeltaToWorldPlane(mainCamera, screenDelta);
+            if (worldDrag.sqrMagnitude <= 0.000001f) return;
+
+            // Moving the view with the pointer requires moving the camera's
+            // look target in the opposite direction to the projected drag.
+            Vector3 nextTarget = ClampCameraTargetToEnclosure(enclosure, currentTarget - worldDrag);
+            tankCameraPanState.SetOffset(nextTarget - baseTarget);
+            cameraMoveVelocity = Vector3.zero;
+        }
+
         private static RatEnclosure EnclosureForCameraView(HabitatCameraView view)
         {
             switch (view)
@@ -5275,11 +5885,7 @@ namespace RatHabitat
 
         private static Vector3 ClampCameraTargetToEnclosure(RatEnclosure enclosure, Vector3 target)
         {
-            EnclosureSystem.Definition definition = EnclosureSystem.GetDefinition(enclosure);
-            target.x = Mathf.Clamp(target.x, definition.minX + 0.45f, definition.maxX - 0.45f);
-            target.y = Mathf.Clamp(target.y, 0.35f, 1.25f);
-            target.z = Mathf.Clamp(target.z, definition.minZ + 0.45f, definition.maxZ - 0.45f);
-            return target;
+            return TankCameraPanMath.ClampTargetToEnclosure(enclosure, target);
         }
 
         private static Vector3 ClampCameraTargetOffset(RatEnclosure enclosure, Vector3 offset)

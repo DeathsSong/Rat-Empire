@@ -7,6 +7,81 @@ using UnityEngine.UI;
 namespace RatHabitat
 {
     /// <summary>
+    /// Camera pan offset is tied to the current tank/focus. Changing tanks or
+    /// selecting a different rat recenters the view without touching zoom.
+    /// </summary>
+    public sealed class TankCameraPanState
+    {
+        private bool initialized;
+        private RatEnclosure enclosure;
+        private string ratId;
+        private bool nestFocus;
+
+        public Vector3 Offset { get; private set; }
+
+        public bool SetFocus(RatEnclosure newEnclosure, string newRatId, bool newNestFocus)
+        {
+            if (initialized && enclosure == newEnclosure && nestFocus == newNestFocus &&
+                string.Equals(ratId, newRatId, StringComparison.Ordinal)) return false;
+
+            initialized = true;
+            enclosure = newEnclosure;
+            ratId = newRatId;
+            nestFocus = newNestFocus;
+            Offset = Vector3.zero;
+            return true;
+        }
+
+        public void SetOffset(Vector3 offset)
+        {
+            Offset = offset;
+        }
+
+        public void Recenter()
+        {
+            Offset = Vector3.zero;
+        }
+    }
+
+    public static class TankCameraPanMath
+    {
+        /// <summary>Maps a screen drag to the equivalent world-plane translation for an orthographic camera.</summary>
+        public static Vector3 ScreenDeltaToWorldPlane(Camera camera, Vector2 screenDelta)
+        {
+            if (camera == null || !camera.orthographic || screenDelta.sqrMagnitude <= 0.000001f)
+                return Vector3.zero;
+
+            Rect pixelRect = camera.pixelRect;
+            if (pixelRect.width <= 1f || pixelRect.height <= 1f) return Vector3.zero;
+
+            Vector3 right = camera.transform.right;
+            Vector3 up = camera.transform.up;
+            float determinant = right.x * up.z - right.z * up.x;
+            if (Mathf.Abs(determinant) <= 0.0001f) return Vector3.zero;
+
+            float projectedRight = screenDelta.x *
+                (2f * camera.orthographicSize * camera.aspect / pixelRect.width);
+            float projectedUp = screenDelta.y *
+                (2f * camera.orthographicSize / pixelRect.height);
+            float worldX = (projectedRight * up.z - right.z * projectedUp) / determinant;
+            float worldZ = (right.x * projectedUp - projectedRight * up.x) / determinant;
+            return new Vector3(worldX, 0f, worldZ);
+        }
+
+        public static Vector3 ClampTargetToEnclosure(RatEnclosure enclosure, Vector3 target,
+            float horizontalMargin = 0.45f)
+        {
+            EnclosureSystem.Definition definition = EnclosureSystem.GetDefinition(enclosure);
+            float marginX = Mathf.Min(Mathf.Max(0f, horizontalMargin), definition.Width * 0.5f);
+            float marginZ = Mathf.Min(Mathf.Max(0f, horizontalMargin), definition.Depth * 0.5f);
+            target.x = Mathf.Clamp(target.x, definition.minX + marginX, definition.maxX - marginX);
+            target.y = Mathf.Clamp(target.y, 0.35f, 1.25f);
+            target.z = Mathf.Clamp(target.z, definition.minZ + marginZ, definition.maxZ - marginZ);
+            return target;
+        }
+    }
+
+    /// <summary>
     /// The one world-selection path for the vertical slice. It polls the
     /// legacy Input API so the same code works with Unity 2022.3's Editor and
     /// Android without requiring a second input package or a PhysicsRaycaster.
@@ -23,6 +98,7 @@ namespace RatHabitat
         private Action escapeHandler;
         private Action<string> diagnosticHandler;
         private Action<float, Vector2> zoomHandler;
+        private Action<Vector2> panHandler;
         private Action<Vector3> emptyWorldTapHandler;
         private Func<int, bool> habitatSwipeHandler;
         private Func<bool> modalOverlayHandler;
@@ -33,11 +109,17 @@ namespace RatHabitat
         private bool touchStartedOnUi;
         private bool touchStartedOnRatProfile;
         private bool touchStartedOnRatRoster;
+        private bool touchCanPan;
+        private bool touchPanDetected;
+        private Vector2 touchLastPanPosition;
         private Vector2 mousePressPosition;
         private bool mousePressStartedOnUi;
         private bool mousePressStartedOnRatProfile;
         private bool mousePressStartedOnRatRoster;
         private bool mouseDragDetected;
+        private bool mouseCanPan;
+        private bool mousePanDetected;
+        private Vector2 mouseLastPanPosition;
         private bool pinchStartedOnUi;
         private bool pinchZooming;
         private float lastPinchDistance;
@@ -55,6 +137,22 @@ namespace RatHabitat
         // buttons. Pinch deltas are converted into that same unit below.
         private const float ZoomInputStep = 0.42f;
         private const float PinchZoomPixelsPerStep = 100f;
+
+        public static bool CanBeginTankPan(bool cameraReady, bool modalOpen, bool pointerStartedOverUi)
+        {
+            return cameraReady && !modalOpen && !pointerStartedOverUi;
+        }
+
+        public static bool ShouldDispatchWorldSelection(bool pointerStartedOverUi,
+            bool pointerEndedOverUi, bool moved, bool panDetected)
+        {
+            return !pointerStartedOverUi && !pointerEndedOverUi && !moved && !panDetected;
+        }
+
+        public static bool HasExceededTankPanThreshold(Vector2 start, Vector2 current, float threshold)
+        {
+            return Vector2.Distance(start, current) > Mathf.Max(0f, threshold);
+        }
 
         private bool managerReady;
         private string startupError = string.Empty;
@@ -97,7 +195,8 @@ namespace RatHabitat
             Action<float, Vector2> onZoom = null,
             Action<Vector3> onEmptyWorldTap = null,
             Func<int, bool> onHabitatSwipe = null,
-            Func<bool> isModalOverlayOpen = null)
+            Func<bool> isModalOverlayOpen = null,
+            Action<Vector2> onPan = null)
         {
             targetCamera = camera != null ? camera : Camera.main;
             selectionHandler = onSelected;
@@ -108,6 +207,7 @@ namespace RatHabitat
             emptyWorldTapHandler = onEmptyWorldTap;
             habitatSwipeHandler = onHabitatSwipe;
             modalOverlayHandler = isModalOverlayOpen;
+            panHandler = onPan;
             cameraTarget = new Vector3(0f, 0f, 1f);
             clickableLayerMask = ~0;
             startupError = string.Empty;
@@ -154,6 +254,8 @@ namespace RatHabitat
             touchStartedOnUi = false;
             touchStartedOnRatProfile = false;
             touchStartedOnRatRoster = false;
+            touchCanPan = false;
+            touchPanDetected = false;
             pinchStartedOnUi = false;
             pinchZooming = false;
             lastPinchDistance = 0f;
@@ -161,6 +263,8 @@ namespace RatHabitat
             mousePressStartedOnRatProfile = false;
             mousePressStartedOnRatRoster = false;
             mouseDragDetected = false;
+            mouseCanPan = false;
+            mousePanDetected = false;
             lastPointerFrame = -1;
             pointerReceived = false;
         }
@@ -216,6 +320,8 @@ namespace RatHabitat
             touchStartedOnUi = false;
             touchStartedOnRatProfile = false;
             touchStartedOnRatRoster = false;
+            touchCanPan = false;
+            touchPanDetected = false;
             pinchStartedOnUi = false;
             pinchZooming = false;
             lastPinchDistance = 0f;
@@ -223,6 +329,8 @@ namespace RatHabitat
             mousePressStartedOnRatProfile = false;
             mousePressStartedOnRatRoster = false;
             mouseDragDetected = false;
+            mouseCanPan = false;
+            mousePanDetected = false;
         }
 
         private void HandleTouch()
@@ -241,6 +349,8 @@ namespace RatHabitat
                 touchFingerId = -1;
                 touchStartedOnRatProfile = false;
                 touchStartedOnRatRoster = false;
+                touchCanPan = false;
+                touchPanDetected = false;
 
                 bool pinchBeganOnUi = (first.phase == TouchPhase.Began && IsPointerOverInteractiveUi(first.position, first.fingerId)) ||
                     (second.phase == TouchPhase.Began && IsPointerOverInteractiveUi(second.position, second.fingerId));
@@ -282,6 +392,8 @@ namespace RatHabitat
             if (touchCount == 0)
             {
                 pinchStartedOnUi = false;
+                touchCanPan = false;
+                touchPanDetected = false;
                 return;
             }
 
@@ -295,10 +407,20 @@ namespace RatHabitat
                     touchStartedOnRatProfile = IsPointerOverRatProfile(touch.position);
                     touchStartedOnRatRoster = IsPointerOverRatRoster(touch.position);
                     touchStartedOnUi = IsPointerOverInteractiveUi(touch.position, touch.fingerId);
+                    touchCanPan = CanBeginTankPan(targetCamera != null &&
+                        targetCamera.pixelRect.Contains(touch.position), IsModalOverlayOpen(),
+                        touchStartedOnUi || touchStartedOnRatProfile || touchStartedOnRatRoster);
+                    touchPanDetected = false;
+                    touchLastPanPosition = touch.position;
                     if (touchStartedOnUi) pinchStartedOnUi = true;
+                }
+                else if (touch.phase == TouchPhase.Moved && touch.fingerId == touchFingerId)
+                {
+                    if (UpdateTouchPan(touch.position)) touchPanDetected = true;
                 }
                 else if (touch.phase == TouchPhase.Ended && touch.fingerId == touchFingerId)
                 {
+                    if (UpdateTouchPan(touch.position)) touchPanDetected = true;
                     RecordPointerReceived(touch.position);
                     bool moved = Vector2.Distance(touchStart, touch.position) > TouchMoveThreshold;
                     bool overUi = IsPointerOverInteractiveUi(touch.position, touch.fingerId);
@@ -324,6 +446,10 @@ namespace RatHabitat
                     {
                         RecordNoWorldRay("UI blocked");
                     }
+                    else if (touchPanDetected)
+                    {
+                        RecordNoWorldRay("tank camera pan handled");
+                    }
                     else if (moved)
                     {
                         if (TryInvokeHabitatSwipe(touch.position - touchStart))
@@ -331,15 +457,19 @@ namespace RatHabitat
                         else
                             RecordNoWorldRay("touch drag ignored");
                     }
-                    else
+                    else if (ShouldDispatchWorldSelection(touchStartedOnUi, overUi,
+                        moved, touchPanDetected))
                     {
                         ProcessPointer(touch.position);
                     }
+                    else RecordNoWorldRay("world gesture consumed");
 
                     touchFingerId = -1;
                     touchStartedOnUi = false;
                     touchStartedOnRatProfile = false;
                     touchStartedOnRatRoster = false;
+                    touchCanPan = false;
+                    touchPanDetected = false;
                 }
                 else if (touch.phase == TouchPhase.Canceled && touch.fingerId == touchFingerId)
                 {
@@ -349,6 +479,8 @@ namespace RatHabitat
                     touchStartedOnUi = false;
                     touchStartedOnRatProfile = false;
                     touchStartedOnRatRoster = false;
+                    touchCanPan = false;
+                    touchPanDetected = false;
                 }
             }
         }
@@ -369,6 +501,11 @@ namespace RatHabitat
                 mousePressStartedOnRatProfile = IsPointerOverRatProfile(pointerPosition);
                 mousePressStartedOnRatRoster = IsPointerOverRatRoster(pointerPosition);
                 mousePressStartedOnUi = IsPointerOverInteractiveUi(pointerPosition, -1);
+                mouseCanPan = CanBeginTankPan(targetCamera != null &&
+                    targetCamera.pixelRect.Contains(pointerPosition), IsModalOverlayOpen(),
+                    mousePressStartedOnUi || mousePressStartedOnRatProfile || mousePressStartedOnRatRoster);
+                mousePanDetected = false;
+                mouseLastPanPosition = pointerPosition;
                 mouseDragDetected = false;
                 return;
             }
@@ -379,11 +516,13 @@ namespace RatHabitat
                 {
                     mouseDragDetected = true;
                 }
+                if (UpdateMousePan(pointerPosition)) mousePanDetected = true;
                 return;
             }
 
             if (Input.GetMouseButtonUp(0))
             {
+                if (UpdateMousePan(pointerPosition)) mousePanDetected = true;
                 RecordPointerReceived(pointerPosition);
                 bool moved = mouseDragDetected || Vector2.Distance(mousePressPosition, pointerPosition) > MouseMoveThreshold;
                 bool overUi = IsPointerOverInteractiveUi(pointerPosition, -1);
@@ -404,6 +543,10 @@ namespace RatHabitat
                 {
                     RecordNoWorldRay("UI blocked");
                 }
+                else if (mousePanDetected)
+                {
+                    RecordNoWorldRay("tank camera pan handled");
+                }
                 else if (moved)
                 {
                     if (TryInvokeHabitatSwipe(pointerPosition - mousePressPosition))
@@ -411,18 +554,48 @@ namespace RatHabitat
                     else
                         RecordNoWorldRay("mouse drag ignored");
                 }
-                else
+                else if (ShouldDispatchWorldSelection(mousePressStartedOnUi, overUi,
+                    moved, mousePanDetected))
                 {
                     ProcessPointer(pointerPosition);
                 }
+                else RecordNoWorldRay("world gesture consumed");
 
                 mousePressStartedOnUi = false;
                 mousePressStartedOnRatProfile = false;
                 mousePressStartedOnRatRoster = false;
                 mouseDragDetected = false;
+                mouseCanPan = false;
+                mousePanDetected = false;
                 return;
             }
 
+        }
+
+        private bool UpdateMousePan(Vector2 screenPosition)
+        {
+            if (!mouseCanPan || panHandler == null) return false;
+            if (!mousePanDetected && !HasExceededTankPanThreshold(
+                mousePressPosition, screenPosition, MouseMoveThreshold))
+                return false;
+
+            Vector2 delta = screenPosition - mouseLastPanPosition;
+            mouseLastPanPosition = screenPosition;
+            if (delta.sqrMagnitude > 0.001f) panHandler(delta);
+            return true;
+        }
+
+        private bool UpdateTouchPan(Vector2 screenPosition)
+        {
+            if (!touchCanPan || panHandler == null) return false;
+            if (!touchPanDetected && !HasExceededTankPanThreshold(
+                touchStart, screenPosition, TouchMoveThreshold))
+                return false;
+
+            Vector2 delta = screenPosition - touchLastPanPosition;
+            touchLastPanPosition = screenPosition;
+            if (delta.sqrMagnitude > 0.001f) panHandler(delta);
+            return true;
         }
 
         private bool TryInvokePageControl(Vector2 screenPosition)
@@ -466,7 +639,9 @@ namespace RatHabitat
             // keeps the manual habitat/world path from consuming a roster
             // gesture while preserving the EventSystem's normal UI routing.
             if (pageUi == null) pageUi = FindObjectOfType<VerticalSliceUI>();
-            if (pageUi != null && pageUi.IsPointerOverRatRosterScroll(screenPoint)) return true;
+            if (pageUi != null && (pageUi.IsPointerOverRatRosterScroll(screenPoint) ||
+                pageUi.IsPointerOverRatProfileScroll(screenPoint) ||
+                pageUi.IsPointerOverStoreRatList(screenPoint))) return true;
 
             var eventSystem = EventSystem.current;
             if (eventSystem == null) return false;

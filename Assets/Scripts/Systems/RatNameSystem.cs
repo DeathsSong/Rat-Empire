@@ -15,6 +15,92 @@ namespace RatHabitat
         private static readonly Dictionary<string, RatNameUseData> SaveNameHistoryIndex =
             new Dictionary<string, RatNameUseData>(StringComparer.Ordinal);
 
+        private sealed class NameHistoryLookup
+        {
+            private readonly Dictionary<string, RatNameUseData> fullNames =
+                new Dictionary<string, RatNameUseData>(StringComparer.Ordinal);
+            private readonly Dictionary<string, long> firstNames =
+                new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            private readonly Dictionary<string, long> secondNames =
+                new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+
+            public NameHistoryLookup(ColonySaveData save)
+            {
+                if (save == null || save.ratNameHistory == null) return;
+                foreach (RatNameUseData entry in save.ratNameHistory)
+                {
+                    if (entry == null) continue;
+                    if (!string.IsNullOrEmpty(entry.normalizedName) &&
+                        !fullNames.ContainsKey(entry.normalizedName))
+                        fullNames.Add(entry.normalizedName, entry);
+                    AddLatest(firstNames, entry.firstName, entry.lastFirstNameUsedGameTime);
+                    AddLatest(secondNames, entry.secondName, entry.lastSecondNameUsedGameTime);
+                }
+            }
+
+            public RatNameUseData FindHistory(string normalizedName)
+            {
+                RatNameUseData entry;
+                return !string.IsNullOrEmpty(normalizedName) && fullNames.TryGetValue(normalizedName, out entry)
+                    ? entry
+                    : null;
+            }
+
+            public long LatestFirstNameUse(string name) { return Latest(firstNames, name); }
+            public long LatestSecondNameUse(string name) { return Latest(secondNames, name); }
+
+            private static void AddLatest(Dictionary<string, long> lookup, string name, long time)
+            {
+                if (string.IsNullOrEmpty(name)) return;
+                long previous;
+                if (!lookup.TryGetValue(name, out previous) || time > previous) lookup[name] = time;
+            }
+
+            private static long Latest(Dictionary<string, long> lookup, string name)
+            {
+                long time;
+                return !string.IsNullOrEmpty(name) && lookup.TryGetValue(name, out time) ? time : 0L;
+            }
+        }
+
+        /// <summary>
+        /// Reuses the occupied-name set and historical name lookups across a
+        /// batch such as store inventory generation. This keeps allocation
+        /// deterministic while avoiding a full name-history scan per listing.
+        /// </summary>
+        public sealed class NameAllocationSession
+        {
+            private readonly ColonySaveData save;
+            private readonly HashSet<string> occupiedNames;
+            private readonly NameHistoryLookup history;
+
+            internal NameAllocationSession(ColonySaveData source)
+            {
+                save = source;
+                occupiedNames = CollectOccupiedNames(source, null);
+                history = new NameHistoryLookup(source);
+            }
+
+            public string GenerateAvailableName(string stableId, RatSex sex, long gameTime,
+                int deterministicSelectionSeed)
+            {
+                string selectionId = (stableId ?? string.Empty) + "|selection|" +
+                    deterministicSelectionSeed;
+                string name = AllocateName(save, selectionId, sex, gameTime,
+                    occupiedNames, history);
+                string normalized = NormalizeForComparison(name);
+                if (!string.IsNullOrEmpty(normalized)) occupiedNames.Add(normalized);
+                return name;
+            }
+        }
+
+        public static NameAllocationSession BeginNameAllocationSession(ColonySaveData save)
+        {
+            if (save == null) return null;
+            save.EnsureLists();
+            return new NameAllocationSession(save);
+        }
+
         private static long CooldownMs
         {
             get { return (long)(GameConfig.RatNameReuseCooldownDays * GameConfig.GameDayMs); }
@@ -317,7 +403,8 @@ namespace RatHabitat
             if (seen.Add(NormalizeForComparison(name))) result.Add(name);
         }
 
-        private static string AllocateName(ColonySaveData save, string stableId, RatSex sex, long gameTime, HashSet<string> occupied)
+        private static string AllocateName(ColonySaveData save, string stableId, RatSex sex,
+            long gameTime, HashSet<string> occupied, NameHistoryLookup history = null)
         {
             string[] pool = BuildPool(save, sex);
             int start = StableHash((stableId ?? string.Empty) + "|name-choice") % Math.Max(1, pool.Length);
@@ -326,10 +413,10 @@ namespace RatHabitat
             // Keep the requested name shape when its candidates exist. Within
             // that shape, prefer never-used/old first and second names. Only
             // relax the reuse cooldown before falling back to the other shape.
-            int best = FindBestCandidate(save, pool, occupied, gameTime, start, wantsDoubleName, true);
-            if (best < 0) best = FindBestCandidate(save, pool, occupied, gameTime, start, wantsDoubleName, false);
-            if (best < 0) best = FindBestCandidate(save, pool, occupied, gameTime, start, !wantsDoubleName, true);
-            if (best < 0) best = FindBestCandidate(save, pool, occupied, gameTime, start, !wantsDoubleName, false);
+            int best = FindBestCandidate(save, pool, occupied, gameTime, start, wantsDoubleName, true, history);
+            if (best < 0) best = FindBestCandidate(save, pool, occupied, gameTime, start, wantsDoubleName, false, history);
+            if (best < 0) best = FindBestCandidate(save, pool, occupied, gameTime, start, !wantsDoubleName, true, history);
+            if (best < 0) best = FindBestCandidate(save, pool, occupied, gameTime, start, !wantsDoubleName, false, history);
             if (best >= 0) return pool[best];
 
             string fallback = pool[start];
@@ -353,7 +440,7 @@ namespace RatHabitat
 
         private static int FindBestCandidate(ColonySaveData save, string[] pool,
             HashSet<string> occupied, long gameTime, int start, bool wantsDoubleName,
-            bool respectReuseCooldown)
+            bool respectReuseCooldown, NameHistoryLookup history = null)
         {
             int best = -1;
             long bestScore = long.MaxValue;
@@ -366,13 +453,19 @@ namespace RatHabitat
                 if (isDoubleName != wantsDoubleName ||
                     occupied.Contains(NormalizeForComparison(candidate))) continue;
 
-                long firstLast = LatestFirstNameUse(save, parts.first);
-                long secondLast = isDoubleName ? LatestSecondNameUse(save, parts.second) : 0L;
+                long firstLast = history == null
+                    ? LatestFirstNameUse(save, parts.first)
+                    : history.LatestFirstNameUse(parts.first);
+                long secondLast = !isDoubleName ? 0L : history == null
+                    ? LatestSecondNameUse(save, parts.second)
+                    : history.LatestSecondNameUse(parts.second);
                 if (respectReuseCooldown &&
                     ((firstLast > 0L && gameTime - firstLast < CooldownMs) ||
                      (secondLast > 0L && gameTime - secondLast < CooldownMs))) continue;
 
-                RatNameUseData fullNameUse = FindHistory(save, candidate);
+                RatNameUseData fullNameUse = history == null
+                    ? FindHistory(save, candidate)
+                    : history.FindHistory(NormalizeForComparison(candidate));
                 long fullNameLast = fullNameUse == null ? 0L : fullNameUse.lastUsedGameTime;
                 long score = Math.Max(fullNameLast, Math.Max(firstLast, secondLast));
                 if (score < bestScore)

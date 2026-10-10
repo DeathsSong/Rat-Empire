@@ -182,11 +182,16 @@ namespace RatHabitat
         public const float SellCreditTraitMultiplier = 0.5f;
         public const float TraitVariation = 4f;
         // B/C/D pigment mutations retain the original rate. S-locus marking
-        // mutations use a separate per-inherited-allele rate: 5% per allele
-        // gives solid s/s parents a 9.75% chance of at least one spontaneous
-        // marking allele in a pup (1 - 0.95^2), while remaining non-guaranteed.
+        // mutations use a separate per-inherited-allele rate: 0.5% per allele
+        // gives solid s/s x s/s parents a 0.9975% chance per offspring of at
+        // least one spontaneous marking allele (1 - 0.995^2). Albino genetics
+        // can mask its appearance; normal marked-parent inheritance is unchanged.
         public const float MutationRate = 0.0025f;
-        public const float MarkingMutationRate = 0.05f;
+        public const float MarkingMutationRate = 0.005f;
+        // Independent recessive hairless mutation. A non-carrier Hr/Hr pair
+        // has exactly 0.5% visibly hr/hr pups (not 0.5% per allele). Carrier
+        // and expressing crosses use Mendelian inheritance without this roll.
+        public const float SpontaneousHairlessChance = 0.005f;
         // Visual scale endpoints are presentation-only. GrowthSystem uses
         // them as the endpoints of its age-based uniform curve; they do not
         // change the saved age, stage, phenotype, or biology rules above.
@@ -319,6 +324,7 @@ namespace RatHabitat
                 case "B": return "B";
                 case "C": return "C";
                 case "D": return "D";
+                case "Hr": return "Hr";
                 default: return "S";
             }
         }
@@ -330,6 +336,7 @@ namespace RatHabitat
                 case "B": return "b";
                 case "C": return "c";
                 case "D": return "d";
+                case "Hr": return "hr";
                 default: return "s";
             }
         }

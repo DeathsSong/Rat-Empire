@@ -45,6 +45,14 @@ namespace RatHabitat
         // driven elsewhere; older missed movement/idle steps are compressed.
         public const float MaximumBehaviorBacklogSeconds = 12f;
         public const float MaximumAnimationPlaybackMultiplier = 12f;
+        // At 3x the authoritative calendar advances by one game day per
+        // real-world second. That time rate is retained, but applying every
+        // simulated second to a rat's visible transform would request many
+        // tank-lengths of travel in a single rendered frame. Cap only the
+        // presentation distance at 3x; 1x and 2x still use their exact clock
+        // movement deltas.
+        public const float MaximumThreeXVisibleMovementUnitsPerSecond = 18f;
+        public const float MaximumThreeXVisibleMovementUnitsPerFrame = 0.35f;
 
         public static float RuntimeSimulationSpeed { get { return simulationPaused ? 0f : runtimeSimulationSpeed; } }
         public static float RuntimeSimulationMultiplier
@@ -323,6 +331,40 @@ namespace RatHabitat
         }
 
         /// <summary>
+        /// Consumes the already-scaled movement-time budget while also
+        /// respecting a per-rat visible-distance budget for this rendered
+        /// frame. The latter is presentation-only and is deliberately finite
+        /// at 3x so a calendar-sized delta cannot send a rat through a tank or
+        /// repeatedly into nest/wall clamps.
+        /// </summary>
+        public static float SimulationMovementStep(
+            float baseWorldSpeed,
+            float simulationDeltaSeconds,
+            ref float visualMovementTimeBudgetSeconds,
+            ref float visibleMovementDistanceBudget)
+        {
+            float speed = Mathf.Max(0f, baseWorldSpeed);
+            float allowedSimulationSeconds = Mathf.Min(
+                Mathf.Max(0f, simulationDeltaSeconds),
+                Mathf.Max(0f, visualMovementTimeBudgetSeconds));
+            if (speed > 0f && visibleMovementDistanceBudget < float.MaxValue)
+            {
+                allowedSimulationSeconds = Mathf.Min(allowedSimulationSeconds,
+                    Mathf.Max(0f, visibleMovementDistanceBudget) / speed);
+            }
+
+            float distance = speed * allowedSimulationSeconds;
+            visualMovementTimeBudgetSeconds = Mathf.Max(
+                0f, visualMovementTimeBudgetSeconds - allowedSimulationSeconds);
+            if (visibleMovementDistanceBudget < float.MaxValue)
+            {
+                visibleMovementDistanceBudget = Mathf.Max(
+                    0f, visibleMovementDistanceBudget - distance);
+            }
+            return distance;
+        }
+
+        /// <summary>
         /// Calculates one clamped world-space movement position using the
         /// same already-scaled frame budget consumed by live rat movement.
         /// Keeping this primitive shared lets tests verify Transform distance,
@@ -338,6 +380,37 @@ namespace RatHabitat
             float distance = SimulationMovementStep(
                 baseWorldSpeed, simulationDeltaSeconds, ref visualMovementTimeBudgetSeconds);
             return Vector3.MoveTowards(currentPosition, targetPosition, distance);
+        }
+
+        public static Vector3 SimulationMovementTargetPosition(
+            Vector3 currentPosition,
+            Vector3 targetPosition,
+            float baseWorldSpeed,
+            float simulationDeltaSeconds,
+            ref float visualMovementTimeBudgetSeconds,
+            ref float visibleMovementDistanceBudget)
+        {
+            float distance = SimulationMovementStep(baseWorldSpeed, simulationDeltaSeconds,
+                ref visualMovementTimeBudgetSeconds, ref visibleMovementDistanceBudget);
+            return Vector3.MoveTowards(currentPosition, targetPosition, distance);
+        }
+
+        public static float SimulationVisibleMovementDistanceBudget(float realDeltaSeconds)
+        {
+            if (simulationPaused || realDeltaSeconds <= 0f) return 0f;
+            if (RuntimeSimulationMultiplier < 1000f) return float.MaxValue;
+            return Mathf.Min(MaximumThreeXVisibleMovementUnitsPerSecond * realDeltaSeconds,
+                MaximumThreeXVisibleMovementUnitsPerFrame);
+        }
+
+        public static float SimulationVisibleMovementSpeed(float baseWorldSpeed, float realDeltaSeconds)
+        {
+            float requestedSpeed = Mathf.Max(0f, baseWorldSpeed) * RuntimeSimulationMultiplier;
+            if (RuntimeSimulationMultiplier < 1000f) return requestedSpeed;
+            if (realDeltaSeconds <= 0f) return Mathf.Min(requestedSpeed,
+                MaximumThreeXVisibleMovementUnitsPerSecond);
+            return Mathf.Min(requestedSpeed,
+                SimulationVisibleMovementDistanceBudget(realDeltaSeconds) / realDeltaSeconds);
         }
 
         /// <summary>

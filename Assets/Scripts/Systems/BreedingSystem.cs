@@ -380,6 +380,17 @@ namespace RatHabitat
             ColonySaveData save, RatData rat, long gameTime,
             long opportunityWindowStartGameTime, out string reason)
         {
+            bool recoveredFertileWindow;
+            return IsBreedEligibleAtOpportunity(save, rat, gameTime,
+                opportunityWindowStartGameTime, out reason, out recoveredFertileWindow);
+        }
+
+        public static bool IsBreedEligibleAtOpportunity(
+            ColonySaveData save, RatData rat, long gameTime,
+            long opportunityWindowStartGameTime, out string reason,
+            out bool recoveredFertileWindow)
+        {
+            recoveredFertileWindow = false;
             ReproductiveStatus status = GetReproductiveStatus(save, rat, gameTime);
             reason = status.eligibilityReason;
             if (status.canBreed) return true;
@@ -391,9 +402,38 @@ namespace RatHabitat
                 FertileWindowOverlapsInterval(rat, opportunityWindowStartGameTime, gameTime))
             {
                 reason = string.Empty;
+                recoveredFertileWindow = true;
                 return true;
             }
             return false;
+        }
+
+        /// <summary>
+        /// Keeps an already-committed pairing opportunity valid while the
+        /// rats approach one another. At 3x, an in-game day passes in one real
+        /// second, so the fertile window can close during the physical walk.
+        /// Only that window may elapse; current pregnancy, recovery/nursing,
+        /// cooldown, maturity, breeding-age, session, and other rules remain
+        /// authoritative at the time of this check.
+        /// </summary>
+        public static bool IsBreedEligibleForCommittedPairingOpportunity(
+            ColonySaveData save, RatData rat, long gameTime,
+            bool fertileWindowOpportunityCommitted, out string reason,
+            out bool usingCommittedFertileWindow)
+        {
+            usingCommittedFertileWindow = false;
+            ReproductiveStatus status = GetReproductiveStatus(save, rat, gameTime);
+            reason = status.eligibilityReason;
+            if (status.canBreed) return true;
+            if (!fertileWindowOpportunityCommitted || rat == null || rat.sex != RatSex.Female ||
+                status.state != ReproductiveState.Fertile ||
+                string.IsNullOrEmpty(reason) ||
+                !reason.StartsWith("Outside the fertile window", StringComparison.Ordinal))
+                return false;
+
+            reason = string.Empty;
+            usingCommittedFertileWindow = true;
+            return true;
         }
 
         /// <summary>
@@ -1455,8 +1495,12 @@ namespace RatHabitat
             pregnancy.birthAttemptCount++;
             pregnancy.lastBirthAttemptAt = gameTime;
 
+            // The mother must still be an active rat because she owns the
+            // pregnancy and receives the litter. The father is genetic and
+            // historical lineage data: he may have been automatically sold
+            // after conception, in which case he lives in retiredRats.
             var mother = FindRat(save, pregnancy.motherId);
-            var father = FindRat(save, pregnancy.fatherId);
+            var father = FindHistoricalRat(save, pregnancy.fatherId);
             if (mother == null || father == null)
             {
                 reason = "Parent records are missing.";
@@ -1530,6 +1574,19 @@ namespace RatHabitat
                     pup.growthAnchorAgeDays = 0f;
                     pup.markingFamily = GeneticsSystem.ResolveOffspringMarkingFamily(
                         mother, father, pup.genotype, pup.id);
+                    string inheritedPrimaryMarkingColor;
+                    string inheritedSecondaryMarkingFamily;
+                    string inheritedSecondaryMarkingColor;
+                    if (GeneticsSystem.TryInheritSecondaryMarking(
+                        mother, father, pup.genotype, pup.markingFamily, litterId, pup.id,
+                        out inheritedPrimaryMarkingColor,
+                        out inheritedSecondaryMarkingFamily,
+                        out inheritedSecondaryMarkingColor))
+                    {
+                        pup.markingColorHex = inheritedPrimaryMarkingColor;
+                        pup.secondaryMarkingFamily = inheritedSecondaryMarkingFamily;
+                        pup.secondaryMarkingColorHex = inheritedSecondaryMarkingColor;
+                    }
                     // Preserve the stable coat-family appearance through
                     // inheritance. The variant is chosen from both parents and
                     // the pup's stable ID, so a UI refresh or reload never
@@ -1611,6 +1668,7 @@ namespace RatHabitat
             reason = string.Empty;
             string oldMotherPregnancyId = mother.pregnancyId;
             bool oldMotherNursing = mother.nursing;
+            string oldMotherNursingLitterId = mother.nursingLitterId;
             long oldMotherNursingUntil = mother.nursingUntil;
             long oldMotherRecoveryUntil = mother.recoveryUntil;
             long oldMotherCooldown = mother.breedingCooldownUntil;
@@ -1625,20 +1683,26 @@ namespace RatHabitat
             pregnancy.birthCommitState = 2;
             pregnancy.birthFailureReason = string.Empty;
             mother.pregnancyId = null;
-            father.pregnancyId = null;
+            bool fatherIsActive = father.removalDisposition == RatRemovalDisposition.None &&
+                save.rats != null && save.rats.Contains(father);
+            if (father.pregnancyId == pregnancy.id) father.pregnancyId = null;
             mother.nursing = true;
+            mother.nursingLitterId = litter.id;
             mother.nursingUntil = litter.weaningTimestamp;
             // Recovery starts on the birth frame. It must not be extended by
             // the independent 21-day weaning or 42-day sale timers.
             mother.recoveryUntil = gameTime + (long)(GameConfig.RecoveryDays * GameConfig.GameDayMs);
             mother.reproductiveState = ReproductiveState.Recovery;
-            father.reproductiveState = ReproductiveState.Fertile;
             mother.breedingCooldownUntil = gameTime + GameConfig.BreedingCooldownMs;
-            father.breedingCooldownUntil = gameTime + GameConfig.BreedingCooldownMs;
             RatActivitySystem.SetCurrent(save, mother, "nursing", "Nursing", gameTime);
             RatActivitySystem.Record(save, mother, "birth", "Giving birth", gameTime, "Giving birth");
             RatActivitySystem.Record(save, mother, "caring", "Caring for pinkies", gameTime, "Caring for pinkies");
-            RatActivitySystem.SetCurrent(save, father, "exploring", "Exploring", gameTime);
+            if (fatherIsActive)
+            {
+                father.reproductiveState = ReproductiveState.Fertile;
+                father.breedingCooldownUntil = gameTime + GameConfig.BreedingCooldownMs;
+                RatActivitySystem.SetCurrent(save, father, "exploring", "Exploring", gameTime);
+            }
 
             // The normal API retains the durable prepared-litter checkpoint and
             // final-state write. The live simulation batches this transaction
@@ -1656,6 +1720,7 @@ namespace RatHabitat
             pregnancy.birthFailureReason = "Final birth state could not be saved; retrying.";
             mother.pregnancyId = oldMotherPregnancyId ?? pregnancy.id;
             mother.nursing = oldMotherNursing;
+            mother.nursingLitterId = oldMotherNursingLitterId;
             mother.nursingUntil = oldMotherNursingUntil;
             mother.recoveryUntil = oldMotherRecoveryUntil;
             mother.breedingCooldownUntil = oldMotherCooldown;
@@ -1745,6 +1810,14 @@ namespace RatHabitat
         public long checks;
         public long eligiblePairsFound;
         public long pairingAttempts;
+        public long pairSelected;
+        public long approachStarted;
+        public long approachCancelled;
+        public string lastApproachCancellationReason;
+        public long routeFailures;
+        public long interactionStarted;
+        public long interactionCompleted;
+        public long interactionCancelled;
         public long cooldownBlockedChecks;
         public long cooldownBlockedCandidates;
         public long capacityBlockedAttempts;
@@ -1821,7 +1894,60 @@ namespace RatHabitat
 
         public static void RecordRouteFailure()
         {
+            RecordRouteFailure(GrowthSystem.RuntimeSimulationSpeed);
+        }
+
+        public static void RecordRouteFailure(float speed)
+        {
             diagnostics.routeFailures++;
+            int index = SpeedBucketIndex(speed);
+            PairingSpeedDiagnosticsSnapshot speedDiagnostics = diagnosticsBySpeed[index];
+            speedDiagnostics.routeFailures++;
+            diagnosticsBySpeed[index] = speedDiagnostics;
+        }
+
+        public static void RecordApproachStarted(float speed)
+        {
+            int index = SpeedBucketIndex(speed);
+            PairingSpeedDiagnosticsSnapshot speedDiagnostics = diagnosticsBySpeed[index];
+            speedDiagnostics.approachStarted++;
+            diagnosticsBySpeed[index] = speedDiagnostics;
+        }
+
+        public static void RecordApproachCancelled(float speed, string reason)
+        {
+            int index = SpeedBucketIndex(speed);
+            PairingSpeedDiagnosticsSnapshot speedDiagnostics = diagnosticsBySpeed[index];
+            speedDiagnostics.approachCancelled++;
+            string cancellationReason = string.IsNullOrEmpty(reason) ? "unspecified" : reason;
+            if (cancellationReason.IndexOf("interaction", StringComparison.OrdinalIgnoreCase) >= 0)
+                speedDiagnostics.interactionCancelled++;
+            speedDiagnostics.lastApproachCancellationReason = cancellationReason;
+            diagnosticsBySpeed[index] = speedDiagnostics;
+        }
+
+        public static void RecordInteractionStarted(float speed)
+        {
+            int index = SpeedBucketIndex(speed);
+            PairingSpeedDiagnosticsSnapshot speedDiagnostics = diagnosticsBySpeed[index];
+            speedDiagnostics.interactionStarted++;
+            diagnosticsBySpeed[index] = speedDiagnostics;
+        }
+
+        public static void RecordInteractionCompleted(float speed)
+        {
+            int index = SpeedBucketIndex(speed);
+            PairingSpeedDiagnosticsSnapshot speedDiagnostics = diagnosticsBySpeed[index];
+            speedDiagnostics.interactionCompleted++;
+            diagnosticsBySpeed[index] = speedDiagnostics;
+        }
+
+        public static void RecordRecoveredFertileWindow(float speed)
+        {
+            int index = SpeedBucketIndex(speed);
+            PairingSpeedDiagnosticsSnapshot speedDiagnostics = diagnosticsBySpeed[index];
+            speedDiagnostics.recoveredFertileWindows++;
+            diagnosticsBySpeed[index] = speedDiagnostics;
         }
 
         public static void RecordSkippedChecks(float speed, long skippedChecks)
@@ -1884,7 +2010,15 @@ namespace RatHabitat
                 value.capacityBlockedAttempts + " rolls/conceptions=" + value.conceptionRolls + "/" +
                 value.successfulConceptions + " failed=" + value.failedConceptionRolls +
                 " skipped checks=" + value.skippedChecks +
-                " recovered windows=" + value.recoveredFertileWindows;
+                " recovered windows=" + value.recoveredFertileWindows +
+                " selected/approach started/cancelled=" + value.pairSelected + "/" +
+                value.approachStarted + "/" + value.approachCancelled +
+                " route failures=" + value.routeFailures +
+                " interaction started/completed=" + value.interactionStarted + "/" +
+                value.interactionCompleted + " cancelled=" + value.interactionCancelled +
+                " last cancellation=" + (string.IsNullOrEmpty(value.lastApproachCancellationReason)
+                    ? "none"
+                    : value.lastApproachCancellationReason);
         }
 
         /// <summary>
@@ -1931,8 +2065,10 @@ namespace RatHabitat
             foreach (var rat in save.rats)
             {
                 if (rat == null || rat.removalDisposition != RatRemovalDisposition.None ||
-                    (rat.stage != RatStage.Adult && rat.stage != RatStage.Mature) ||
                     rat.enclosure != RatEnclosure.Pairing) continue;
+                RatStage currentStage = GrowthSystem.StageForAge(
+                    GrowthSystem.AgeDaysAt(rat, gameTime), rat.sex, rat.breedingEndAgeDays);
+                if (currentStage != RatStage.Adult && currentStage != RatStage.Mature) continue;
 
                 BreedingSystem.ReproductiveStatus reproductiveStatus =
                     BreedingSystem.GetReproductiveStatus(save, rat, gameTime);
@@ -1950,9 +2086,7 @@ namespace RatHabitat
                         RecordCandidateBlock(reason, speed);
                         continue;
                     }
-                    speedDiagnostics = diagnosticsBySpeed[SpeedBucketIndex(speed)];
-                    speedDiagnostics.recoveredFertileWindows++;
-                    diagnosticsBySpeed[SpeedBucketIndex(speed)] = speedDiagnostics;
+                    RecordRecoveredFertileWindow(speed);
                 }
                 if (rat.sex == RatSex.Male) MaleCandidates.Add(rat);
                 else if (rat.sex == RatSex.Female) FemaleCandidates.Add(rat);
@@ -1984,6 +2118,7 @@ namespace RatHabitat
             diagnostics.pairSelections++;
             speedDiagnostics = diagnosticsBySpeed[SpeedBucketIndex(speed)];
             speedDiagnostics.pairingAttempts++;
+            speedDiagnostics.pairSelected++;
             diagnosticsBySpeed[SpeedBucketIndex(speed)] = speedDiagnostics;
             male = MaleCandidates[0];
             female = FemaleCandidates[0];
@@ -2044,10 +2179,29 @@ namespace RatHabitat
             out string reason,
             out PregnancyData createdPregnancy)
         {
+            return ResolvePair(save, female, male, gameTime, pregnancyChance,
+                allowFertilityWindowElapsed, SaveSimulationSpeed(save),
+                out conceptionSucceeded, out reason, out createdPregnancy);
+        }
+
+        public static bool ResolvePair(
+            ColonySaveData save,
+            RatData female,
+            RatData male,
+            long gameTime,
+            float pregnancyChance,
+            bool allowFertilityWindowElapsed,
+            float diagnosticSpeed,
+            out bool conceptionSucceeded,
+            out string reason,
+            out PregnancyData createdPregnancy)
+        {
             conceptionSucceeded = false;
             reason = string.Empty;
             createdPregnancy = null;
-            float attemptSpeed = SaveSimulationSpeed(save);
+            // Keep outcome diagnostics with the speed at pair selection even
+            // if the player changes the clock speed while the rats approach.
+            float attemptSpeed = GrowthSystem.NormalizeSpeed(diagnosticSpeed);
             if (save == null || female == null || male == null)
             {
                 reason = "The pairing rats are no longer available.";
@@ -2180,22 +2334,10 @@ namespace RatHabitat
             bool allowFertilityWindowElapsed,
             out string reason)
         {
-            if (BreedingSystem.IsBreedEligible(save, rat, gameTime, out reason)) return true;
-            if (!allowFertilityWindowElapsed || rat == null || rat.sex != RatSex.Female) return false;
-
-            // GetReproductiveStatus remains authoritative here. The only
-            // unavailable result that a committed interaction may carry past
-            // its start is the female's live fertile window having elapsed.
-            BreedingSystem.ReproductiveStatus status = BreedingSystem.GetReproductiveStatus(save, rat, gameTime);
-            if (status.state == ReproductiveState.Fertile &&
-                !string.IsNullOrEmpty(status.eligibilityReason) &&
-                status.eligibilityReason.StartsWith("Outside the fertile window", StringComparison.Ordinal))
-            {
-                reason = string.Empty;
-                return true;
-            }
-            reason = status.eligibilityReason;
-            return false;
+            bool usingCommittedFertileWindow;
+            return BreedingSystem.IsBreedEligibleForCommittedPairingOpportunity(
+                save, rat, gameTime, allowFertilityWindowElapsed, out reason,
+                out usingCommittedFertileWindow);
         }
 
         public static void ApplyPairingAttemptCooldown(RatData female, RatData male, long gameTime)

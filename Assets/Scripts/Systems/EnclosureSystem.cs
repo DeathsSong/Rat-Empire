@@ -24,6 +24,9 @@ namespace RatHabitat
         public const float PairingNestAdultExclusionRadiusX = 3.32f;
         public const float PairingNestAdultExclusionRadiusZ = 2.46f;
         private const float NestAvoidancePadding = 0.18f;
+        // Shared by route planning, segment validation and recovery, in
+        // addition to the physical nest's adult exclusion padding.
+        public const float AdultNestRouteClearance = 0.04f;
         // Caregiving uses a smaller inset than the adult exclusion footprint.
         // The inset leaves room for the mother's body and tail without
         // selecting destinations on the nest's outer wall or front edge.
@@ -134,6 +137,16 @@ namespace RatHabitat
             return GetDefinition(enclosure).label;
         }
 
+        public const string FavoriteSaleTankRestriction = "Favorite rats cannot be moved to the For Sale Tank.";
+
+        // Tank admission is narrower than deliberate manual-sale eligibility:
+        // favorites remain sellable through the existing confirmation UI, but
+        // can never enter the unattended automatic-sale tank.
+        public static bool CanEnterForSaleTank(ColonySaveData save, RatData rat, long gameTime)
+        {
+            return rat != null && !rat.isFavorite && StoreSystem.CanSellRat(save, rat, gameTime);
+        }
+
         public static bool CanReturnFromForSale(RatData rat)
         {
             return rat != null && rat.removalDisposition == RatRemovalDisposition.None &&
@@ -185,21 +198,21 @@ namespace RatHabitat
 
         public static bool TryGetPairingNestAvoidanceBounds(float extraClearance, out Bounds bounds)
         {
-            if (pairingNestRendererBoundsRegistered)
-            {
-                bounds = pairingNestRendererBounds;
-                Vector3 size = bounds.size;
-                size.x += Mathf.Max(0f, extraClearance) * 2f;
-                size.z += Mathf.Max(0f, extraClearance) * 2f;
-                bounds.size = size;
-                return true;
-            }
+            return TryGetAdultNestExclusionBounds(RatEnclosure.Pairing, extraClearance, out bounds);
+        }
 
-            bounds = new Bounds(
-                PairingNestPosition,
-                new Vector3(PairingNestAdultExclusionRadiusX * 2f,
-                    0.8f,
-                    PairingNestAdultExclusionRadiusZ * 2f));
+        public static bool TryGetAdultNestExclusionBounds(RatEnclosure enclosure, float extraClearance,
+            out Bounds bounds)
+        {
+            bounds = new Bounds();
+            if (!HasNest(enclosure)) return false;
+            Vector3 center;
+            float radiusX;
+            float radiusZ;
+            GetNestExclusionRadii(enclosure, out center, out radiusX, out radiusZ);
+            float clearance = Mathf.Max(0f, extraClearance);
+            bounds = new Bounds(center, new Vector3((radiusX + clearance) * 2f,
+                .8f, (radiusZ + clearance) * 2f));
             return true;
         }
 
@@ -241,46 +254,55 @@ namespace RatHabitat
         public static bool IsNestSafeRoute(RatEnclosure enclosure, Vector3 start, Vector3 end, float extraClearance = 0f)
         {
             if (!IsInside(enclosure, start, 0f) || !IsInside(enclosure, end, 0f)) return false;
-            const int samples = 24;
-            for (int index = 0; index <= samples; index++)
-            {
-                float t = index / (float)samples;
-                if (IsInsideAdultNestExclusion(enclosure, Vector3.Lerp(start, end, t), extraClearance)) return false;
-            }
-            return true;
+            Bounds bounds;
+            if (!TryGetAdultNestExclusionBounds(enclosure, extraClearance, out bounds)) return true;
+            // Continuous XZ segment/open-rectangle intersection. Fixed samples
+            // can miss a thin corner crossing, especially with long 3x steps.
+            float enter = 0f;
+            float exit = 1f;
+            if (!ClipNestAxis(start.x, end.x-start.x, bounds.min.x, bounds.max.x, ref enter, ref exit) ||
+                !ClipNestAxis(start.z, end.z-start.z, bounds.min.z, bounds.max.z, ref enter, ref exit))
+                return true;
+            return enter >= exit;
         }
 
-        public static Vector3 GetNearestOpenFloorPosition(RatEnclosure enclosure, Vector3 position, float margin = MinimumMovementMargin)
+        private static bool ClipNestAxis(float origin, float delta, float minimum, float maximum,
+            ref float enter, ref float exit)
         {
-            Vector3 result = ClampToEnclosureBounds(enclosure, position, margin);
-            if (!IsInsideAdultNestExclusion(enclosure, result)) return result;
+            if (Mathf.Abs(delta) < 0.000001f) return origin > minimum && origin < maximum;
+            float first = (minimum-origin)/delta;
+            float second = (maximum-origin)/delta;
+            enter = Mathf.Max(enter, Mathf.Min(first,second));
+            exit = Mathf.Min(exit, Mathf.Max(first,second));
+            return enter < exit;
+        }
 
-            Vector3 nest;
-            float radiusX;
-            float radiusZ;
-            GetNestExclusionRadii(enclosure, out nest, out radiusX, out radiusZ);
-            float leftDistance = Mathf.Abs(result.x - (nest.x - radiusX));
-            float rightDistance = Mathf.Abs(result.x - (nest.x + radiusX));
-            float bottomDistance = Mathf.Abs(result.z - (nest.z - radiusZ));
-            float topDistance = Mathf.Abs(result.z - (nest.z + radiusZ));
-            float clearance = 0.08f;
-            float bestDistance = leftDistance;
-            result = new Vector3(nest.x - radiusX - clearance, result.y, result.z);
-            if (rightDistance < bestDistance)
+        public static Vector3 GetNearestOpenFloorPosition(RatEnclosure enclosure, Vector3 position,
+            float margin = MinimumMovementMargin, float extraClearance = 0f)
+        {
+            Vector3 origin = ClampToEnclosureBounds(enclosure, position, margin);
+            if (!IsInsideAdultNestExclusion(enclosure, origin, extraClearance)) return origin;
+            Bounds bounds;
+            if (!TryGetAdultNestExclusionBounds(enclosure, extraClearance, out bounds)) return origin;
+            Vector3 best = origin;
+            float bestDistance = float.MaxValue;
+            for (int side = 0; side < 4; side++)
             {
-                bestDistance = rightDistance;
-                result = new Vector3(nest.x + radiusX + clearance, result.y, result.z);
+                // Each edge candidate starts from the original point, never
+                // from a rejected X/Z projection onto another edge.
+                Vector3 candidate = origin;
+                if (side == 0) candidate.x = bounds.min.x-.08f;
+                else if (side == 1) candidate.x = bounds.max.x+.08f;
+                else if (side == 2) candidate.z = bounds.min.z-.08f;
+                else candidate.z = bounds.max.z+.08f;
+                candidate = ClampToEnclosureBounds(enclosure, candidate, margin);
+                if (IsInsideAdultNestExclusion(enclosure, candidate, extraClearance)) continue;
+                float distance = (candidate-origin).sqrMagnitude;
+                if (distance >= bestDistance) continue;
+                bestDistance = distance;
+                best = candidate;
             }
-            if (bottomDistance < bestDistance)
-            {
-                bestDistance = bottomDistance;
-                result = new Vector3(result.x, result.y, nest.z - radiusZ - clearance);
-            }
-            if (topDistance < bestDistance)
-            {
-                result = new Vector3(result.x, result.y, nest.z + radiusZ + clearance);
-            }
-            return ClampToEnclosureBounds(enclosure, result, margin);
+            return best;
         }
 
         private static void GetNestExclusionRadii(RatEnclosure enclosure, out Vector3 center,
@@ -352,9 +374,12 @@ namespace RatHabitat
                 // a stale serialized Nursing enum keep a mother nursing after
                 // the last pinkie has grown, been moved, or been removed.
                 if (rat.sex == RatSex.Female && !hasDependentPinkies &&
-                    (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing))
+                    (rat.nursing || rat.reproductiveState == ReproductiveState.Nursing ||
+                        !string.IsNullOrEmpty(rat.nursingLitterId)))
                 {
                     rat.nursing = false;
+                    if (!string.IsNullOrEmpty(rat.nursingLitterId)) changed = true;
+                    rat.nursingLitterId = null;
                     // Birth owns the recovery deadline. Do not start a new
                     // recovery period merely because the last pinkie grew or
                     // left the nest; weaning and reproductive recovery are
@@ -430,7 +455,7 @@ namespace RatHabitat
             // breeding participant until FinishPregnancy commits the litter.
             if (rat != null && (rat.pairingHabitatAssigned || rat.enclosure == RatEnclosure.Pairing)) return RatEnclosure.Pairing;
             if (IsActiveBreedingParticipant(save, rat))
-                return StoreSystem.CanSellRat(save, rat, gameTime) && !hasDependentPinkies
+                return CanEnterForSaleTank(save, rat, gameTime) && !hasDependentPinkies
                     ? RatEnclosure.ForSale
                     : StandardEnclosure(save, rat);
             if (rat == null) return RatEnclosure.FemaleColony;
@@ -439,9 +464,10 @@ namespace RatHabitat
                 return RatEnclosure.FemaleColony;
             // Breeding was historically serialized as an enclosure. It now
             // represents For Sale, and the assignment is retained only while
-            // the same authoritative rule used by the Sell screen allows it.
+            // the authoritative tank-admission rule allows it. Legacy favorite
+            // residents fall through to their normal colony/family tank safely.
             if (rat.enclosure == RatEnclosure.Breeding &&
-                StoreSystem.CanSellRat(save, rat, gameTime) && !hasDependentPinkies)
+                CanEnterForSaleTank(save, rat, gameTime) && !hasDependentPinkies)
                 return RatEnclosure.ForSale;
             if ((rat.stage == RatStage.Pinkie || rat.stage == RatStage.YoungRat) &&
                 (!string.IsNullOrEmpty(rat.motherId) || !string.IsNullOrEmpty(rat.litterId)))
@@ -454,7 +480,7 @@ namespace RatHabitat
                 if (motherHabitat == RatEnclosure.ForSale)
                 {
                     if (rat.enclosure == RatEnclosure.ForSale &&
-                        StoreSystem.CanSellRat(save, rat, gameTime))
+                        CanEnterForSaleTank(save, rat, gameTime))
                         return RatEnclosure.ForSale;
                     return rat.sex == RatSex.Male
                         ? RatEnclosure.MaleColony
@@ -511,9 +537,10 @@ namespace RatHabitat
                 reason = "That rat is no longer available.";
                 return false;
             }
-            if (!StoreSystem.CanSellRat(save, rat, gameTime))
+            if (!CanEnterForSaleTank(save, rat, gameTime))
             {
-                reason = StoreSystem.SaleRestrictionReason(save, rat, gameTime);
+                reason = rat.isFavorite ? FavoriteSaleTankRestriction
+                    : StoreSystem.SaleRestrictionReason(save, rat, gameTime);
                 if (string.IsNullOrEmpty(reason)) reason = "That rat is not currently eligible for sale.";
                 return false;
             }
@@ -536,55 +563,102 @@ namespace RatHabitat
         }
 
         /// <summary>
-        /// Moves the complete currently-sellable set atomically. If the tank
-        /// cannot hold every newly assigned rat, none are moved.
+        /// Moves as many currently-sellable, independent rats as the remaining
+        /// For Sale Tank capacity allows. Eligibility and dependent-pinkie
+        /// state are indexed once for this batch; callers can use movedRats to
+        /// apply presentation/activity changes without rescanning the colony.
         /// </summary>
         public static bool TryAssignAllSellableToForSale(ColonySaveData save,
             long gameTime, int capacity, out int moved, out string reason)
         {
+            List<RatData> movedRats;
+            return TryAssignAllSellableToForSale(save, gameTime, capacity,
+                out moved, out reason, out movedRats);
+        }
+
+        public static bool TryAssignAllSellableToForSale(ColonySaveData save,
+            long gameTime, int capacity, out int moved, out string reason,
+            out List<RatData> movedRats)
+        {
             moved = 0;
             reason = string.Empty;
+            movedRats = new List<RatData>();
             if (save == null || save.rats == null)
             {
                 reason = "The colony is not available.";
                 return false;
             }
 
-            List<RatData> sellable = StoreSystem.GetSellableRats(save, gameTime, StoreSellFilter.All);
-            var candidates = new List<RatData>(sellable.Count);
+            int skippedPregnant;
+            List<RatData> sellable = StoreSystem.GetSellableRats(
+                save, gameTime, StoreSellFilter.All, out skippedPregnant);
+            HashSet<string> dependentMotherIds = BuildDependentPinkieMotherIds(save);
+            var processedRatIds = new HashSet<string>(StringComparer.Ordinal);
             int skippedWithPinkies = 0;
+            int skippedFavorites = 0;
+            int current = CountForSaleRats(save);
+            int availableSlots = Math.Max(0, Math.Max(0, capacity) - current);
+            int skippedBecauseFull = 0;
+            int alreadyInForSale = 0;
             foreach (RatData rat in sellable)
             {
-                if (rat == null) continue;
-                if (HasDependentPinkies(save, rat.id))
+                if (rat == null || string.IsNullOrEmpty(rat.id) || !processedRatIds.Add(rat.id))
+                    continue;
+                if (rat.isFavorite)
+                {
+                    skippedFavorites++;
+                    continue;
+                }
+                if (rat.enclosure == RatEnclosure.ForSale)
+                {
+                    alreadyInForSale++;
+                    continue;
+                }
+                if (dependentMotherIds.Contains(rat.id))
                 {
                     skippedWithPinkies++;
                     continue;
                 }
-                candidates.Add(rat);
-            }
-            int incoming = 0;
-            foreach (RatData rat in candidates)
-                if (rat != null && rat.enclosure != RatEnclosure.ForSale) incoming++;
-            int current = CountForSaleRats(save);
-            if (current + incoming > Math.Max(0, capacity))
-            {
-                reason = "The For Sale Tank needs " + (current + incoming) +
-                    " spaces but holds " + Math.Max(0, capacity) + ". No rats were moved.";
-                return false;
-            }
+                if (availableSlots <= 0)
+                {
+                    skippedBecauseFull++;
+                    continue;
+                }
 
-            foreach (RatData rat in candidates)
-            {
-                if (rat == null || rat.enclosure == RatEnclosure.ForSale) continue;
                 RecordPreviousSaleTank(rat, rat.enclosure);
                 rat.enclosure = RatEnclosure.ForSale;
                 rat.pairingHabitatAssigned = false;
                 moved++;
+                availableSlots--;
+                movedRats.Add(rat);
             }
+
+            if (moved > 0)
+                reason = "Moved " + moved + " rat" + (moved == 1 ? string.Empty : "s") +
+                    " to the For Sale Tank.";
+            else if (skippedBecauseFull > 0)
+                reason = "Moved 0 rats to the For Sale Tank.";
+            else if (sellable.Count > 0 && alreadyInForSale == sellable.Count)
+                reason = "All currently sellable rats are already in the For Sale Tank.";
+            else
+                reason = "No eligible rats were moved.";
+
+            if (skippedBecauseFull > 0)
+                reason += " " + skippedBecauseFull + " eligible rat" +
+                    (skippedBecauseFull == 1 ? " could" : "s could") +
+                    " not be moved because the tank is full.";
             if (skippedWithPinkies > 0)
-                reason = skippedWithPinkies + " mother" + (skippedWithPinkies == 1 ? " with" : "s with") +
+                reason += " " + skippedWithPinkies + " mother" +
+                    (skippedWithPinkies == 1 ? " with" : "s with") +
                     " dependent pinkies stayed with the litter.";
+            if (skippedPregnant > 0)
+                reason += " Skipped " + skippedPregnant + " pregnant rat" +
+                    (skippedPregnant == 1 ? ";" : "s;") +
+                    " pregnant rats cannot be sold.";
+            if (skippedFavorites > 0)
+                reason += " Skipped " + skippedFavorites + " favorite rat" +
+                    (skippedFavorites == 1 ? ";" : "s;") +
+                    " favorites cannot enter the For Sale Tank.";
             return true;
         }
 
@@ -1000,6 +1074,40 @@ namespace RatHabitat
             return ClampToNestCaregiverZone(enclosure, GetNestPosition(enclosure));
         }
 
+        /// <summary>
+        /// Returns the stable center used by one litter's pinkie cluster.
+        /// Nursing mothers use the same center, so multiple mothers can remain
+        /// beside their own pinkies in the shared nest. Empty IDs retain the
+        /// shared center for legacy saves.
+        /// </summary>
+        public static Vector3 GetNestLitterCenter(RatEnclosure enclosure, string litterSeed)
+        {
+            Vector3 nest = GetNestPosition(enclosure);
+            if (string.IsNullOrEmpty(litterSeed)) return nest;
+            string litterKey = litterSeed;
+            float centerX = (StableUnit(litterKey + "|center-x") - 0.5f) *
+                (enclosure == RatEnclosure.Pairing ? 0.30f : 0.24f);
+            float centerZ = (StableUnit(litterKey + "|center-z") - 0.5f) *
+                (enclosure == RatEnclosure.Pairing ? 0.22f : 0.18f);
+            return nest + new Vector3(centerX, 0f, centerZ);
+        }
+
+        /// <summary>
+        /// Chooses a safe, slightly offset mother position around her litter.
+        /// Different per-mother behavior seeds prevent all mothers from
+        /// targeting the exact same point while keeping families together.
+        /// </summary>
+        public static Vector3 GetNestFamilyCaregiverPosition(RatEnclosure enclosure,
+            string litterSeed, float angleRadians, float radius, float bodyMargin = NestCaregiverBodyMargin)
+        {
+            Vector3 center = GetNestLitterCenter(enclosure, litterSeed);
+            float safeRadius = Mathf.Clamp(radius, 0f, 0.75f);
+            Vector3 candidate = center + new Vector3(
+                Mathf.Cos(angleRadians) * safeRadius, 0f,
+                Mathf.Sin(angleRadians) * safeRadius);
+            return ClampToNestCaregiverZone(enclosure, candidate, bodyMargin);
+        }
+
         public static Vector3 GetSpawnPosition(RatEnclosure enclosure, int slot)
         {
             Definition definition = GetDefinition(enclosure);
@@ -1041,12 +1149,11 @@ namespace RatHabitat
         public static Vector3 GetPinkiePosition(RatEnclosure enclosure, string ratId, string litterSeed,
             int slot, Vector3 fallbackNestPosition)
         {
-            Vector3 nest = enclosure == RatEnclosure.Pairing
-                ? PairingNestPosition
-                : PointInEnclosure(enclosure, 0f, 0f, NurseryNestY);
             string litterKey = string.IsNullOrEmpty(litterSeed)
                 ? (string.IsNullOrEmpty(ratId) ? "unassigned-litter" : ratId)
                 : litterSeed;
+            Vector3 nest = GetNestPosition(enclosure);
+            Vector3 litterCenter = GetNestLitterCenter(enclosure, litterKey);
             string seedKey = litterKey + "|pinkie|" + (ratId ?? string.Empty) + "|" + Mathf.Max(0, slot);
 
             // A random polar scatter is deliberately used instead of cells,
@@ -1055,14 +1162,11 @@ namespace RatHabitat
             float angle = StableUnit(seedKey + "|angle") * Mathf.PI * 2f;
             float radius = 0.14f + StableUnit(seedKey + "|radius") *
                 (enclosure == RatEnclosure.Pairing ? 0.52f : 0.34f);
-            float centerX = (StableUnit(litterKey + "|center-x") - 0.5f) *
-                (enclosure == RatEnclosure.Pairing ? 0.30f : 0.24f);
-            float centerZ = (StableUnit(litterKey + "|center-z") - 0.5f) *
-                (enclosure == RatEnclosure.Pairing ? 0.22f : 0.18f);
-            Vector3 position = nest + new Vector3(
-                centerX + Mathf.Cos(angle) * radius * 0.96f,
-                nest.y,
-                centerZ + Mathf.Sin(angle) * radius * 0.70f);
+            Vector3 position = litterCenter + new Vector3(
+                Mathf.Cos(angle) * radius * 0.96f,
+                0f,
+                Mathf.Sin(angle) * radius * 0.70f);
+            position.y = nest.y;
             return ClampToEnclosureAllowNest(enclosure, position, 0.42f);
         }
 

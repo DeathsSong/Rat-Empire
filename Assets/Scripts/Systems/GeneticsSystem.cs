@@ -10,6 +10,10 @@ namespace RatHabitat
     /// </summary>
     public static class GeneticsSystem
     {
+        // A rare, non-gameplay marking-color inheritance variation. Keep this
+        // separate from the S-locus mutation rate and store listing odds.
+        public const float SecondaryMarkingInheritanceChance = 0.08f;
+
         // These labels are presentation-friendly names for the stable spotting
         // family. They do not replace the B/C/D/S loci used by inheritance.
         public static readonly string[] MarkingFamilies =
@@ -88,8 +92,18 @@ namespace RatHabitat
             public List<LocusPreviewData> loci = new List<LocusPreviewData>();
             public List<FurOutcomePreview> furOutcomes = new List<FurOutcomePreview>();
             public List<TraitRangePreview> traitRanges = new List<TraitRangePreview>();
+            // Both rates are per inherited allele, not per offspring.
             public float sLocusMutationChance;
             public float bcdMutationChance;
+            public float visibleHairlessChance;
+
+            // Two independent inherited s alleles: 1 - (1-p)^2 = p*(2-p).
+            // This is the chance of gaining a marking allele, before albino
+            // masking, not the inheritance probability for marked parents.
+            public float solidParentSpontaneousMarkingChance
+            {
+                get { return sLocusMutationChance * (2f - sLocusMutationChance); }
+            }
         }
 
         private class WeightedGenotype
@@ -118,6 +132,13 @@ namespace RatHabitat
             if (genotype == null) return;
             if (genotype.loci == null) genotype.loci = new List<LocusData>();
             if (genotype.mutations == null) genotype.mutations = new List<MutationRecordData>();
+            if (genotype.hairless == null)
+                genotype.hairless = new LocusData("Hr", "Hr", "Hr");
+            genotype.hairless.locus = "Hr";
+            if (!GameConfig.IsValidAllele("Hr", genotype.hairless.firstAllele))
+                genotype.hairless.firstAllele = "Hr";
+            if (!GameConfig.IsValidAllele("Hr", genotype.hairless.secondAllele))
+                genotype.hairless.secondAllele = "Hr";
 
             var normalized = new List<LocusData>();
             foreach (var locus in GameConfig.Loci)
@@ -145,6 +166,7 @@ namespace RatHabitat
         {
             if (genotype == null) return new LocusData(locus, GameConfig.DominantAllele(locus), GameConfig.DominantAllele(locus));
             Normalize(genotype);
+            if (locus == "Hr") return genotype.hairless;
             foreach (var item in genotype.loci)
             {
                 if (item.locus == locus) return item;
@@ -186,8 +208,42 @@ namespace RatHabitat
                 child.loci.Add(new LocusData(locus, inheritedFromMother, inheritedFromFather));
             }
 
+            child.hairless = InheritHairless(mother.hairless, father.hairless,
+                UnityEngine.Random.value, UnityEngine.Random.value,
+                UnityEngine.Random.value, recordedAt, child.mutations);
             Normalize(child);
             return child;
+        }
+
+        // Explicit rolls make the inheritance contract testable without changing
+        // Unity's shared RNG, and births persist the result rather than rerolling.
+        public static LocusData InheritHairless(LocusData mother, LocusData father,
+            float maternalRoll, float paternalRoll, float mutationRoll, long recordedAt,
+            List<MutationRecordData> mutations)
+        {
+            string m1 = mother == null ? "Hr" : mother.firstAllele;
+            string m2 = mother == null ? "Hr" : mother.secondAllele;
+            string f1 = father == null ? "Hr" : father.firstAllele;
+            string f2 = father == null ? "Hr" : father.secondAllele;
+            var result = new LocusData("Hr", maternalRoll < 0.5f ? m1 : m2,
+                paternalRoll < 0.5f ? f1 : f2);
+            if (m1 == "Hr" && m2 == "Hr" && f1 == "Hr" && f2 == "Hr" &&
+                mutationRoll < GameConfig.SpontaneousHairlessChance)
+            {
+                result.firstAllele = result.secondAllele = "hr";
+                if (mutations != null) mutations.Add(new MutationRecordData
+                {
+                    locus = "Hr", parentRole = "spontaneous", from = "Hr/Hr",
+                    to = "hr/hr", recordedAt = recordedAt
+                });
+            }
+            return result;
+        }
+
+        public static bool IsHairless(GenotypeData genotype)
+        {
+            return genotype != null && genotype.hairless != null &&
+                genotype.hairless.firstAllele == "hr" && genotype.hairless.secondAllele == "hr";
         }
 
         private static string ApplyMutation(
@@ -214,6 +270,8 @@ namespace RatHabitat
 
         public static float MutationRateForLocus(string locus)
         {
+            // Hr uses a whole-trait event, never the coat's per-allele mutator.
+            if (locus == "Hr") return 0f;
             return string.Equals(locus, "S", StringComparison.Ordinal)
                 ? GameConfig.MarkingMutationRate
                 : GameConfig.MutationRate;
@@ -298,6 +356,7 @@ namespace RatHabitat
             if (genotype == null) genotype = new GenotypeData();
             Normalize(genotype);
             var phenotype = new PhenotypeData();
+            phenotype.hairless = IsHairless(genotype);
             if (stage == RatStage.Pinkie)
             {
                 phenotype.furRevealed = false;
@@ -327,6 +386,7 @@ namespace RatHabitat
                 phenotype.accentHex = "#e98c8c";
                 phenotype.spotted = false;
                 phenotype.markingsLabel = "Albino masking";
+                if (phenotype.hairless) phenotype.coatColorLabel = "Hairless • Albino";
                 return phenotype;
             }
 
@@ -346,6 +406,7 @@ namespace RatHabitat
             }
             if (!string.IsNullOrEmpty(coatColorVariant))
                 ApplyCoatColorVariant(phenotype, coatColorVariant, coatTone);
+            if (phenotype.hairless) phenotype.coatColorLabel = "Hairless • " + phenotype.coatColorLabel;
             return phenotype;
         }
 
@@ -675,6 +736,75 @@ namespace RatHabitat
             return fallback;
         }
 
+        /// <summary>
+        /// Occasionally preserves each marked parent's visible marking color
+        /// on one pup. The stable key includes both parents, litter/pup IDs,
+        /// families, colors, and inherited genotype; the stored fields then
+        /// make the outcome durable across save/load and visual refreshes.
+        /// </summary>
+        public static bool TryInheritSecondaryMarking(
+            RatData mother,
+            RatData father,
+            GenotypeData childGenotype,
+            string childPrimaryFamily,
+            string litterId,
+            string pupId,
+            out string primaryColorHex,
+            out string secondaryFamily,
+            out string secondaryColorHex)
+        {
+            primaryColorHex = null;
+            secondaryFamily = null;
+            secondaryColorHex = null;
+            if (!HasColoredMarkings(mother) || !HasColoredMarkings(father)) return false;
+
+            string motherFamily = NormalizeMarkingFamily(mother.markingFamily, mother.genotype);
+            string fatherFamily = NormalizeMarkingFamily(father.markingFamily, father.genotype);
+            string childFamily = NormalizeMarkingFamily(childPrimaryFamily, childGenotype);
+            if (IsSolidMarkingFamily(childFamily)) return false;
+
+            string motherColor = RatVisualFactory.ResolveMarkingColorHex(mother);
+            string fatherColor = RatVisualFactory.ResolveMarkingColorHex(father);
+            if (!MarkingColorsAreDistinct(motherColor, fatherColor)) return false;
+
+            string stableKey = (mother.id ?? string.Empty) + "|" + (father.id ?? string.Empty) + "|" +
+                (litterId ?? string.Empty) + "|" + (pupId ?? string.Empty) + "|" +
+                childFamily + "|" + motherFamily + "|" + fatherFamily + "|" +
+                motherColor + "|" + fatherColor + "|" + GenotypeKey(childGenotype);
+            uint roll = StableColorHash(stableKey + "|secondary-marking-roll") % 10000u;
+            if (roll >= (uint)(SecondaryMarkingInheritanceChance * 10000f)) return false;
+
+            // Keep the normal primary-family inheritance decision intact. If
+            // both parents share that family, choose the primary color source
+            // deterministically; the other parent supplies the second layer.
+            bool motherIsPrimary = childFamily == motherFamily && childFamily != fatherFamily;
+            bool fatherIsPrimary = childFamily == fatherFamily && childFamily != motherFamily;
+            if (!motherIsPrimary && !fatherIsPrimary)
+                motherIsPrimary = (StableColorHash(stableKey + "|primary-marking-parent") & 1u) == 0u;
+
+            primaryColorHex = motherIsPrimary ? motherColor : fatherColor;
+            secondaryFamily = motherIsPrimary ? fatherFamily : motherFamily;
+            secondaryColorHex = motherIsPrimary ? fatherColor : motherColor;
+            return true;
+        }
+
+        private static bool HasColoredMarkings(RatData rat)
+        {
+            if (rat == null || rat.phenotype == null || !rat.phenotype.spotted ||
+                IsAlbinoGenotype(rat.genotype)) return false;
+            return !IsSolidMarkingFamily(NormalizeMarkingFamily(rat.markingFamily, rat.genotype));
+        }
+
+        private static bool MarkingColorsAreDistinct(string firstHex, string secondHex)
+        {
+            Color first;
+            Color second;
+            if (!ColorUtility.TryParseHtmlString(firstHex, out first) ||
+                !ColorUtility.TryParseHtmlString(secondHex, out second)) return false;
+            return Vector3.Distance(new Vector3(first.r, first.g, first.b),
+                new Vector3(second.r, second.g, second.b)) >= 0.12f;
+        }
+
         private static bool IsSolidMarkingFamily(string family)
         {
             return string.Equals(family, "Solid", StringComparison.OrdinalIgnoreCase) ||
@@ -722,6 +852,25 @@ namespace RatHabitat
                 };
                 AddLocusOutcomes(locusPreview, GetLocus(parentA.genotype, locus), GetLocus(parentB.genotype, locus));
                 preview.loci.Add(locusPreview);
+            }
+            var hairlessPreview = new LocusPreviewData
+            {
+                locus = "Hr", parentA = FormatPair(parentA.genotype, "Hr"),
+                parentB = FormatPair(parentB.genotype, "Hr")
+            };
+            AddLocusOutcomes(hairlessPreview, parentA.genotype.hairless, parentB.genotype.hairless);
+            preview.loci.Add(hairlessPreview);
+            float maternalHairless = (parentA.genotype.hairless.firstAllele == "hr" ? .5f : 0f) +
+                (parentA.genotype.hairless.secondAllele == "hr" ? .5f : 0f);
+            float paternalHairless = (parentB.genotype.hairless.firstAllele == "hr" ? .5f : 0f) +
+                (parentB.genotype.hairless.secondAllele == "hr" ? .5f : 0f);
+            preview.visibleHairlessChance = maternalHairless*paternalHairless;
+            if (maternalHairless == 0f && paternalHairless == 0f)
+            {
+                preview.visibleHairlessChance = GameConfig.SpontaneousHairlessChance;
+                hairlessPreview.outcomes[0].percentage = (1f-GameConfig.SpontaneousHairlessChance)*100f;
+                hairlessPreview.outcomes.Add(new GeneOutcomePreview
+                    { genotype = "hr/hr (spontaneous)", percentage = GameConfig.SpontaneousHairlessChance*100f });
             }
 
             var weighted = new List<WeightedGenotype>

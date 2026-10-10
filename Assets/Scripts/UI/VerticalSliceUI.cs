@@ -38,6 +38,8 @@ namespace RatHabitat
         private const float RatProfileBottomPadding = 16f;
         private const float ModalMaximumWidth = 760f;
         private const int PageBottomSafePadding = 104;
+        private const int StorePurchaseRowUpdatesPerFrame = 8;
+        private const float MissingStorePortraitRetrySeconds = 0.25f;
 
         private GameBootstrap game;
         private Canvas canvas;
@@ -122,6 +124,16 @@ namespace RatHabitat
         private bool storeRatListResetRequested;
         private bool storeRatListRefreshDeferred;
         private bool storeRatListRefreshDeferredForce;
+        private RectTransform storePurchaseListContent;
+        private Text storePurchaseEmptyMessage;
+        private readonly List<StorePurchaseRowView> storePurchaseRows = new List<StorePurchaseRowView>();
+        private int storePurchaseRowCreateCount;
+        private int storePurchaseRowUpdateCount;
+        private bool storePurchaseRowRefreshPending;
+        private string storePurchaseRowRefreshSignature;
+        private int storePurchaseRowRefreshIndex;
+        private bool storePurchaseRowLayoutChanged;
+        private float missingStorePortraitRetryTimer;
         private Text storeWalletLabel;
         private Text storeRestockLabel;
         private Text storeListingCountLabel;
@@ -243,6 +255,20 @@ namespace RatHabitat
         // frame across regenerated controls.
         private MainPanel activeMainPanel = MainPanel.None;
         private RosterSortField rosterSortField = RosterSortField.Name;
+
+        private sealed class StorePurchaseRowView
+        {
+            public RectTransform root;
+            public RawImage portrait;
+            public Text name;
+            public Text coat;
+            public Text stats;
+            public Text price;
+            public Text actionLabel;
+            public Button actionButton;
+            public string listingId;
+            public RatData portraitRat;
+        }
         private bool rosterSortAscending = true;
         private RosterSexFilter rosterSexFilter = RosterSexFilter.All;
         private bool rosterFavoritesOnly;
@@ -1102,6 +1128,12 @@ namespace RatHabitat
             }
             string signature = game.UiSignature;
             if (!force && signature == lastSignature) return;
+
+            // Store restocks replace listing data, not the Store controls.
+            // Keep the page and ScrollRect stable and reconcile only the
+            // listing rows; the portrait renderer also schedules new previews
+            // incrementally instead of building every 3D preview in this call.
+            if (TryRefreshStorePurchasePanelInPlace(signature)) return;
 
             // The full UI signature includes the live clock so profiles and
             // countdown labels can refresh. Family Tree geometry has no
@@ -3434,6 +3466,9 @@ namespace RatHabitat
                 storeRatListRefreshDeferredForce = false;
                 Refresh(force);
             }
+            if (storePurchaseRowRefreshPending)
+                ProcessStorePurchaseRowsRefresh();
+            RetryMissingStorePortraits();
             if (profileRefreshDeferred && !IsRatProfileScrollMoving())
                 Refresh(true);
             if (profileActivityHistoryDeferred && !IsRatProfileScrollMoving())
@@ -3446,6 +3481,43 @@ namespace RatHabitat
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             UpdatePerformanceLogDisplay();
 #endif
+        }
+
+        private void RetryMissingStorePortraits()
+        {
+            if (activeMainPanel != MainPanel.Store || storeCategory != StoreCategory.Buy ||
+                storePurchaseRows.Count == 0 || portraitPreview == null)
+                return;
+
+            missingStorePortraitRetryTimer -= Time.unscaledDeltaTime;
+            if (missingStorePortraitRetryTimer > 0f) return;
+            missingStorePortraitRetryTimer = MissingStorePortraitRetrySeconds;
+
+            // The initial row bind can happen before a scene-owned factory is
+            // available (for example after a presentation recovery). Reapply
+            // it opportunistically; Configure ignores transient null sources.
+            RatVisualFactory currentFactory = game == null ? null : game.RatVisualFactory;
+            if (currentFactory != null) portraitPreview.Configure(currentFactory);
+
+            for (int index = 0; index < storePurchaseRows.Count; index++)
+            {
+                StorePurchaseRowView row = storePurchaseRows[index];
+                if (row == null || row.portrait == null) continue;
+                Texture texture = row.portrait.texture;
+                if (texture == null && row.portraitRat != null)
+                {
+                    texture = portraitPreview.GetStorePortrait(row.portraitRat);
+                    row.portrait.texture = texture;
+                }
+
+                // Portraits are intentionally built over several frames to
+                // keep upgraded-store refreshes responsive. Tint unrendered
+                // targets like the row card instead of showing their
+                // uninitialized RenderTexture contents as a white square.
+                row.portrait.color = portraitPreview.IsPortraitRendered(texture)
+                    ? Color.white
+                    : new Color(0.10f, 0.18f, 0.17f, 1f);
+            }
         }
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
@@ -4017,6 +4089,22 @@ namespace RatHabitat
             ratProfileScroll = null;
             storeRatListScroll = null;
             storeRatListStructureSignature = null;
+            storePurchaseListContent = null;
+            storePurchaseEmptyMessage = null;
+            if (portraitPreview != null &&
+                (activeMainPanel != MainPanel.Store || storeCategory != StoreCategory.Buy))
+            {
+                for (int rowIndex = 0; rowIndex < storePurchaseRows.Count; rowIndex++)
+                {
+                    StorePurchaseRowView row = storePurchaseRows[rowIndex];
+                    if (row != null) portraitPreview.ReleasePortraitForStoreListing(row.listingId);
+                }
+            }
+            storePurchaseRows.Clear();
+            storePurchaseRowRefreshPending = false;
+            storePurchaseRowRefreshSignature = null;
+            storePurchaseRowRefreshIndex = 0;
+            storePurchaseRowLayoutChanged = false;
             storeWalletLabel = null;
             storeRestockLabel = null;
             storeListingCountLabel = null;
@@ -4197,19 +4285,10 @@ namespace RatHabitat
             AddText(card, "Low-level adult rats for your colony. Each listing keeps its coat, markings, stats, and price until purchased.",
                 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
 
-            storeRatListStructureSignature = BuildStorePurchaseListSignature();
             RectTransform listContent = CreateStoreRatListContent(card, "Store Rat List");
-            if (game.Save.storeRatListings == null || game.Save.storeRatListings.Count == 0)
-            {
-                AddTextTo(listContent, "The market is sold out. New supplies can be added here later.",
-                    16, new Color(0.95f, 0.76f, 0.42f), TextAnchor.UpperLeft);
-                return;
-            }
-
-            foreach (var listing in game.Save.storeRatListings)
-            {
-                AddStoreListingCard(listContent, listing);
-            }
+            storePurchaseListContent = listContent;
+            ReconcileStorePurchaseRows();
+            storeRatListStructureSignature = BuildStorePurchaseListSignature();
         }
 
         private void AddUpgradesPanel(RectTransform parent)
@@ -4584,6 +4663,193 @@ namespace RatHabitat
                 " (capacity increases on the next restock)";
         }
 
+        private bool TryRefreshStorePurchasePanelInPlace(string pageSignature)
+        {
+            if (activeMainPanel != MainPanel.Store || storeCategory != StoreCategory.Buy ||
+                storeRatListScroll == null || storePurchaseListContent == null)
+                return false;
+
+            string currentListSignature = BuildStorePurchaseListSignature();
+            if (storePurchaseRowRefreshPending)
+            {
+                if (!string.Equals(currentListSignature, storePurchaseRowRefreshSignature,
+                    StringComparison.Ordinal))
+                {
+                    if (IsStoreRatListMoving())
+                    {
+                        storeRatListRefreshDeferred = true;
+                        storeRatListRefreshDeferredForce = true;
+                        lastSignature = pageSignature;
+                        RefreshLiveStorePanelValues();
+                        return true;
+                    }
+                    BeginStorePurchaseRowsRefresh(currentListSignature);
+                }
+                lastSignature = pageSignature;
+                RefreshLiveStorePanelValues();
+                return true;
+            }
+
+            if (string.Equals(currentListSignature, storeRatListStructureSignature, StringComparison.Ordinal))
+            {
+                storeRatListRefreshDeferred = false;
+                storeRatListRefreshDeferredForce = false;
+                lastSignature = pageSignature;
+                RefreshLiveStorePanelValues();
+                return true;
+            }
+
+            if (IsStoreRatListMoving())
+            {
+                storeRatListRefreshDeferred = true;
+                storeRatListRefreshDeferredForce = true;
+                lastSignature = pageSignature;
+                RefreshLiveStorePanelValues();
+                return true;
+            }
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            UnityEngine.Profiling.Profiler.BeginSample("Rat Empire/UI/Store Listing Reconcile");
+#endif
+            try
+            {
+                BeginStorePurchaseRowsRefresh(currentListSignature);
+                storeRatListRefreshDeferred = false;
+                storeRatListRefreshDeferredForce = false;
+                RefreshLiveStorePanelValues();
+                lastSignature = pageSignature;
+            }
+            finally
+            {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                UnityEngine.Profiling.Profiler.EndSample();
+#endif
+            }
+            return true;
+        }
+
+        private void BeginStorePurchaseRowsRefresh(string listSignature)
+        {
+            int previousRowCount = storePurchaseRows.Count;
+            ReconcileStorePurchaseRows(false);
+            storePurchaseRowRefreshSignature = listSignature;
+            storePurchaseRowRefreshIndex = 0;
+            storePurchaseRowLayoutChanged = storePurchaseRows.Count != previousRowCount;
+            storePurchaseRowRefreshPending = storePurchaseRows.Count > 0;
+            if (!storePurchaseRowRefreshPending)
+            {
+                storeRatListStructureSignature = listSignature;
+                if (storePurchaseRowLayoutChanged && storeRatListScroll != null &&
+                    storeRatListScroll.content != null)
+                    RestoreStoreRatListPosition(storeRatListScroll.content.anchoredPosition);
+                storePurchaseRowRefreshSignature = null;
+            }
+        }
+
+        private void ProcessStorePurchaseRowsRefresh()
+        {
+            if (!storePurchaseRowRefreshPending || storePurchaseListContent == null ||
+                game == null || game.Save == null)
+                return;
+            if (IsStoreRatListMoving()) return;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            UnityEngine.Profiling.Profiler.BeginSample("Rat Empire/UI/Store Listing Update Batch");
+#endif
+            try
+            {
+                IList<StoreRatListingData> listings = game.Save.storeRatListings;
+                int listingCount = listings == null ? 0 : listings.Count;
+                int processed = 0;
+                while (storePurchaseRowRefreshIndex < listingCount &&
+                    processed < StorePurchaseRowUpdatesPerFrame)
+                {
+                    int rowIndex = storePurchaseRowRefreshIndex++;
+                    UpdateStoreListingCard(storePurchaseRows[rowIndex], listings[rowIndex], false);
+                    storePurchaseRowUpdateCount++;
+                    processed++;
+                }
+
+                if (storePurchaseRowRefreshIndex < listingCount) return;
+
+                storePurchaseRowRefreshPending = false;
+                storeRatListStructureSignature = storePurchaseRowRefreshSignature;
+                storePurchaseRowRefreshSignature = null;
+                if (storePurchaseRowLayoutChanged && storeRatListScroll != null &&
+                    storeRatListScroll.content != null)
+                    RestoreStoreRatListPosition(storeRatListScroll.content.anchoredPosition);
+                storePurchaseRowLayoutChanged = false;
+                RefreshLiveStorePanelValues();
+            }
+            finally
+            {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                UnityEngine.Profiling.Profiler.EndSample();
+#endif
+            }
+        }
+
+        private void ReconcileStorePurchaseRows(bool updateListingData = true)
+        {
+            if (storePurchaseListContent == null || game == null || game.Save == null) return;
+            IList<StoreRatListingData> listings = game.Save.storeRatListings;
+            int desiredCount = listings == null ? 0 : listings.Count;
+
+            if (desiredCount == 0)
+            {
+                for (int index = storePurchaseRows.Count - 1; index >= 0; index--)
+                {
+                    StorePurchaseRowView row = storePurchaseRows[index];
+                    if (row != null && portraitPreview != null)
+                        portraitPreview.ReleasePortraitForStoreListing(row.listingId);
+                    if (row != null && row.root != null) Destroy(row.root.gameObject);
+                }
+                storePurchaseRows.Clear();
+                storePurchaseButtons.Clear();
+                if (storePurchaseEmptyMessage == null)
+                    storePurchaseEmptyMessage = AddTextTo(storePurchaseListContent,
+                        "The market is sold out. New supplies can be added here later.",
+                        16, new Color(0.95f, 0.76f, 0.42f), TextAnchor.UpperLeft);
+                storePurchaseEmptyMessage.gameObject.SetActive(true);
+                storePurchaseRowRefreshPending = false;
+                storePurchaseButtons.Clear();
+                return;
+            }
+
+            if (storePurchaseEmptyMessage != null)
+                storePurchaseEmptyMessage.gameObject.SetActive(false);
+
+            while (storePurchaseRows.Count > desiredCount)
+            {
+                int last = storePurchaseRows.Count - 1;
+                StorePurchaseRowView row = storePurchaseRows[last];
+                if (row != null && portraitPreview != null)
+                    portraitPreview.ReleasePortraitForStoreListing(row.listingId);
+                if (row != null && row.root != null) Destroy(row.root.gameObject);
+                storePurchaseRows.RemoveAt(last);
+            }
+            storePurchaseButtons.Clear();
+            while (storePurchaseRows.Count < desiredCount)
+            {
+                StorePurchaseRowView newRow = AddStoreListingCard(storePurchaseListContent);
+                storePurchaseRows.Add(newRow);
+                storePurchaseRowCreateCount++;
+            }
+
+            for (int index = 0; index < desiredCount; index++)
+            {
+                StorePurchaseRowView row = storePurchaseRows[index];
+                if (updateListingData)
+                {
+                    UpdateStoreListingCard(row, listings[index]);
+                    storePurchaseRowUpdateCount++;
+                }
+                else if (row != null && row.actionButton != null)
+                {
+                    row.actionButton.interactable = false;
+                }
+            }
+        }
+
         private void RefreshLiveStorePanelValues()
         {
             if (storeWalletLabel != null)
@@ -4607,6 +4873,20 @@ namespace RatHabitat
         private void RefreshLiveStorePurchaseButtons()
         {
             if (game == null || game.Save == null || storePurchaseButtons.Count == 0) return;
+            // Rows can temporarily represent the previous generation while a
+            // large restock is reconciled in bounded batches. Keep all BUY
+            // actions disabled until every slot has current listing data; this
+            // prevents a live wallet refresh from re-enabling a stale row.
+            if (storePurchaseRowRefreshPending)
+            {
+                foreach (Button pendingButton in storePurchaseButtons.Values)
+                {
+                    if (pendingButton != null && pendingButton.interactable)
+                        pendingButton.interactable = false;
+                }
+                return;
+            }
+
             foreach (KeyValuePair<string, Button> entry in storePurchaseButtons)
             {
                 Button button = entry.Value;
@@ -4634,7 +4914,7 @@ namespace RatHabitat
             return false;
         }
 
-        private bool IsPointerOverStoreRatList(Vector2 screenPoint)
+        public bool IsPointerOverStoreRatList(Vector2 screenPoint)
         {
             if (storeRatListScroll == null || !storeRatListScroll.isActiveAndEnabled) return false;
             RectTransform viewport = storeRatListScroll.viewport != null
@@ -4816,13 +5096,13 @@ namespace RatHabitat
                 new Color(0.20f, 0.30f, 0.34f), 38f);
         }
 
-        private void AddStoreListingCard(Transform parent, StoreRatListingData listing)
+        private StorePurchaseRowView AddStoreListingCard(Transform parent)
         {
-            if (parent == null || listing == null) return;
+            if (parent == null) return null;
 
-            RatData previewRat = StoreSystem.CreatePreviewRat(listing, game.GameTime);
-            TraitData listingTraits = listing.traits ?? new TraitData();
-            var card = CreateRect("Rat Market Listing " + listing.id, parent);
+            var view = new StorePurchaseRowView();
+            var card = CreateRect("Rat Market Listing", parent);
+            view.root = card;
             var cardImage = card.gameObject.AddComponent<Image>();
             UiStyle.ApplyRounded(cardImage, new Color(0.10f, 0.18f, 0.17f, 1f), true);
             // The card is a decorative container. Let its child Buy button
@@ -4850,11 +5130,16 @@ namespace RatHabitat
             portraitLayout.preferredHeight = portraitSize;
             portraitLayout.minHeight = portraitSize;
             var portrait = portraitRoot.gameObject.AddComponent<RawImage>();
-            portrait.texture = portraitPreview == null ? null : portraitPreview.GetPortrait(previewRat);
-            portrait.color = Color.white;
+            // While an asynchronous portrait request is unavailable, match
+            // the listing card instead of exposing RawImage's white null-texture
+            // fallback as a misleading blank portrait box.
+            portrait.color = new Color(0.10f, 0.18f, 0.17f, 1f);
             portrait.uvRect = new Rect(0f, 0f, 1f, 1f);
             portrait.raycastTarget = false;
-            ValidatePortraitSlot(portraitRoot, "market listing " + listing.id);
+            view.portrait = portrait;
+            // A recycled listing row receives its new RenderTexture in
+            // UpdateStoreListingCard, after the slot has been constructed.
+            ValidatePortraitSlot(portraitRoot, "market listing row", true);
 
             var info = CreateRect("Market Rat Information", card);
             var infoLayout = info.gameObject.AddComponent<VerticalLayoutGroup>();
@@ -4868,41 +5153,85 @@ namespace RatHabitat
             infoElement.minHeight = portraitSize;
             infoElement.preferredHeight = portraitSize;
 
-            AddText(info, ColonyFactory.DisplayName(listing) + "  •  " + SexLabel(listing.sex) + "  •  Adult", 14, Color.white, TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
-            string fur = previewRat == null || previewRat.phenotype == null ? "Unknown" : previewRat.phenotype.coatColorLabel;
-            string markings = previewRat == null || previewRat.phenotype == null ? "Unknown" : previewRat.phenotype.markingsLabel;
-            AddText(info, "Coat: " + fur + "  •  " + markings, 13, new Color(1f, 0.84f, 0.52f), TextAnchor.UpperLeft);
-            AddText(info, "Size " + listingTraits.size.ToString("0") + "  •  Health " + listingTraits.health.ToString("0") + "  •  Fertility " + listingTraits.fertility.ToString("0"),
-                12, Color.white, TextAnchor.UpperLeft);
-            StoreSystem.PurchasePriceBreakdown price = StoreSystem.GetPurchasePriceBreakdown(
-                listingTraits, listing.markingFamily, listing.genotype);
-            AddText(info, "Price: $" + price.basePrice.ToString("N0") + " base + $" +
-                price.traitAdjustment.ToString("N0") + " stats + $" +
-                price.markingPremium.ToString("N0") + " marks = $" + listing.price.ToString("N0"),
-                11, new Color(0.68f, 0.91f, 0.76f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
+            view.name = AddText(info, string.Empty, 14, Color.white, TextAnchor.UpperLeft);
+            view.name.fontStyle = FontStyle.Bold;
+            view.coat = AddText(info, string.Empty, 13, new Color(1f, 0.84f, 0.52f), TextAnchor.UpperLeft);
+            view.stats = AddText(info, string.Empty, 12, Color.white, TextAnchor.UpperLeft);
+            view.price = AddText(info, string.Empty, 11, new Color(0.68f, 0.91f, 0.76f), TextAnchor.UpperLeft);
+            view.price.fontStyle = FontStyle.Bold;
 
-            bool canBuy = game.Save.colonyCredits >= listing.price;
-            Button actionButton = null;
-            string listingId = listing.id;
-            actionButton = AddButtonTo(card, "BUY\n$" + listing.price, canBuy,
-                () =>
-                {
-                    if (game == null || !BeginStorePurchaseAttempt(listingId)) return;
-                    if (!game.BuyStoreRat(listingId))
-                        CompleteStorePurchaseAttempt(listingId, false);
-                }, new Color(0.16f, 0.40f, 0.34f), 58f);
-            storePurchaseButtons[listingId] = actionButton;
-            var actionLayout = actionButton.GetComponent<LayoutElement>();
+            view.actionButton = AddButtonTo(card, "", true,
+                () => BuyStoreListing(view.listingId), new Color(0.16f, 0.40f, 0.34f), 58f);
+            view.actionLabel = view.actionButton.GetComponentInChildren<Text>(true);
+            var actionLayout = view.actionButton.GetComponent<LayoutElement>();
             actionLayout.minWidth = 94f;
             actionLayout.preferredWidth = 94f;
             actionLayout.flexibleWidth = 0f;
+            return view;
+        }
+
+        private void UpdateStoreListingCard(StorePurchaseRowView view, StoreRatListingData listing,
+            bool allowPurchase = true)
+        {
+            if (view == null || view.root == null || listing == null) return;
+            if (!string.IsNullOrEmpty(view.listingId) && view.listingId != listing.id && portraitPreview != null)
+                portraitPreview.ReleasePortraitForStoreListing(view.listingId);
+            view.listingId = listing.id ?? string.Empty;
+            view.root.name = "Rat Market Listing " + view.listingId;
+
+            RatData previewRat = StoreSystem.CreatePreviewRat(listing, game.GameTime);
+            view.portraitRat = previewRat;
+            if (view.portrait != null)
+            {
+                Texture portraitTexture = portraitPreview == null || previewRat == null
+                    ? null
+                    : portraitPreview.GetStorePortrait(previewRat);
+                view.portrait.texture = portraitTexture;
+                view.portrait.color = portraitPreview != null &&
+                    portraitPreview.IsPortraitRendered(portraitTexture)
+                    ? Color.white
+                    : new Color(0.10f, 0.18f, 0.17f, 1f);
+            }
+            TraitData traits = listing.traits ?? new TraitData();
+            string fur = previewRat == null || previewRat.phenotype == null
+                ? "Unknown"
+                : previewRat.phenotype.coatColorLabel;
+            string markings = previewRat == null || previewRat.phenotype == null
+                ? "Unknown"
+                : previewRat.phenotype.markingsLabel;
+            if (view.name != null)
+                view.name.text = ColonyFactory.DisplayName(listing) + "  •  " + SexLabel(listing.sex) + "  •  Adult";
+            if (view.coat != null) view.coat.text = "Coat: " + fur + "  •  " + markings;
+            if (view.stats != null)
+                view.stats.text = "Size " + traits.size.ToString("0") + "  •  Health " +
+                    traits.health.ToString("0") + "  •  Fertility " + traits.fertility.ToString("0");
+
+            StoreSystem.PurchasePriceBreakdown price = StoreSystem.GetPurchasePriceBreakdown(
+                traits, listing.markingFamily, listing.genotype);
+            if (view.price != null)
+                view.price.text = "Price: $" + price.basePrice.ToString("N0") + " base + $" +
+                    price.traitAdjustment.ToString("N0") + " stats + $" +
+                    price.markingPremium.ToString("N0") + " marks = $" + listing.price.ToString("N0");
+
+            bool canBuy = game.Save.colonyCredits >= listing.price;
+            if (view.actionLabel != null) view.actionLabel.text = "BUY\n$" + listing.price;
+            if (view.actionButton != null) view.actionButton.interactable = canBuy && allowPurchase;
+            if (!string.IsNullOrEmpty(view.listingId) && view.actionButton != null)
+                storePurchaseButtons[view.listingId] = view.actionButton;
+        }
+
+        private void BuyStoreListing(string listingId)
+        {
+            if (game == null || !BeginStorePurchaseAttempt(listingId)) return;
+            if (!game.BuyStoreRat(listingId))
+                CompleteStorePurchaseAttempt(listingId, false);
         }
 
         private void AddEnclosureViewControls(RectTransform parent)
         {
             if (parent == null || game == null) return;
             var card = CreateCard(game.HabitatPageLabel);
-            AddText(card, "Swipe left or right to move between full-size tanks.",
+            AddText(card, "Drag the tank to pan. Use Previous/Next to switch tanks.",
                 13, new Color(0.78f, 0.9f, 0.82f), TextAnchor.UpperLeft);
             AddText(card, "Pairing Tank: " + game.PairingHabitatCount + " / " + game.PairingHabitatCapacity + " occupants",
                 13, new Color(1f, 0.84f, 0.52f), TextAnchor.UpperLeft);
@@ -6768,7 +7097,9 @@ namespace RatHabitat
                 {
                     bool hasDependentPinkies = EnclosureSystem.HasDependentPinkies(game.Save, rat.id);
                     bool canMoveToSaleTank = game.CanMoveRatToForSaleTank(rat);
-                    string moveLabel = hasDependentPinkies
+                    string moveLabel = rat.isFavorite
+                            ? "Favorites cannot enter Sale Tank"
+                            : hasDependentPinkies
                             ? "Keep mother with dependent pinkies"
                             : game.ForSaleHabitatCount >= game.ForSaleHabitatCapacity
                                 ? "For Sale Tank is full"
@@ -7539,7 +7870,12 @@ namespace RatHabitat
                 "Ranges show possible min/max values; the expected marker is an average, not a guarantee. " +
                 "Mutation odds per inherited allele: S-locus markings " +
                 (preview.sLocusMutationChance * 100f).ToString("0.##") + "%; B/C/D " +
-                (preview.bcdMutationChance * 100f).ToString("0.###") + "%.",
+                (preview.bcdMutationChance * 100f).ToString("0.###") + "%. " +
+                "For solid s/s × s/s parents: " +
+                (preview.solidParentSpontaneousMarkingChance * 100f).ToString("0.####") +
+                "% per offspring to gain a marking allele (albino can mask markings). " +
+                "Visible Hairless offspring for this pair: " +
+                (preview.visibleHairlessChance * 100f).ToString("0.##") + "% (independent trait).",
                 12, new Color(1f, 0.72f, 0.43f), TextAnchor.UpperLeft);
         }
 
@@ -7639,6 +7975,7 @@ namespace RatHabitat
             AddText(developerToolsCard, "Movement diagnostic: " + game.MovementDiagnostics, 12, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
             AddText(developerToolsCard, "Simulation diagnostic: " + game.SimulationPerformanceDiagnostics, 12, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
             AddText(developerToolsCard, "Breeding diagnostic: " + PairingHabitatSystem.DiagnosticsSummary(game.Save), 12, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
+            AddText(developerToolsCard, game.BirthQueueDiagnostics, 12, new Color(0.58f, 0.86f, 0.72f), TextAnchor.UpperLeft);
             EndDeveloperAccordion(diagnosticsGroup);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             DeveloperAccordionGroup performanceGroup = BeginDeveloperAccordion("performance", "Runtime Performance Diagnostics");
@@ -8094,7 +8431,8 @@ namespace RatHabitat
             return button;
         }
 
-        private static void ValidatePortraitSlot(Transform slot, string label)
+        private static void ValidatePortraitSlot(Transform slot, string label,
+            bool allowDeferredTexture = false)
         {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             if (slot == null) return;
@@ -8104,7 +8442,9 @@ namespace RatHabitat
             {
                 if (images[i] != null && images[i].texture is RenderTexture) assignedRenderTextures++;
             }
-            Debug.Assert(images.Length == 1 && assignedRenderTextures == 1,
+            bool textureStateValid = assignedRenderTextures == 1 ||
+                (allowDeferredTexture && images.Length == 1 && images[0] != null && images[0].texture == null);
+            Debug.Assert(images.Length == 1 && textureStateValid,
                 "[Rat Habitat] Portrait slot '" + label + "' expected one RawImage with one RenderTexture; found rawImages=" + images.Length + " assignedRenderTextures=" + assignedRenderTextures + ".");
 #endif
         }

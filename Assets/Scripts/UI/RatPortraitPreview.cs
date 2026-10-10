@@ -46,15 +46,24 @@ namespace RatHabitat
             public RatData rat;
             public float normalizedBaseScale;
             public float appliedGrowthScale;
+            public bool transientStorePreview;
+            public bool buildFailed;
+            public bool rendered;
         }
 
         private readonly Dictionary<string, PortraitEntry> portraits = new Dictionary<string, PortraitEntry>();
+        private readonly List<string> stalePortraitKeys = new List<string>(16);
+        private readonly List<PortraitEntry> pendingPortraitCleanup = new List<PortraitEntry>(16);
         private RatVisualFactory factory;
         private GameObject rig;
         private Camera previewCamera;
         private Transform visualRoot;
         public void Configure(RatVisualFactory sourceFactory)
         {
+            // A scene can briefly ask for its presentation factory before the
+            // presenter has completed setup. Do not discard a usable cache or
+            // replace the working factory with a transient null reference.
+            if (sourceFactory == null) return;
             if (factory != null && factory != sourceFactory)
             {
                 ClearPortraitCache();
@@ -64,6 +73,24 @@ namespace RatHabitat
         }
 
         public Texture GetPortrait(RatData rat)
+        {
+            return GetPortraitInternal(rat, false);
+        }
+
+        public Texture GetStorePortrait(RatData rat)
+        {
+            return GetPortraitInternal(rat, true);
+        }
+
+        public bool IsPortraitRendered(Texture texture)
+        {
+            if (texture == null) return false;
+            foreach (PortraitEntry entry in portraits.Values)
+                if (entry != null && entry.texture == texture) return entry.rendered;
+            return false;
+        }
+
+        private Texture GetPortraitInternal(RatData rat, bool transientStorePreview)
         {
             if (rat == null || factory == null) return null;
 
@@ -77,29 +104,15 @@ namespace RatHabitat
             PortraitEntry cached;
             if (portraits.TryGetValue(key, out cached))
             {
-                DeactivateAllPreviewVisuals();
-                if (cached != null && cached.texture != null && cached.visual != null) return cached.texture;
+                if (cached != null && cached.texture != null)
+                {
+                    cached.transientStorePreview |= transientStorePreview;
+                    if (!Application.isPlaying && cached.visual == null && !cached.buildFailed)
+                        BuildAndRenderPortrait(cached);
+                    return cached.texture;
+                }
                 DestroyPortraitEntry(cached);
                 portraits.Remove(key);
-            }
-
-            DeactivateAllPreviewVisuals();
-            GameObject visual = factory.CreateStageVisual(visualRoot, rat);
-            if (visual == null) return null;
-            SetLayerRecursively(visual, PreviewLayer);
-            RemoveGameplayComponents(visual);
-            // The factory normalizes the imported root uniformly. Preserve
-            // that proportion when applying the presentation-only stage scale
-            // instead of allowing any preview compensation to skew an axis.
-            float normalizedScale = UniformBaseScale(visual.transform.localScale);
-            float growthScale = GrowthSystem.VisualScaleForAge(rat);
-            visual.transform.localScale = Vector3.one * (normalizedScale * growthScale);
-
-            Bounds bounds;
-            if (!TryGetBounds(visual, out bounds, true))
-            {
-                Object.DestroyImmediate(visual);
-                return null;
             }
 
             RenderTexture target = new RenderTexture(PortraitResolution, PortraitResolution, 24, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
@@ -109,14 +122,12 @@ namespace RatHabitat
 
             var entry = new PortraitEntry
             {
-                visual = visual,
                 texture = target,
                 rat = rat,
-                normalizedBaseScale = normalizedScale,
-                appliedGrowthScale = growthScale,
+                transientStorePreview = transientStorePreview,
             };
             portraits[key] = entry;
-            RenderEntry(entry, bounds);
+            if (!Application.isPlaying) BuildAndRenderPortrait(entry);
             return target;
         }
 
@@ -131,12 +142,25 @@ namespace RatHabitat
             {
                 previewConsumerScanTimer = PreviewConsumerScanIntervalSeconds;
                 hasVisiblePortraitConsumer = HasVisiblePortraitConsumer();
+                PruneUnconsumedPortraits();
             }
             // Cached previews remain available for page rebuilds, but when no
             // active RawImage is displaying one (for example, while the
             // player is in Habitat or Settings), there is no reason to keep
             // rendering hidden cameras on the GPU.
+            if (pendingPortraitCleanup.Count > 0)
+            {
+                ProcessOnePortraitCleanup();
+                return;
+            }
             if (!hasVisiblePortraitConsumer) return;
+
+            // Building a stage visual and rendering its thumbnail are kept
+            // out of UI refresh. Process at most one newly visible portrait
+            // per frame so a large upgraded market cannot create a long
+            // main-thread burst when it restocks.
+            if (ProcessOnePendingPortraitBuild()) return;
+
             previewRefreshTimer -= deltaTime;
             if (previewRefreshTimer > 0f) return;
             previewRefreshTimer = PreviewRefreshIntervalSeconds;
@@ -202,6 +226,114 @@ namespace RatHabitat
             return false;
         }
 
+        private bool IsPortraitConsumed(Texture texture)
+        {
+            if (texture == null) return false;
+            for (int imageIndex = 0; imageIndex < portraitConsumers.Count; imageIndex++)
+            {
+                RawImage image = portraitConsumers[imageIndex];
+                if (image != null && image.isActiveAndEnabled && image.texture == texture) return true;
+            }
+            return false;
+        }
+
+        private void PruneUnconsumedPortraits()
+        {
+            stalePortraitKeys.Clear();
+            foreach (KeyValuePair<string, PortraitEntry> item in portraits)
+            {
+                PortraitEntry entry = item.Value;
+                if (entry == null || !IsPortraitConsumed(entry.texture)) stalePortraitKeys.Add(item.Key);
+            }
+            QueuePortraitEntriesForCleanup(stalePortraitKeys);
+        }
+
+        private bool ProcessOnePendingPortraitBuild()
+        {
+            foreach (PortraitEntry entry in portraits.Values)
+            {
+                if (entry == null || entry.visual != null || entry.buildFailed ||
+                    !IsPortraitConsumed(entry.texture)) continue;
+                BuildAndRenderPortrait(entry);
+                return true;
+            }
+            return false;
+        }
+
+        private void BuildAndRenderPortrait(PortraitEntry entry)
+        {
+            if (entry == null || entry.rat == null || factory == null || entry.texture == null) return;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            UnityEngine.Profiling.Profiler.BeginSample("Rat Empire/Presentation/Portrait Build and Render");
+#endif
+            try
+            {
+                DeactivateAllPreviewVisuals();
+                GameObject visual = factory.CreateStageVisual(visualRoot, entry.rat);
+                if (visual == null)
+                {
+                    entry.buildFailed = true;
+                    return;
+                }
+                SetLayerRecursively(visual, PreviewLayer);
+                RemoveGameplayComponents(visual);
+                // The factory normalizes the imported root uniformly. Preserve
+                // that proportion when applying the presentation-only stage scale.
+                float normalizedScale = UniformBaseScale(visual.transform.localScale);
+                float growthScale = GrowthSystem.VisualScaleForAge(entry.rat);
+                visual.transform.localScale = Vector3.one * (normalizedScale * growthScale);
+
+                Bounds bounds;
+                if (!TryGetBounds(visual, out bounds, false))
+                {
+                    Object.DestroyImmediate(visual);
+                    entry.buildFailed = true;
+                    return;
+                }
+                entry.visual = visual;
+                entry.normalizedBaseScale = normalizedScale;
+                entry.appliedGrowthScale = growthScale;
+                RenderEntry(entry, bounds);
+            }
+            finally
+            {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                UnityEngine.Profiling.Profiler.EndSample();
+#endif
+            }
+        }
+
+        private void QueuePortraitEntriesForCleanup(List<string> keys)
+        {
+            for (int index = 0; index < keys.Count; index++)
+            {
+                PortraitEntry entry;
+                if (!portraits.TryGetValue(keys[index], out entry)) continue;
+                portraits.Remove(keys[index]);
+                if (entry != null) pendingPortraitCleanup.Add(entry);
+            }
+            keys.Clear();
+        }
+
+        private void ProcessOnePortraitCleanup()
+        {
+            PortraitEntry entry = pendingPortraitCleanup[0];
+            pendingPortraitCleanup.RemoveAt(0);
+            DestroyPortraitEntry(entry);
+            if (entry != null && entry.transientStorePreview && entry.rat != null)
+                RatVisualFactory.ReleaseTransientPreviewPatternsForRat(entry.rat);
+        }
+
+        public void ReleasePortraitForStoreListing(string listingId)
+        {
+            if (string.IsNullOrEmpty(listingId)) return;
+            stalePortraitKeys.Clear();
+            string prefix = listingId + "|";
+            foreach (KeyValuePair<string, PortraitEntry> item in portraits)
+                if (item.Key.StartsWith(prefix, System.StringComparison.Ordinal)) stalePortraitKeys.Add(item.Key);
+            QueuePortraitEntriesForCleanup(stalePortraitKeys);
+        }
+
         private void RenderEntry(PortraitEntry entry, Bounds bounds)
         {
             if (entry == null || entry.visual == null || entry.texture == null || previewCamera == null) return;
@@ -242,6 +374,7 @@ namespace RatHabitat
             previewCamera.Render();
             previewCamera.targetTexture = null;
             entry.visual.SetActive(false);
+            entry.rendered = true;
         }
 
         private void EnsureRig()
@@ -299,25 +432,32 @@ namespace RatHabitat
         private void RemoveStaleEntriesForRat(string ratId, string keepKey)
         {
             if (string.IsNullOrEmpty(ratId)) return;
-            var staleKeys = new List<string>();
+            stalePortraitKeys.Clear();
             foreach (var item in portraits)
             {
                 if (item.Key == keepKey || !item.Key.StartsWith(ratId + "|", System.StringComparison.Ordinal)) continue;
-                staleKeys.Add(item.Key);
+                stalePortraitKeys.Add(item.Key);
             }
-
-            for (int i = 0; i < staleKeys.Count; i++)
-            {
-                PortraitEntry stale;
-                if (!portraits.TryGetValue(staleKeys[i], out stale)) continue;
-                DestroyPortraitEntry(stale);
-                portraits.Remove(staleKeys[i]);
-            }
+            QueuePortraitEntriesForCleanup(stalePortraitKeys);
         }
 
         private void ClearPortraitCache()
         {
-            foreach (var item in portraits) DestroyPortraitEntry(item.Value);
+            foreach (var item in portraits)
+            {
+                PortraitEntry entry = item.Value;
+                DestroyPortraitEntry(entry);
+                if (entry != null && entry.transientStorePreview && entry.rat != null)
+                    RatVisualFactory.ReleaseTransientPreviewPatternsForRat(entry.rat);
+            }
+            for (int index = 0; index < pendingPortraitCleanup.Count; index++)
+            {
+                PortraitEntry entry = pendingPortraitCleanup[index];
+                DestroyPortraitEntry(entry);
+                if (entry != null && entry.transientStorePreview && entry.rat != null)
+                    RatVisualFactory.ReleaseTransientPreviewPatternsForRat(entry.rat);
+            }
+            pendingPortraitCleanup.Clear();
             portraits.Clear();
             portraitCursor = 0;
             DeactivateAllPreviewVisuals();
@@ -344,15 +484,22 @@ namespace RatHabitat
             if (entry.texture != null)
             {
                 entry.texture.Release();
-                Object.DestroyImmediate(entry.texture);
+                DestroyPreviewObject(entry.texture);
                 entry.texture = null;
             }
             if (entry.visual != null)
             {
                 entry.visual.SetActive(false);
-                Object.DestroyImmediate(entry.visual);
+                DestroyPreviewObject(entry.visual);
                 entry.visual = null;
             }
+        }
+
+        private static void DestroyPreviewObject(Object target)
+        {
+            if (target == null) return;
+            if (Application.isPlaying) Object.Destroy(target);
+            else Object.DestroyImmediate(target);
         }
 
         private static string PortraitKey(RatData rat)

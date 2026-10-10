@@ -13,8 +13,384 @@ using Object = UnityEngine.Object;
 
 namespace RatHabitat.Tests
 {
+    public class NestCornerRoutingTests
+    {
+        private GameObject host;
+        private RatHabitatBehavior behavior;
+        private Bounds forbidden;
+        private const float FrameSeconds = 1f / 60f;
+        private const BindingFlags PrivateInstance = BindingFlags.Instance | BindingFlags.NonPublic;
+
+        [SetUp]
+        public void SetUp()
+        {
+            GrowthSystem.SetSimulationPaused(false);
+            GrowthSystem.SetRuntimeSpeed(1f);
+            // Match the imported nest footprint, including the authoritative
+            // 0.18-unit adult exclusion padding on each side.
+            var physical = new Bounds(EnclosureSystem.PairingNestPosition, new Vector3(6.38f,.8f,4.58f));
+            EnclosureSystem.RegisterPairingNestBounds(physical);
+            forbidden = physical;
+            forbidden.Expand(new Vector3(.36f,0,.36f));
+            host = new GameObject("Isolated nest corner regression");
+            var builder = host.AddComponent<HabitatBuilder>();
+            var root = new GameObject("Corner test rat");
+            root.transform.SetParent(host.transform);
+            root.transform.position = AtCorner(.35f,-.7f);
+            behavior = root.AddComponent<RatHabitatBehavior>();
+            var rat = ColonyFactory.CreateRat("nest-corner-regression", "Corner test", RatSex.Female,
+                0L, 0, new GenotypeData(), new TraitData(50,80,70), RatStage.Adult);
+            rat.enclosure = RatEnclosure.Pairing;
+            behavior.Configure(builder, rat);
+            Set("movementSpeed", .3f);
+            Set("spacingTimer", float.MaxValue);
+            Set("stateTimer", 100000f);
+            Set("currentTarget", null);
+        }
+
+        [TearDown]
+        public void TearDown()
+        {
+            Object.DestroyImmediate(host);
+            EnclosureSystem.ClearPairingNestBounds();
+            GrowthSystem.SetRuntimeSpeed(1f);
+            GrowthSystem.SetSimulationPaused(false);
+        }
+
+        [TestCase(1f,false,false)]
+        [TestCase(1f,true,false)]
+        [TestCase(3f,false,false)]
+        [TestCase(3f,true,false)]
+        [TestCase(1f,false,true)]
+        [TestCase(1f,true,true)]
+        [TestCase(3f,false,true)]
+        [TestCase(3f,true,true)]
+        public void UpperRightCornerMakesSafeProgressBothDirections(float speed, bool reverse, bool clearanceShell)
+        {
+            RunCornerTraversal(speed,reverse,clearanceShell,RatEnclosure.Pairing);
+        }
+
+        private void RunCornerTraversal(float speed, bool reverse, bool clearanceShell, RatEnclosure enclosure)
+        {
+            GrowthSystem.SetRuntimeSpeed(speed);
+            Vector3 side = AtCorner(clearanceShell ? .02f : .3f,-.7f);
+            Vector3 top = AtCorner(-.7f,.3f);
+            Vector3 start = reverse ? top : side;
+            Vector3 goal = reverse ? side : top;
+            behavior.transform.position = start;
+            Set("targetPosition", goal);
+            Vector3 lastStep = Vector3.zero;
+            int reversals = 0;
+            float walked = 0f;
+            for (int frame = 0; frame < 1500 && Vector3.Distance(behavior.transform.position, goal) > .24f; frame++)
+            {
+                Vector3 before = behavior.transform.position;
+                TravelFrame();
+                Vector3 after = behavior.transform.position;
+                Assert.IsFalse(EnclosureSystem.IsInsideAdultNestExclusion(enclosure, after),
+                    "A detour step must not enter the forbidden nest footprint.");
+                Assert.IsTrue(EnclosureSystem.IsNestSafeRoute(enclosure, before, after),
+                    "The whole segment, not only its endpoint, must avoid the nest corner.");
+                Assert.IsTrue(EnclosureSystem.IsInside(enclosure, after, .38f));
+                Vector3 step = after-before;
+                float budget = speed == 1f ? .3f*FrameSeconds :
+                    GrowthSystem.SimulationVisibleMovementDistanceBudget(FrameSeconds);
+                Assert.LessOrEqual(step.magnitude, budget+.0001f, "Routing must walk, never teleport.");
+                if (step.sqrMagnitude > 1e-10f && lastStep.sqrMagnitude > 1e-10f &&
+                    Vector3.Dot(step.normalized,lastStep.normalized) < -.9f) reversals++;
+                if (step.sqrMagnitude > 1e-10f) lastStep = step;
+                walked += step.magnitude;
+                Assert.AreEqual(goal, Get<Vector3>("targetPosition"), "A valid detour must keep its original goal.");
+            }
+            Assert.LessOrEqual(Vector3.Distance(behavior.transform.position,goal), .24f,
+                "The rat must finish walking around the corner rather than retry a zero-length route.");
+            Assert.Greater(walked, Vector3.Distance(start,goal)-.25f);
+            Assert.LessOrEqual(reversals, 1, "The corner must not cause back-and-forth oscillation.");
+            Assert.AreEqual(0,behavior.BlockedTargetRecoveryCount, "Valid slow routes are not stuck targets.");
+        }
+
+        [Test]
+        public void FailedDetourReplacesAmbientGoalAndResumesWalking()
+        {
+            Vector3 start = AtCorner(.4f,-.5f);
+            behavior.transform.position = start;
+            Vector3 impossibleGoal = forbidden.center;
+            impossibleGoal.y = start.y;
+            Set("targetPosition", impossibleGoal);
+            for (int frame = 0; frame < 60; frame++) TravelFrame();
+            Assert.AreNotEqual(impossibleGoal,Get<Vector3>("targetPosition"),
+                "A failed detour must not keep retrying an unchanged current-position fallback.");
+            Assert.Greater(behavior.BlockedTargetRecoveryCount,0);
+            for (int frame = 0; frame < 120; frame++) TravelFrame();
+            Assert.Greater(Vector3.Distance(start,behavior.transform.position),.15f);
+            Assert.IsFalse(EnclosureSystem.IsInsideAdultNestExclusion(RatEnclosure.Pairing,behavior.transform.position));
+        }
+
+        [TestCase(1f)]
+        [TestCase(3f)]
+        public void NoAvailableDetourReplacesGoalWithoutReusingCurrentPosition(float speed)
+        {
+            GrowthSystem.SetRuntimeSpeed(speed);
+            var definition = EnclosureSystem.GetDefinition(RatEnclosure.Pairing);
+            var blockedNest = new Bounds(definition.Center, new Vector3(definition.Width,.8f,3f));
+            EnclosureSystem.RegisterPairingNestBounds(blockedNest);
+            Vector3 start = new Vector3(definition.Center.x,.45f,definition.Center.z-2f);
+            Vector3 unreachableGoal = new Vector3(start.x,start.y,definition.Center.z+2f);
+            behavior.transform.position = start;
+            Set("targetPosition",unreachableGoal);
+            Assert.IsFalse(EnclosureSystem.IsInsideAdultNestExclusion(RatEnclosure.Pairing,start));
+            Assert.IsFalse(EnclosureSystem.IsInsideAdultNestExclusion(RatEnclosure.Pairing,unreachableGoal));
+            Assert.AreEqual(start,EnclosureSystem.GetNearestOpenFloorPosition(RatEnclosure.Pairing,start,.48f),
+                "This reproduces the old unchanged escape fallback outside an impassable nest.");
+            Assert.IsFalse((bool)typeof(RatHabitatBehavior).GetMethod("TryBuildNestDetour",PrivateInstance)
+                .Invoke(behavior,new object[] { RatEnclosure.Pairing,start,unreachableGoal }));
+
+            TravelFrame();
+            Assert.AreEqual(start,behavior.transform.position,"A failed route must not teleport the rat.");
+            Assert.AreNotEqual(unreachableGoal,Get<Vector3>("targetPosition"));
+            Assert.AreEqual(1,behavior.BlockedTargetRecoveryCount,
+                "A proven invalid route must be replaced instead of caching the current point forever.");
+
+            EnclosureSystem.RegisterPairingNestBounds(new Bounds(EnclosureSystem.PairingNestPosition,
+                new Vector3(6.38f,.8f,4.58f)));
+            for (int frame = 0; frame < 120; frame++) TravelFrame();
+            Assert.Greater(Vector3.Distance(start,behavior.transform.position),.15f,
+                "After replacing an impossible route, the rat must resume walking to a valid floor goal.");
+        }
+
+        [TestCase(1f,false)]
+        [TestCase(1f,true)]
+        [TestCase(3f,false)]
+        [TestCase(3f,true)]
+        public void FemaleTankNestCornerAlsoMakesProgress(float speed, bool reverse)
+        {
+            Get<RatData>("rat").enclosure = RatEnclosure.FemaleColony;
+            forbidden = new Bounds(EnclosureSystem.GetNestPosition(RatEnclosure.FemaleColony),
+                new Vector3(EnclosureSystem.NestAdultExclusionRadiusX*2f,.8f,
+                    EnclosureSystem.NestAdultExclusionRadiusZ*2f));
+            // Same traversal contract on the smaller non-imported nest.
+            RunCornerTraversal(speed,reverse,false,RatEnclosure.FemaleColony);
+        }
+
+        [TestCase(1f)]
+        [TestCase(3f)]
+        public void CourtshipRoutesAroundCornerToItsOwnGoal(float speed)
+        {
+            GrowthSystem.SetRuntimeSpeed(speed);
+            behavior.transform.position = AtCorner(.3f,-.7f);
+            Vector3 goal = AtCorner(-.7f,.3f);
+            Set("targetPosition", forbidden.center); // stale ambient target must be ignored
+            Assert.IsTrue(behavior.BeginPairingApproach(goal,goal+Vector3.left,1f));
+            var update = typeof(RatHabitatBehavior).GetMethod("UpdatePairingApproach",PrivateInstance);
+            for (int frame = 0; frame < 1500 && !behavior.PairingApproachAtTarget; frame++)
+            {
+                Vector3 before = behavior.transform.position;
+                float delta = GrowthSystem.SimulationMovementDeltaSeconds(FrameSeconds);
+                update.Invoke(behavior,new object[] { delta,GrowthSystem.SimulationMovementTimeBudget(delta),
+                    GrowthSystem.SimulationVisibleMovementDistanceBudget(FrameSeconds) });
+                Assert.IsTrue(EnclosureSystem.IsNestSafeRoute(RatEnclosure.Pairing,
+                    before,behavior.transform.position));
+            }
+            Assert.IsTrue(behavior.PairingApproachAtTarget,"A nest detour must not cancel or block courtship.");
+            Assert.AreEqual(0,behavior.BlockedTargetRecoveryCount);
+        }
+
+        [TestCase(1f)]
+        [TestCase(3f)]
+        public void NursingMotherStillWalksIntoSharedCaregiverZone(float speed)
+        {
+            GrowthSystem.SetRuntimeSpeed(speed);
+            Get<RatData>("rat").nursing = true;
+            Set("nursingCareMovementActive",true);
+            behavior.transform.position = AtCorner(.3f,.3f);
+            Vector3 goal = EnclosureSystem.GetNestCaregiverPosition(RatEnclosure.Pairing);
+            goal.y = behavior.transform.position.y;
+            Set("targetPosition",goal);
+            for (int frame = 0; frame < 1800 && Vector3.Distance(behavior.transform.position,goal) > .24f; frame++)
+                TravelFrame();
+            Assert.IsTrue(EnclosureSystem.IsInsideNestCaregiverZone(RatEnclosure.Pairing,behavior.transform.position));
+            Assert.LessOrEqual(Vector3.Distance(behavior.transform.position,goal),.24f);
+            Assert.AreEqual(0,behavior.BlockedTargetRecoveryCount,"Ambient watchdogs must leave nursing routes alone.");
+        }
+
+        [TestCase(.005f)]
+        [TestCase(.00005f)]
+        public void SmallBlockedStepsRecoverInRealTimeButSlowProgressDoesNot(float requested)
+        {
+            var track = typeof(RatHabitatBehavior).GetMethod("TrackBlockedAmbientTarget",PrivateInstance);
+            for (int frame = 0; frame < 180; frame++)
+                Assert.IsFalse((bool)track.Invoke(behavior,new object[] { requested,requested,FrameSeconds }),
+                    "Valid tiny movement must not trigger blocked-target recovery.");
+            Assert.AreEqual(0,behavior.BlockedTargetRecoveryCount);
+            bool recovered = false;
+            for (int frame = 0; frame < 45 && !recovered; frame++)
+                recovered = (bool)track.Invoke(behavior,new object[] { requested,0f,FrameSeconds });
+            Assert.IsTrue(recovered,"Sustained zero progress must recover within 0.75 real seconds even at 1x.");
+            Assert.AreEqual(1,behavior.BlockedTargetRecoveryCount);
+        }
+
+        [Test]
+        public void NestRouteBoundsAgreeWithExclusionAndDetectThinCornerCrossings()
+        {
+            Bounds routeBounds;
+            Assert.IsTrue(EnclosureSystem.TryGetPairingNestAvoidanceBounds(.04f,out routeBounds));
+            Assert.AreEqual(forbidden.extents.x+.04f,routeBounds.extents.x,.00001f);
+            Assert.AreEqual(forbidden.extents.z+.04f,routeBounds.extents.z,.00001f);
+            Assert.IsFalse(EnclosureSystem.IsNestSafeRoute(RatEnclosure.Pairing,
+                AtCorner(-1.123f,1.121f),AtCorner(1f,-1.002f)),
+                "Fixed route samples can skip a narrow corner intersection; use a continuous segment check.");
+            Assert.IsTrue(EnclosureSystem.IsNestSafeRoute(RatEnclosure.Pairing,
+                AtCorner(-1f,.01f),AtCorner(1f,.01f)), "A clear path above the rim stays valid.");
+        }
+
+        [TestCase(1f)]
+        [TestCase(3f)]
+        public void BirthApproachStillEntersTheCaregiverZone(float speed)
+        {
+            GrowthSystem.SetRuntimeSpeed(speed);
+            behavior.transform.position = AtCorner(.3f,.3f);
+            Assert.IsTrue(behavior.BeginBirthApproach(EnclosureSystem.GetNestCaregiverPosition(RatEnclosure.Pairing)));
+            var update = typeof(RatHabitatBehavior).GetMethod("UpdateBirthApproach",PrivateInstance);
+            for (int frame = 0; frame < 1800 && !behavior.BirthApproachAtNest; frame++)
+            {
+                float delta = GrowthSystem.SimulationMovementDeltaSeconds(FrameSeconds);
+                update.Invoke(behavior,new object[] { delta,GrowthSystem.SimulationMovementTimeBudget(delta),
+                    GrowthSystem.SimulationVisibleMovementDistanceBudget(FrameSeconds) });
+            }
+            Assert.IsTrue(behavior.BirthApproachAtNest);
+            Assert.IsTrue(EnclosureSystem.IsInsideNestCaregiverZone(RatEnclosure.Pairing,behavior.transform.position));
+        }
+
+        private Vector3 AtCorner(float x, float z)
+        {
+            return new Vector3(forbidden.max.x+x,.45f,forbidden.max.z+z);
+        }
+
+        private void TravelFrame()
+        {
+            float delta = GrowthSystem.SimulationMovementDeltaSeconds(FrameSeconds);
+            typeof(RatHabitatBehavior).GetMethod("UpdateTravel",PrivateInstance).Invoke(behavior,new object[] {
+                FrameSeconds,delta,FrameSeconds,GrowthSystem.SimulationMovementTimeBudget(delta),
+                GrowthSystem.SimulationVisibleMovementDistanceBudget(FrameSeconds) });
+        }
+
+        private void Set(string name, object value)
+        {
+            typeof(RatHabitatBehavior).GetField(name,PrivateInstance).SetValue(behavior,value);
+        }
+
+        private T Get<T>(string name)
+        {
+            return (T)typeof(RatHabitatBehavior).GetField(name,PrivateInstance).GetValue(behavior);
+        }
+    }
+
     public class VerticalSliceSystemTests
     {
+        [Test]
+        public void TankCameraPanScreenDragTracksPointerAndScalesWithZoom()
+        {
+            var cameraObject = new GameObject("Tank Pan Test Camera");
+            var renderTexture = new RenderTexture(1000, 600, 16);
+            try
+            {
+                var camera = cameraObject.AddComponent<Camera>();
+                camera.targetTexture = renderTexture;
+                camera.orthographic = true;
+                camera.orthographicSize = 8f;
+                camera.transform.rotation = Quaternion.Euler(45f, 0f, 0f);
+
+                Vector2 drag = new Vector2(120f, -80f);
+                Vector3 worldAtZoomOut = TankCameraPanMath.ScreenDeltaToWorldPlane(camera, drag);
+                camera.orthographicSize = 4f;
+                Vector3 worldAtZoomIn = TankCameraPanMath.ScreenDeltaToWorldPlane(camera, drag);
+
+                Assert.Greater(worldAtZoomOut.magnitude, 0f);
+                Assert.AreEqual(0f, worldAtZoomOut.y, 0.0001f);
+                Assert.AreEqual(worldAtZoomOut.magnitude * 0.5f,
+                    worldAtZoomIn.magnitude, 0.0001f,
+                    "Panning preserves the current zoom: the same pixel drag covers less world distance when zoomed in.");
+                Assert.Greater(Vector3.Dot(worldAtZoomOut, camera.transform.right * drag.x +
+                    camera.transform.up * drag.y), 0f,
+                    "The world translation must follow the pointer's screen direction before the camera applies its inverse pan.");
+                Assert.AreEqual(4f, camera.orthographicSize, 0.0001f,
+                    "Pan calculations do not modify the zoom level, including after zoom-in.");
+            }
+            finally
+            {
+                cameraObject.GetComponent<Camera>().targetTexture = null;
+                Object.DestroyImmediate(cameraObject);
+                renderTexture.Release();
+                Object.DestroyImmediate(renderTexture);
+            }
+        }
+
+        [Test]
+        public void TankCameraPanClampsEveryPlayerTankAndNeverLeavesItsBounds()
+        {
+            foreach (RatEnclosure enclosure in EnclosureSystem.AllEnclosures)
+            {
+                EnclosureSystem.Definition bounds = EnclosureSystem.GetDefinition(enclosure);
+                Vector3 clamped = TankCameraPanMath.ClampTargetToEnclosure(enclosure,
+                    new Vector3(bounds.maxX + 1000f, 50f, bounds.minZ - 1000f));
+                Assert.That(clamped.x, Is.InRange(bounds.minX, bounds.maxX), enclosure + " horizontal tank bounds");
+                Assert.That(clamped.z, Is.InRange(bounds.minZ, bounds.maxZ), enclosure + " depth tank bounds");
+                Assert.That(clamped.y, Is.InRange(0.35f, 1.25f), enclosure + " camera height");
+            }
+        }
+
+        [Test]
+        public void TankCameraPanRecentersOnTankOrRatChange()
+        {
+            var pan = new TankCameraPanState();
+
+            Assert.IsTrue(pan.SetFocus(RatEnclosure.Pairing, null, false));
+            pan.SetOffset(new Vector3(2f, 0f, -4f));
+            Assert.IsFalse(pan.SetFocus(RatEnclosure.Pairing, null, false));
+            Assert.AreEqual(new Vector3(2f, 0f, -4f), pan.Offset,
+                "Ordinary updates in the same tank must preserve pan.");
+
+            Assert.IsTrue(pan.SetFocus(RatEnclosure.Breeding, null, false),
+                "Switching to the For Sale tank recenters the camera.");
+            Assert.AreEqual(Vector3.zero, pan.Offset);
+            pan.SetOffset(new Vector3(-1f, 0f, 1f));
+            Assert.IsTrue(pan.SetFocus(RatEnclosure.Breeding, "selected-rat", false),
+                "Selecting a rat recenters the camera on its inspection target.");
+            Assert.AreEqual(Vector3.zero, pan.Offset);
+            pan.SetOffset(Vector3.one);
+            pan.Recenter();
+            Assert.AreEqual(Vector3.zero, pan.Offset,
+                "Re-selecting the same rat explicitly recenters the pan without requiring an ID change.");
+        }
+
+        [Test]
+        public void TankCameraPanStartsOnlyOnWorldAndConsumesDragBeforeSelection()
+        {
+            Assert.IsTrue(InteractionManager.CanBeginTankPan(true, false, false));
+            Assert.IsFalse(InteractionManager.CanBeginTankPan(true, false, true),
+                "Buttons, cards, lists, and other raycast UI own their pointer gesture.");
+            Assert.IsFalse(InteractionManager.CanBeginTankPan(true, true, false),
+                "A modal blocks world input.");
+            Assert.IsFalse(InteractionManager.CanBeginTankPan(false, false, false));
+            Assert.IsFalse(InteractionManager.HasExceededTankPanThreshold(Vector2.zero,
+                new Vector2(8f, 0f), 8f), "A desktop click remains a click below the drag threshold.");
+            Assert.IsTrue(InteractionManager.HasExceededTankPanThreshold(Vector2.zero,
+                new Vector2(9f, 0f), 8f), "Desktop mouse drag begins after its click threshold.");
+            Assert.IsFalse(InteractionManager.HasExceededTankPanThreshold(Vector2.zero,
+                new Vector2(24f, 0f), 24f), "A mobile tap remains a tap below the touch drag threshold.");
+            Assert.IsTrue(InteractionManager.HasExceededTankPanThreshold(Vector2.zero,
+                new Vector2(25f, 0f), 24f), "Touch drag begins after its tap threshold.");
+
+            Assert.IsTrue(InteractionManager.ShouldDispatchWorldSelection(false, false, false, false),
+                "A stationary world tap can still select a rat.");
+            Assert.IsFalse(InteractionManager.ShouldDispatchWorldSelection(false, false, true, true),
+                "A drag that panned the tank must not also select a rat.");
+            Assert.IsFalse(InteractionManager.ShouldDispatchWorldSelection(false, true, true, true),
+                "Dragging from world onto a button must not activate that button or select a rat.");
+            Assert.IsFalse(InteractionManager.ShouldDispatchWorldSelection(true, false, true, false),
+                "A gesture that began on UI remains UI-owned even if released over the tank.");
+        }
+
         [Test]
         public void PerformanceProbeNamesStayAlignedAndInvalidAreasAreIgnored()
         {
@@ -1095,6 +1471,291 @@ namespace RatHabitat.Tests
         }
 
         [Test]
+        public void PresenterRecoversMissingBehaviorForLiveAdultRoot()
+        {
+            var presenterObject = new GameObject("Birth Route Behavior Recovery Presenter");
+            var root = new GameObject("Live Mother Root");
+            var duplicate = new GameObject("Abandoned Live Mother Root");
+            try
+            {
+                RatPresenter presenter = presenterObject.AddComponent<RatPresenter>();
+                root.transform.SetParent(presenterObject.transform, false);
+                duplicate.transform.SetParent(presenterObject.transform, false);
+                RatHabitatBehavior existingBehavior = root.AddComponent<RatHabitatBehavior>();
+                existingBehavior.enabled = false;
+                var mother = new RatData
+                {
+                    id = "birth-route-recovery-mother",
+                    name = "Live Mother",
+                    sex = RatSex.Female,
+                    stage = RatStage.Adult,
+                    removalDisposition = RatRemovalDisposition.None,
+                    enclosure = RatEnclosure.Pairing,
+                };
+                root.AddComponent<SelectableEntity>().Configure(
+                    SelectableKind.Rat, mother.id, ColonyFactory.DisplayName(mother));
+                duplicate.AddComponent<SelectableEntity>().Configure(
+                    SelectableKind.Rat, mother.id, ColonyFactory.DisplayName(mother));
+
+                GetPrivateField<Dictionary<string, GameObject>>(presenter, "ratRoots")[mother.id] = root;
+                GetPrivateField<Dictionary<string, RatData>>(presenter, "liveRats")[mother.id] = mother;
+
+                Assert.IsTrue(presenter.TryGetRatBehavior(mother.id, out RatHabitatBehavior recovered));
+                Assert.AreSame(existingBehavior, recovered,
+                    "A live root's existing component should be recovered rather than duplicated.");
+                Assert.IsTrue(recovered.enabled,
+                    "A live adult's stale disabled behavior must be re-enabled for birth-route retries.");
+                Assert.IsTrue(GetPrivateField<Dictionary<string, RatHabitatBehavior>>(presenter, "behaviors")
+                    .ContainsKey(mother.id), "Recovered behavior must restore the presenter lookup index.");
+
+                GetPrivateField<Dictionary<string, RatHabitatBehavior>>(presenter, "behaviors").Remove(mother.id);
+                GetPrivateField<Dictionary<string, RatData>>(presenter, "liveRats").Remove(mother.id);
+                GetPrivateField<Dictionary<string, GameObject>>(presenter, "ratRoots").Remove(mother.id);
+                GetPrivateField<Dictionary<string, RatVisualController>>(presenter, "visualControllers").Remove(mother.id);
+                existingBehavior.enabled = false;
+                Assert.IsFalse(presenter.TryGetRatBehavior(mother.id, out RatHabitatBehavior staleIndex));
+                Assert.IsTrue(presenter.TryGetRatBehavior(mother.id, mother, out recovered),
+                    "Birth recovery must rebuild stale presenter indexes from the authoritative mother record and scene root.");
+                Assert.AreSame(existingBehavior, recovered);
+                Assert.IsTrue(recovered.enabled);
+                Assert.IsTrue(GetPrivateField<Dictionary<string, RatData>>(presenter, "liveRats")
+                    .ContainsKey(mother.id));
+                Assert.IsTrue(presenter.TryGetRatRoot(mother.id, out Transform recoveredRoot));
+                Assert.AreSame(root.transform, recoveredRoot,
+                    "Recovery must prefer the root that still owns the live movement behavior.");
+                Assert.IsFalse(duplicate.activeSelf,
+                    "Abandoned duplicate visuals for the same stable rat ID must be retired immediately.");
+                Assert.AreEqual(1, presenterObject.GetComponentsInChildren<SelectableEntity>().Length,
+                    "One authoritative rat ID must not retain multiple selectable world roots.");
+            }
+            finally
+            {
+                Object.DestroyImmediate(presenterObject);
+            }
+        }
+
+        [Test]
+        public void PresenterRenderDoesNotCreateSecondRootWhenControllerIndexIsMissing()
+        {
+            var presenterObject = new GameObject("Missing Controller Presenter Test");
+            var root = new GameObject("Existing Mother Root");
+            try
+            {
+                RatPresenter presenter = presenterObject.AddComponent<RatPresenter>();
+                root.transform.SetParent(presenterObject.transform, false);
+                root.AddComponent<SelectableEntity>().Configure(
+                    SelectableKind.Rat, "controller-index-mother", "Controller Index Mother");
+                root.AddComponent<RatVisualController>();
+                var mother = new RatData
+                {
+                    id = "controller-index-mother",
+                    name = "Controller Index Mother",
+                    sex = RatSex.Female,
+                    stage = RatStage.Adult,
+                    removalDisposition = RatRemovalDisposition.None,
+                    enclosure = RatEnclosure.Pairing,
+                };
+                var save = new ColonySaveData
+                {
+                    clock = new ClockData { gameTimeMs = GameConfig.StartGameTimeMs, speed = 1f },
+                };
+                save.EnsureLists();
+                save.rats.Add(mother);
+                GetPrivateField<Dictionary<string, GameObject>>(presenter, "ratRoots")[mother.id] = root;
+                GetPrivateField<Dictionary<string, RatData>>(presenter, "liveRats")[mother.id] = mother;
+
+                presenter.Render(save, Vector3.zero);
+
+                Assert.IsTrue(presenter.TryGetRatRoot(mother.id, out Transform indexedRoot));
+                Assert.AreSame(root.transform, indexedRoot,
+                    "Restoring a missing controller index must keep the stable existing root.");
+                Assert.AreEqual(1, presenterObject.GetComponentsInChildren<SelectableEntity>().Length,
+                    "The missing-controller repair must not create a duplicate visual root.");
+                Assert.IsTrue(GetPrivateField<Dictionary<string, RatVisualController>>(presenter,
+                    "visualControllers").ContainsKey(mother.id));
+                Assert.IsTrue(GetPrivateField<Dictionary<string, RatHabitatBehavior>>(presenter,
+                    "behaviors").ContainsKey(mother.id));
+            }
+            finally
+            {
+                Object.DestroyImmediate(presenterObject);
+            }
+        }
+
+        [Test]
+        public void SimultaneousDueBirthsRetryFailedTransactionInPlaceBeforeAdvancingQueue()
+        {
+            const long now = 680000000L;
+            ColonySaveData save = CreatePairingTestSave(now, 100f);
+            RatData firstMother = save.rats[0];
+            RatData sharedFather = save.rats[1];
+            save.rats.Remove(sharedFather);
+            save.ratIds.Remove(sharedFather.id);
+
+            var mothers = new List<RatData> { firstMother };
+            for (int index = 1; index < 3; index++)
+            {
+                RatData mother = CreateSaleTestRat(save, "queued-birth-mother-" + index,
+                    RatSex.Female, 100f, RatStage.Adult);
+                mother.enclosure = RatEnclosure.Pairing;
+                mother.pairingHabitatAssigned = true;
+                mother.reproductiveState = ReproductiveState.Fertile;
+                mother.estrousCycleAnchorGameTime = now;
+                mother.breedingEndAgeDays = 365f;
+                mothers.Add(mother);
+            }
+
+            var pregnancies = new List<PregnancyData>();
+            foreach (RatData mother in mothers)
+            {
+                PregnancyData pregnancy = AddActiveSaleTestPregnancy(save, mother, sharedFather, now);
+                pregnancy.startedAt = now - GameConfig.PregnancyMs;
+                pregnancy.dueAt = now;
+                pregnancies.Add(pregnancy);
+            }
+
+            var presenterObject = new GameObject("Retrying Birth Queue Presenter");
+            var bootstrapObject = new GameObject("Retrying Birth Queue Bootstrap");
+            bootstrapObject.SetActive(false);
+            var roots = new List<GameObject>();
+            var behaviors = new List<RatHabitatBehavior>();
+            try
+            {
+                RatPresenter presenter = presenterObject.AddComponent<RatPresenter>();
+                Dictionary<string, GameObject> ratRoots = GetPrivateField<Dictionary<string, GameObject>>(presenter, "ratRoots");
+                Dictionary<string, RatHabitatBehavior> behaviorMap = GetPrivateField<Dictionary<string, RatHabitatBehavior>>(presenter, "behaviors");
+                Dictionary<string, RatData> liveRats = GetPrivateField<Dictionary<string, RatData>>(presenter, "liveRats");
+                Vector3 nestPosition = EnclosureSystem.GetNestCaregiverPosition(RatEnclosure.Pairing);
+                for (int index = 0; index < mothers.Count; index++)
+                {
+                    RatData mother = mothers[index];
+                    var root = new GameObject("Birth Queue Mother " + index);
+                    roots.Add(root);
+                    root.transform.SetParent(presenterObject.transform, false);
+                    root.transform.position = index == 0
+                        ? nestPosition
+                        : nestPosition + new Vector3(index * 1.5f, 0f, 0f);
+                    RatHabitatBehavior behavior = root.AddComponent<RatHabitatBehavior>();
+                    behavior.Configure(null, mother);
+                    behaviors.Add(behavior);
+                    ratRoots[mother.id] = root;
+                    behaviorMap[mother.id] = behavior;
+                    liveRats[mother.id] = mother;
+                }
+
+                GameBootstrap bootstrap = bootstrapObject.AddComponent<GameBootstrap>();
+                SetPrivateField(bootstrap, "<Save>k__BackingField", save);
+                SetPrivateField(bootstrap, "rats", presenter);
+
+                // Restore the missing historical parent only after the first
+                // transaction fails, making that failure transient and
+                // allowing the same pregnancy to complete on retry.
+                LogAssert.Expect(LogType.Warning,
+                    "[Rat Habitat] Birth retry " + pregnancies[0].id + ": Parent records are missing.");
+                LogAssert.Expect(LogType.Warning,
+                    "[Rat Habitat] FinishPregnancyForBatch failed | pregnancyId=" + pregnancies[0].id +
+                    " | motherId=" + firstMother.id + " | tank=Pairing Tank | reason=Parent records are missing.");
+                MethodInfo process = typeof(GameBootstrap).GetMethod(
+                    "ProcessDuePregnanciesAtNest", BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert.IsNotNull(process);
+                object[] arguments = { null, false };
+                int births = (int)process.Invoke(bootstrap, arguments);
+
+                Assert.AreEqual(0, births);
+                Assert.AreEqual(0, ((List<LitterData>)arguments[0]).Count,
+                    "A failed transaction must not be returned for pinkie presentation creation.");
+                Assert.AreEqual("pending", pregnancies[0].status,
+                    "A failed birth keeps its authoritative pregnancy for retry.");
+                Assert.AreEqual(1, pregnancies[0].birthAttemptCount,
+                    "The failed pregnancy must reach the actual birth transaction.");
+                Assert.IsTrue(pregnancies[0].birthWaitingForNest,
+                    "The failed transaction is exposed as an explicit safe waiting state.");
+                Assert.IsTrue(pregnancies[0].birthApproachStarted,
+                    "The persisted approach must remain active while its mother waits at the nest.");
+                Assert.IsTrue(behaviors[0].BirthApproachActive);
+                Assert.IsTrue(behaviors[0].BirthApproachAtNest);
+                Assert.AreEqual(nestPosition, roots[0].transform.position,
+                    "A failed transaction must not send the mother back to wandering.");
+                Assert.AreEqual(0, save.litters.Count);
+                Assert.AreEqual(3, save.rats.Count,
+                    "No pups are created by the failed transaction.");
+                Assert.IsTrue(GetPrivateField<BirthQueueReservations>(bootstrap, "birthQueueReservations")
+                    .IsReservedBy(RatEnclosure.Pairing, firstMother.id),
+                    "The failed mother retains the only nest approach reservation.");
+                Assert.IsFalse(behaviors[1].BirthApproachActive);
+                Assert.IsFalse(behaviors[2].BirthApproachActive,
+                    "Later mothers must remain queued until the current birth commits.");
+
+                MethodInfo refreshActivities = typeof(GameBootstrap).GetMethod(
+                    "RefreshRatActivities", BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert.IsNotNull(refreshActivities);
+                refreshActivities.Invoke(bootstrap, null);
+                Assert.AreEqual("Waiting to give birth", bootstrap.CurrentRatActivityLabel(firstMother),
+                    "An unrelated activity refresh must not erase the explicit waiting state.");
+                Assert.IsTrue(behaviors[0].BirthApproachActive);
+                Assert.AreEqual(nestPosition, roots[0].transform.position);
+
+                save.rats.Add(sharedFather);
+                save.ratIds.Add(sharedFather.id);
+                BreedingSystem.InvalidateReproductiveStateIndexes(save);
+                GetPrivateField<Dictionary<string, float>>(bootstrap, "birthRetryAfterRealtime")[pregnancies[0].id] =
+                    Time.unscaledTime - 1f;
+
+                arguments = new object[] { null, false };
+                births = (int)process.Invoke(bootstrap, arguments);
+                Assert.AreEqual(1, births,
+                    "After the transient parent-record issue is repaired, the first birth commits before queue advance.");
+                Assert.AreEqual(1, ((List<LitterData>)arguments[0]).Count,
+                    "Only the committed litter is returned for the subsequent presentation pass.");
+                Assert.AreEqual("finished", pregnancies[0].status);
+                Assert.IsFalse(pregnancies[0].birthApproachStarted);
+                Assert.IsFalse(pregnancies[0].birthWaitingForNest);
+                Assert.AreEqual(1, save.litters.Count);
+                Assert.AreEqual(3, save.litters[0].pupIds.Count);
+                foreach (string pupId in save.litters[0].pupIds)
+                    Assert.IsNotNull(BreedingSystem.FindRat(save, pupId),
+                        "Every successful birth must create a live pinkie record.");
+                Assert.IsTrue(behaviors[1].BirthApproachActive,
+                    "Only after the first transaction succeeds may the next mother approach.");
+
+                for (int index = 1; index < mothers.Count; index++)
+                {
+                    roots[index].transform.position = nestPosition;
+                    Assert.IsTrue(behaviors[index].BeginBirthApproach(nestPosition));
+                    Assert.IsTrue(behaviors[index].BirthApproachAtNest);
+                    arguments = new object[] { null, false };
+                    births = (int)process.Invoke(bootstrap, arguments);
+                    Assert.AreEqual(1, births,
+                        "Each queued mother must reach and complete the birth transaction in turn.");
+                    Assert.AreEqual("finished", pregnancies[index].status);
+                    Assert.AreEqual(1, pregnancies[index].birthAttemptCount);
+                    Assert.IsFalse(pregnancies[index].birthApproachStarted);
+                    Assert.IsFalse(pregnancies[index].birthWaitingForNest);
+                    Assert.AreEqual(index + 1, save.litters.Count);
+                    Assert.AreEqual(pregnancies[index].expectedLitterSize,
+                        save.litters[index].pupIds.Count);
+                }
+
+                Assert.AreEqual(3, GetPrivateField<int>(bootstrap, "birthQueueSuccessfulBirths"));
+                for (int index = 0; index < pregnancies.Count; index++)
+                {
+                    Assert.AreEqual("finished", pregnancies[index].status);
+                    Assert.IsFalse(pregnancies[index].birthApproachStarted,
+                        "No completed pregnancy remains stuck in birth-approach state.");
+                    Assert.AreEqual(pregnancies[index].expectedLitterSize,
+                        save.litters.Find(litter => litter.id == pregnancies[index].litterId).pupIds.Count);
+                }
+            }
+            finally
+            {
+                Object.DestroyImmediate(bootstrapObject);
+                Object.DestroyImmediate(presenterObject);
+                for (int index = 0; index < roots.Count; index++)
+                    if (roots[index] != null) Object.DestroyImmediate(roots[index]);
+            }
+        }
+
+        [Test]
         public void StoreMarketAndSellListingsUseIndependentScrollableViewports()
         {
             bool previousIgnoreFailingMessages = LogAssert.ignoreFailingMessages;
@@ -1314,6 +1975,244 @@ namespace RatHabitat.Tests
                 Object.DestroyImmediate(gameObject);
                 Object.DestroyImmediate(canvasObject);
                 Object.DestroyImmediate(eventSystemObject);
+            }
+        }
+
+        [Test]
+        public void StorePortraitRowsRetryMissingFactoryAndHideUnrenderedTargets()
+        {
+            bool previousIgnoreFailingMessages = LogAssert.ignoreFailingMessages;
+            var uiObject = new GameObject("Store Portrait Retry UI", typeof(RectTransform));
+            var factoryObject = new GameObject("Store Portrait Retry Factory");
+            try
+            {
+                LogAssert.ignoreFailingMessages = true;
+                VerticalSliceUI ui = uiObject.AddComponent<VerticalSliceUI>();
+                RatPortraitPreview preview = uiObject.AddComponent<RatPortraitPreview>();
+                RatVisualFactory factory = factoryObject.AddComponent<RatVisualFactory>();
+                factory.handPaintedRatPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(
+                    "Assets/Prefabs/HandPaintedRat/HandPaintedRat.prefab");
+                Assert.IsNotNull(factory.handPaintedRatPrefab);
+
+                var portraitObject = new GameObject("Deferred Store Portrait",
+                    typeof(RectTransform), typeof(RawImage));
+                portraitObject.transform.SetParent(uiObject.transform, false);
+                RawImage image = portraitObject.GetComponent<RawImage>();
+                RatData rat = ColonyFactory.CreateRat(
+                    "store-portrait-retry", "Portrait Retry", RatSex.Female, 0L, 0,
+                    GeneticsSystem.CreateFounder("B", "B", "C", "C", "D", "D", "s", "s"),
+                    new TraitData(50f, 50f, 50f), RatStage.Adult);
+
+                Type rowType = typeof(VerticalSliceUI).GetNestedType(
+                    "StorePurchaseRowView", BindingFlags.NonPublic);
+                Assert.IsNotNull(rowType);
+                object row = Activator.CreateInstance(rowType, true);
+                rowType.GetField("portrait", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                    .SetValue(row, image);
+                rowType.GetField("portraitRat", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                    .SetValue(row, rat);
+                var rows = (System.Collections.IList)typeof(VerticalSliceUI).GetField(
+                    "storePurchaseRows", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(ui);
+                rows.Add(row);
+
+                SetPrivateField(ui, "portraitPreview", preview);
+                SetPrivateField(ui, "activeMainPanel", Enum.Parse(
+                    typeof(VerticalSliceUI).GetNestedType("MainPanel", BindingFlags.NonPublic), "Store"));
+                SetPrivateField(ui, "storeCategory", Enum.Parse(
+                    typeof(VerticalSliceUI).GetNestedType("StoreCategory", BindingFlags.NonPublic), "Buy"));
+                SetPrivateField(ui, "missingStorePortraitRetryTimer", -1f);
+
+                var retry = typeof(VerticalSliceUI).GetMethod(
+                    "RetryMissingStorePortraits", BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert.IsNotNull(retry);
+                retry.Invoke(ui, null);
+                Assert.IsNull(image.texture,
+                    "A request made before the preview factory is configured should remain retryable.");
+                Assert.AreEqual(new Color(0.10f, 0.18f, 0.17f, 1f), image.color,
+                    "An unavailable portrait must not display RawImage's white null-texture box.");
+
+                preview.Configure(factory);
+                SetPrivateField(ui, "missingStorePortraitRetryTimer", -1f);
+                retry.Invoke(ui, null);
+                Assert.IsInstanceOf<RenderTexture>(image.texture,
+                    "The row should recover its portrait once the presentation factory is ready.");
+                Assert.IsTrue(preview.IsPortraitRendered(image.texture),
+                    "The recovered target should have completed its first portrait render.");
+                Assert.AreEqual(Color.white, image.color);
+            }
+            finally
+            {
+                LogAssert.ignoreFailingMessages = previousIgnoreFailingMessages;
+                Object.DestroyImmediate(uiObject);
+                Object.DestroyImmediate(factoryObject);
+            }
+        }
+
+        [Test]
+        public void MaximumUpgradedStoreRestockReusesRowsAndDoesNotQueueRepeatedSaves()
+        {
+            bool previousIgnoreFailingMessages = LogAssert.ignoreFailingMessages;
+            var gameObject = new GameObject("Large Store Restock Test Game");
+            var canvasObject = new GameObject("Large Store Restock Test Canvas",
+                typeof(RectTransform), typeof(Canvas), typeof(GraphicRaycaster));
+            try
+            {
+                LogAssert.ignoreFailingMessages = true;
+                gameObject.SetActive(false);
+                GameBootstrap game = gameObject.AddComponent<GameBootstrap>();
+                ColonySaveData save = ColonyFactory.CreateNew(1000000L);
+                save.colonyCredits = 1000000;
+                // Store capacity has no configured ceiling. Exercise a large
+                // upgraded market (64 slots) without changing the +1/upgrade rule.
+                save.storeQualityUpgradeLevel = 62;
+                StoreSystem.RestockNowWithResult(save, save.clock.gameTimeMs);
+                Assert.AreEqual(64, save.storeRatListings.Count);
+                typeof(GameBootstrap).GetProperty("Save").GetSetMethod(true)
+                    .Invoke(game, new object[] { save });
+
+                Canvas canvas = canvasObject.GetComponent<Canvas>();
+                canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+                RectTransform canvasRect = canvasObject.GetComponent<RectTransform>();
+                canvasRect.sizeDelta = new Vector2(540f, 960f);
+                var pageObject = new GameObject("Large Store Test Page",
+                    typeof(RectTransform), typeof(ScrollRect));
+                pageObject.transform.SetParent(canvasObject.transform, false);
+                RectTransform pageRect = pageObject.GetComponent<RectTransform>();
+                pageRect.anchorMin = Vector2.zero;
+                pageRect.anchorMax = Vector2.one;
+                pageRect.offsetMin = Vector2.zero;
+                pageRect.offsetMax = new Vector2(0f, -154f);
+                ScrollRect pageScroll = pageObject.GetComponent<ScrollRect>();
+                var viewportObject = new GameObject("Large Store Page Viewport",
+                    typeof(RectTransform), typeof(Image), typeof(RectMask2D));
+                viewportObject.transform.SetParent(pageObject.transform, false);
+                RectTransform pageViewport = viewportObject.GetComponent<RectTransform>();
+                pageViewport.anchorMin = Vector2.zero;
+                pageViewport.anchorMax = Vector2.one;
+                pageViewport.offsetMin = Vector2.zero;
+                pageViewport.offsetMax = Vector2.zero;
+                var contentObject = new GameObject("Large Store Page Content",
+                    typeof(RectTransform), typeof(VerticalLayoutGroup), typeof(ContentSizeFitter));
+                contentObject.transform.SetParent(pageViewport, false);
+                RectTransform pageContent = contentObject.GetComponent<RectTransform>();
+                pageContent.anchorMin = new Vector2(0f, 1f);
+                pageContent.anchorMax = new Vector2(1f, 1f);
+                pageContent.pivot = new Vector2(0.5f, 1f);
+                pageContent.sizeDelta = Vector2.zero;
+                VerticalLayoutGroup pageLayout = contentObject.GetComponent<VerticalLayoutGroup>();
+                pageLayout.childControlWidth = true;
+                pageLayout.childControlHeight = true;
+                pageLayout.childForceExpandWidth = true;
+                pageLayout.childForceExpandHeight = false;
+                contentObject.GetComponent<ContentSizeFitter>().verticalFit =
+                    ContentSizeFitter.FitMode.PreferredSize;
+                pageScroll.viewport = pageViewport;
+                pageScroll.content = pageContent;
+                pageScroll.vertical = true;
+
+                VerticalSliceUI ui = canvasObject.AddComponent<VerticalSliceUI>();
+                SetPrivateField(ui, "game", game);
+                SetPrivateField(ui, "content", pageContent);
+                SetPrivateField(ui, "pageScroll", pageScroll);
+                SetPrivateField(ui, "activeMainPanel", Enum.Parse(
+                    typeof(VerticalSliceUI).GetNestedType("MainPanel",
+                        System.Reflection.BindingFlags.NonPublic), "Store"));
+                SetPrivateField(game, "ui", ui);
+                // This layout test focuses on row reuse; portrait preview work
+                // is separately scheduled one visual at a time in play mode.
+                SetPrivateField<RatPortraitPreview>(ui, "portraitPreview", null);
+                typeof(VerticalSliceUI).GetMethod("RebuildContent",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                    .Invoke(ui, null);
+                Canvas.ForceUpdateCanvases();
+                LayoutRebuilder.ForceRebuildLayoutImmediate(pageContent);
+                Canvas.ForceUpdateCanvases();
+                SetPrivateField(ui, "ready", true);
+
+                ScrollRect initialScroll = GetPrivateField<ScrollRect>(ui, "storeRatListScroll");
+                RectTransform listContent = initialScroll.content;
+                Assert.AreEqual(64, listContent.childCount);
+                var originalRows = new GameObject[listContent.childCount];
+                for (int index = 0; index < originalRows.Length; index++)
+                    originalRows[index] = listContent.GetChild(index).gameObject;
+                int rowsCreatedBefore = GetPrivateField<int>(ui, "storePurchaseRowCreateCount");
+                int rowsUpdatedBefore = GetPrivateField<int>(ui, "storePurchaseRowUpdateCount");
+                int pendingSaveRequestsBefore = SaveSystem.PendingSaveRequestCount;
+
+                StoreSystem.RestockNowWithResult(save,
+                    save.clock.gameTimeMs + GameConfig.StoreRestockIntervalGameMs);
+                Assert.AreEqual(64, save.storeRatListings.Count,
+                    "A restock must preserve the fully upgraded listing capacity.");
+                Assert.AreEqual(64, new HashSet<string>(
+                    save.storeRatListings.ConvertAll(listing => listing.id), StringComparer.Ordinal).Count,
+                    "Restocking must not duplicate listing IDs.");
+                Assert.AreEqual(64, new HashSet<string>(
+                    save.storeRatListings.ConvertAll(listing => listing.name),
+                    StringComparer.OrdinalIgnoreCase).Count,
+                    "Batched name allocation must still keep each restock listing unique.");
+                ui.Refresh(true);
+                Canvas.ForceUpdateCanvases();
+
+                ScrollRect refreshedScroll = GetPrivateField<ScrollRect>(ui, "storeRatListScroll");
+                Assert.AreSame(initialScroll, refreshedScroll,
+                    "A restock must not rebuild the Store page or replace its ScrollRect.");
+                Assert.AreSame(listContent, refreshedScroll.content,
+                    "The market list content root should be reused across restocks.");
+                Assert.AreEqual(64, refreshedScroll.content.childCount);
+                for (int index = 0; index < originalRows.Length; index++)
+                    Assert.AreSame(originalRows[index], refreshedScroll.content.GetChild(index).gameObject,
+                        "Existing listing row roots should be recycled by slot.");
+                Assert.AreEqual(rowsCreatedBefore,
+                    GetPrivateField<int>(ui, "storePurchaseRowCreateCount"),
+                    "A same-capacity restock must not create duplicate listing rows or visual slots.");
+                Assert.IsTrue(GetPrivateField<bool>(ui, "storePurchaseRowRefreshPending"),
+                    "Large listing refreshes should be spread over later frames.");
+                var processBatch = typeof(VerticalSliceUI).GetMethod(
+                    "ProcessStorePurchaseRowsRefresh",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Assert.IsNotNull(processBatch);
+                int updatesThisBatch = GetPrivateField<int>(ui, "storePurchaseRowUpdateCount") -
+                    rowsUpdatedBefore;
+                Assert.LessOrEqual(updatesThisBatch, 8,
+                    "The initial listing refresh batch must stay within the per-frame work budget.");
+                Dictionary<string, Button> purchaseButtons = GetPrivateField<Dictionary<string, Button>>(
+                    ui, "storePurchaseButtons");
+                foreach (Button button in purchaseButtons.Values)
+                    Assert.IsFalse(button.interactable,
+                        "Purchase buttons must remain disabled while listing rows are only partially refreshed.");
+                typeof(VerticalSliceUI).GetMethod("RefreshLiveStorePurchaseButtons",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                    .Invoke(ui, null);
+                foreach (Button button in purchaseButtons.Values)
+                    Assert.IsFalse(button.interactable,
+                        "Wallet refreshes must not re-enable stale listing rows during a batched refresh.");
+
+                while (GetPrivateField<bool>(ui, "storePurchaseRowRefreshPending"))
+                {
+                    int previousUpdates = GetPrivateField<int>(ui, "storePurchaseRowUpdateCount");
+                    processBatch.Invoke(ui, null);
+                    updatesThisBatch = GetPrivateField<int>(ui, "storePurchaseRowUpdateCount") - previousUpdates;
+                    Assert.LessOrEqual(updatesThisBatch, 8,
+                        "No rendered frame may update more than eight market listing rows.");
+                }
+                Assert.AreEqual(64,
+                    GetPrivateField<int>(ui, "storePurchaseRowUpdateCount") - rowsUpdatedBefore,
+                    "Every row should be updated exactly once across the bounded refresh batches.");
+                foreach (KeyValuePair<string, Button> entry in purchaseButtons)
+                {
+                    StoreRatListingData listing = StoreSystem.FindListing(save, entry.Key);
+                    Assert.IsNotNull(listing, "Every visible purchase button must reference a current listing.");
+                    Assert.AreEqual(save.colonyCredits >= listing.price, entry.Value.interactable,
+                        "Buttons should return to their correct affordability state after reconciliation.");
+                }
+                Assert.AreEqual(pendingSaveRequestsBefore, SaveSystem.PendingSaveRequestCount,
+                    "Rendering and reconciling the refreshed market must not issue saves.");
+            }
+            finally
+            {
+                LogAssert.ignoreFailingMessages = previousIgnoreFailingMessages;
+                Object.DestroyImmediate(gameObject);
+                Object.DestroyImmediate(canvasObject);
             }
         }
 
@@ -2419,6 +3318,8 @@ namespace RatHabitat.Tests
                 Assert.AreEqual("finished", pregnancy.status);
                 Assert.IsNotNull(litter);
                 Assert.AreEqual(1, litter.pupIds.Count);
+                Assert.AreEqual(litter.id, mother.nursingLitterId,
+                    "The mother retains the litter identity used to stay beside her pinkies.");
 
                 // These are the final pieces the live caller adds after the
                 // pregnancy transaction and before its single batch commit.
@@ -2435,6 +3336,10 @@ namespace RatHabitat.Tests
                 Assert.AreEqual(1, saveCount,
                     "A complete birth batch serializes the full colony exactly once.");
                 ColonySaveData restored = SaveSystem.FromJson(persistedJson);
+                RatData restoredMother = BreedingSystem.FindRat(restored, mother.id);
+                Assert.IsNotNull(restoredMother);
+                Assert.AreEqual(litter.id, restoredMother.nursingLitterId,
+                    "The family-to-litter presentation link survives save/load.");
                 PregnancyData restoredPregnancy = restored.pregnancies.Find(item =>
                     item != null && item.id == pregnancy.id);
                 Assert.IsNotNull(restoredPregnancy);
@@ -2454,6 +3359,60 @@ namespace RatHabitat.Tests
                 SaveSystem.SaveInterceptorForTests = priorSaveInterceptor;
                 SaveSystem.ClearPendingSaveQueueForTests();
             }
+        }
+
+        [Test]
+        public void BirthCompletesWithAutomaticallySoldFatherAndPreservesHisRetiredHistory()
+        {
+            const long gameTime = 2500000L;
+            ColonySaveData save = ColonyFactory.CreateNew(gameTime);
+            RatData mother = save.rats.Find(rat => rat != null && rat.sex == RatSex.Female);
+            RatData father = save.rats.Find(rat => rat != null && rat.sex == RatSex.Male);
+            PrepareStarterPairForBreeding(save, gameTime, false);
+
+            Assert.IsTrue(BreedingSystem.StartBreeding(
+                save, mother, father, gameTime, out PregnancyData pregnancy, out string reason), reason);
+            pregnancy.expectedLitterSize = 2;
+            pregnancy.dueAt = gameTime;
+
+            Assert.IsTrue(save.rats.Remove(father));
+            save.ratIds.Remove(father.id);
+            father.removalDisposition = RatRemovalDisposition.Sold;
+            father.removedAt = gameTime - GameConfig.GameDayMs;
+            father.pregnancyId = pregnancy.id;
+            father.reproductiveState = ReproductiveState.Infertile;
+            RatActivitySystem.SetCurrent(save, father, "sold", "Sold", father.removedAt,
+                "Automatically sold");
+            save.retiredRats.Add(father);
+            BreedingSystem.InvalidateReproductiveStateIndexes(save);
+
+            Assert.IsNull(BreedingSystem.FindRat(save, father.id),
+                "The sold father must no longer be an active colony rat.");
+            Assert.AreSame(father, BreedingSystem.FindHistoricalRat(save, father.id),
+                "The lineage record remains available in retired history.");
+
+            Assert.IsTrue(BreedingSystem.FinishPregnancyForBatch(
+                save, pregnancy.id, gameTime, out LitterData litter, out reason), reason);
+
+            Assert.AreEqual("finished", pregnancy.status);
+            Assert.IsNotNull(litter);
+            Assert.AreEqual(mother.id, litter.motherId);
+            Assert.AreEqual(father.id, litter.fatherId);
+            Assert.AreEqual(2, litter.pupIds.Count);
+            foreach (string pupId in litter.pupIds)
+            {
+                RatData pup = BreedingSystem.FindRat(save, pupId);
+                Assert.IsNotNull(pup);
+                Assert.AreEqual(mother.id, pup.motherId);
+                Assert.AreEqual(father.id, pup.fatherId);
+            }
+            Assert.AreSame(father, BreedingSystem.FindHistoricalRat(save, father.id));
+            Assert.AreEqual(RatRemovalDisposition.Sold, father.removalDisposition);
+            Assert.AreEqual("Sold", RatActivitySystem.CurrentLabel(save, father, gameTime));
+            Assert.AreEqual(ReproductiveState.Infertile, father.reproductiveState,
+                "Completing his historical litter must not make a sold rat fertile again.");
+            Assert.IsNull(father.pregnancyId,
+                "The retired father's stale link to the now-finished pregnancy must be cleared.");
         }
 
         [Test]
@@ -2762,6 +3721,244 @@ namespace RatHabitat.Tests
                 GrowthSystem.SetBehaviorParticipantCount(1);
                 GrowthSystem.SetRuntimeSpeed(1f);
                 GrowthSystem.SetSimulationPaused(false);
+            }
+        }
+
+        [Test]
+        public void ThreeXVisibleMovementCapLeavesOneXAndTwoXUnchanged()
+        {
+            const float baseSpeed = 0.75f;
+            const float realDelta = 1f / 60f;
+            try
+            {
+                for (int speedIndex = 0; speedIndex < 3; speedIndex++)
+                {
+                    float speed = speedIndex + 1f;
+                    GrowthSystem.SetRuntimeSpeed(speed);
+                    float simulationDelta = GrowthSystem.SimulationMovementDeltaSeconds(realDelta);
+                    float movementTimeBudget = GrowthSystem.SimulationMovementTimeBudget(simulationDelta);
+                    float visibleDistanceBudget = GrowthSystem.SimulationVisibleMovementDistanceBudget(realDelta);
+                    float distance = GrowthSystem.SimulationMovementStep(
+                        baseSpeed, simulationDelta, ref movementTimeBudget, ref visibleDistanceBudget);
+                    float expected = baseSpeed * simulationDelta;
+                    if (speed < 3f)
+                        Assert.AreEqual(expected, distance, 0.00001f,
+                            speed + "x must retain its existing exact calendar-scaled movement.");
+                    else
+                    {
+                        Assert.AreEqual(GrowthSystem.MaximumThreeXVisibleMovementUnitsPerSecond * realDelta,
+                            distance, 0.00001f,
+                            "Only 3x visible movement is spatially bounded; the calendar delta remains unmodified.");
+                        Assert.AreEqual(1440f, GrowthSystem.SimulationMultiplierForSpeed(speed), 0.001f);
+                    }
+                }
+            }
+            finally
+            {
+                GrowthSystem.SetRuntimeSpeed(1f);
+                GrowthSystem.SetSimulationPaused(false);
+            }
+        }
+
+        [Test]
+        public void EightyFourAdultRatsAtThreeXKeepBoundedMovementAndSpacing()
+        {
+            const int adultCount = 84;
+            const int frameCount = 180;
+            const float realFrameSeconds = 1f / 60f;
+            GameObject[] roots = new GameObject[adultCount];
+            RatHabitatBehavior[] behaviors = new RatHabitatBehavior[adultCount];
+            float[] distanceByRat = new float[adultCount];
+            HashSet<Vector2Int> initialTargetCells = new HashSet<Vector2Int>();
+            int[] initialDirectionCounts = new int[8];
+            float minimumDecisionPhase = float.MaxValue;
+            float maximumDecisionPhase = float.MinValue;
+            int totalBlockedRecoveries = 0;
+            GameObject builderRoot = new GameObject("84-rat movement stress habitat");
+            HabitatBuilder builder = builderRoot.AddComponent<HabitatBuilder>();
+            MethodInfo updateCore = typeof(RatHabitatBehavior).GetMethod("UpdateCore",
+                BindingFlags.Instance | BindingFlags.NonPublic, null,
+                new[] { typeof(float) }, null);
+            MethodInfo lateUpdateCore = typeof(RatHabitatBehavior).GetMethod("LateUpdateCore",
+                BindingFlags.Instance | BindingFlags.NonPublic, null,
+                new[] { typeof(float) }, null);
+            Assert.IsNotNull(updateCore);
+            Assert.IsNotNull(lateUpdateCore);
+
+            try
+            {
+                GrowthSystem.SetSimulationPaused(false);
+                GrowthSystem.SetRuntimeSpeed(3f);
+                GrowthSystem.SetBehaviorParticipantCount(adultCount);
+                Vector3 sharedStart = EnclosureSystem.PointInEnclosure(
+                    RatEnclosure.FemaleColony, -4f, 0f, 0.45f);
+                Assert.IsFalse(EnclosureSystem.IsInsideAdultNestExclusion(
+                    RatEnclosure.FemaleColony, sharedStart));
+
+                for (int index = 0; index < adultCount; index++)
+                {
+                    RatData rat = ColonyFactory.CreateRat(
+                        "speed-clump-rat-" + index,
+                        "Stress Rat " + index,
+                        RatSex.Female,
+                        GameConfig.StartGameTimeMs - 120L * 24L * 60L * 60L * 1000L,
+                        0,
+                        new GenotypeData(),
+                        new TraitData { size = 50f, health = 80f, fertility = 50f },
+                        RatStage.Adult);
+                    rat.enclosure = RatEnclosure.FemaleColony;
+                    roots[index] = new GameObject("84-rat stress root " + index);
+                    roots[index].transform.position = sharedStart;
+                    behaviors[index] = roots[index].AddComponent<RatHabitatBehavior>();
+                    behaviors[index].Configure(builder, rat);
+
+                    Vector3 target = behaviors[index].MovementTargetPositionForDiagnostics;
+                    Assert.IsTrue(EnclosureSystem.IsInside(RatEnclosure.FemaleColony, target, 0.48f),
+                        "Selected ambient goals must remain on the valid tank floor.");
+                    Assert.IsFalse(EnclosureSystem.IsInsideAdultNestExclusion(
+                        RatEnclosure.FemaleColony, target, 0.02f),
+                        "Ambient goals must continue to avoid the nest footprint.");
+                    initialTargetCells.Add(new Vector2Int(
+                        Mathf.RoundToInt(target.x * 2f), Mathf.RoundToInt(target.z * 2f)));
+                    float direction = Mathf.Atan2(target.z - sharedStart.z, target.x - sharedStart.x);
+                    if (direction < 0f) direction += Mathf.PI * 2f;
+                    int directionBucket = Mathf.Clamp(
+                        Mathf.FloorToInt(direction * (8f / (Mathf.PI * 2f))), 0, 7);
+                    initialDirectionCounts[directionBucket]++;
+                    minimumDecisionPhase = Mathf.Min(minimumDecisionPhase,
+                        behaviors[index].MovementDecisionPhaseSeconds);
+                    maximumDecisionPhase = Mathf.Max(maximumDecisionPhase,
+                        behaviors[index].MovementDecisionPhaseSeconds);
+                    Assert.IsTrue(behaviors[index].HasAmbientTargetReservation,
+                        "Every ambient movement destination should be registered for crowd-aware selection.");
+                    Assert.LessOrEqual(behaviors[index].AmbientTargetCellCrowdForDiagnostics, 3,
+                        "A candidate cell already at its approach limit must be rejected.");
+                }
+
+                int usedDirectionBuckets = 0;
+                int largestDirectionBucket = 0;
+                for (int index = 0; index < initialDirectionCounts.Length; index++)
+                {
+                    if (initialDirectionCounts[index] > 0) usedDirectionBuckets++;
+                    largestDirectionBucket = Mathf.Max(largestDirectionBucket, initialDirectionCounts[index]);
+                }
+                Assert.Greater(initialTargetCells.Count, adultCount * 0.40f,
+                    "At 3x, independently seeded rats should not share a small set of destinations.");
+                Assert.Greater(maximumDecisionPhase - minimumDecisionPhase, 0.6f,
+                    "Per-rat movement decision phases should be staggered.");
+                Assert.GreaterOrEqual(usedDirectionBuckets, 6,
+                    "The same-start stress case should fan out across multiple travel directions.");
+                Assert.Less(largestDirectionBucket, adultCount * 0.40f,
+                    "No single initial direction should dominate the colony movement.");
+
+                object[] deltaArgument = { realFrameSeconds };
+                for (int frame = 0; frame < frameCount; frame++)
+                {
+                    for (int index = 0; index < adultCount; index++)
+                    {
+                        Vector3 before = roots[index].transform.position;
+                        updateCore.Invoke(behaviors[index], deltaArgument);
+                        lateUpdateCore.Invoke(behaviors[index], deltaArgument);
+                        float moved = Vector3.Distance(before, roots[index].transform.position);
+                        distanceByRat[index] += moved;
+                        Assert.LessOrEqual(moved,
+                            GrowthSystem.MaximumThreeXVisibleMovementUnitsPerFrame + 0.001f,
+                            "One 3x frame must stay within the rat's safe visible movement budget.");
+                    }
+                }
+
+                float totalDistance = 0f;
+                float nearestNeighborTotal = 0f;
+                int movedAdults = 0;
+                int largestCloseGroup = 0;
+                float meanX = 0f;
+                float meanZ = 0f;
+                for (int index = 0; index < adultCount; index++)
+                {
+                    meanX += roots[index].transform.position.x;
+                    meanZ += roots[index].transform.position.z;
+                    totalDistance += distanceByRat[index];
+                    if (distanceByRat[index] > 0.5f) movedAdults++;
+                    totalBlockedRecoveries += behaviors[index].BlockedTargetRecoveryCount;
+
+                    float nearest = float.MaxValue;
+                    int closeGroup = 0;
+                    for (int otherIndex = 0; otherIndex < adultCount; otherIndex++)
+                    {
+                        if (otherIndex == index) continue;
+                        float distance = Vector3.Distance(
+                            roots[index].transform.position, roots[otherIndex].transform.position);
+                        if (distance < nearest) nearest = distance;
+                        if (distance < 0.15f) closeGroup++;
+                    }
+                    nearestNeighborTotal += nearest;
+                    largestCloseGroup = Mathf.Max(largestCloseGroup, closeGroup + 1);
+                }
+
+                meanX /= adultCount;
+                meanZ /= adultCount;
+                float covarianceXX = 0f;
+                float covarianceZZ = 0f;
+                float covarianceXZ = 0f;
+                for (int index = 0; index < adultCount; index++)
+                {
+                    Assert.IsTrue(EnclosureSystem.IsInside(RatEnclosure.FemaleColony,
+                        roots[index].transform.position, 0.48f),
+                        "Movement must remain within the active enclosure bounds.");
+                    Assert.IsFalse(EnclosureSystem.IsInsideAdultNestExclusion(
+                        RatEnclosure.FemaleColony, roots[index].transform.position, 0.02f),
+                        "Ambient movement must not enter the nest exclusion zone.");
+                    float dx = roots[index].transform.position.x - meanX;
+                    float dz = roots[index].transform.position.z - meanZ;
+                    covarianceXX += dx * dx;
+                    covarianceZZ += dz * dz;
+                    covarianceXZ += dx * dz;
+                }
+                float principalAngle = 0.5f * Mathf.Atan2(
+                    2f * covarianceXZ, covarianceXX - covarianceZZ);
+                Vector2 perpendicular = new Vector2(-Mathf.Sin(principalAngle), Mathf.Cos(principalAngle));
+                int ratsNearPrincipalLine = 0;
+                for (int index = 0; index < adultCount; index++)
+                {
+                    Vector2 offset = new Vector2(
+                        roots[index].transform.position.x - meanX,
+                        roots[index].transform.position.z - meanZ);
+                    if (Mathf.Abs(Vector2.Dot(offset, perpendicular)) < 0.42f)
+                        ratsNearPrincipalLine++;
+                }
+
+                float averageMovementSpeed = totalDistance /
+                    (adultCount * frameCount * realFrameSeconds);
+                float averageNearestNeighbor = nearestNeighborTotal / adultCount;
+                Assert.GreaterOrEqual(movedAdults, 72,
+                    "Most of the 84 adults must make measurable progress during the stress run.");
+                Assert.Greater(averageMovementSpeed, 2f,
+                    "The 3x safe visible movement target must not regress toward the old ~0.3 u/s clamp stall.");
+                Assert.LessOrEqual(18f / averageMovementSpeed, 6f,
+                    "Measured movement should remain reasonably close to the safe visible target, not hundreds of times slower.");
+                Assert.Greater(averageNearestNeighbor, 0.3f,
+                    "Spacing should recover instead of collapsing into a single group point.");
+                Assert.LessOrEqual(largestCloseGroup, 8,
+                    "No large group should remain stacked within a tiny region.");
+                Assert.Less(ratsNearPrincipalLine, adultCount * 0.42f,
+                    "The 3x colony should not collapse into one narrow diagonal travel line.");
+                Assert.Less(totalBlockedRecoveries, adultCount,
+                    "A rat should not repeatedly retry the same blocked boundary or nest route.");
+                for (int index = 0; index < adultCount; index++)
+                {
+                    Assert.LessOrEqual(behaviors[index].TargetWorldMovementSpeed,
+                        GrowthSystem.MaximumThreeXVisibleMovementUnitsPerSecond + 0.01f,
+                        "Diagnostics should report the bounded visible target, not the raw 1,440x calendar demand.");
+                }
+            }
+            finally
+            {
+                GrowthSystem.SetBehaviorParticipantCount(1);
+                GrowthSystem.SetRuntimeSpeed(1f);
+                GrowthSystem.SetSimulationPaused(false);
+                for (int index = 0; index < roots.Length; index++)
+                    if (roots[index] != null) Object.DestroyImmediate(roots[index]);
+                if (builderRoot != null) Object.DestroyImmediate(builderRoot);
             }
         }
 
@@ -3786,7 +4983,7 @@ namespace RatHabitat.Tests
         [Test]
         public void MarkingMutationRateIsSeparateDeterministicAndShownInBreedingPreview()
         {
-            Assert.AreEqual(0.05f, GameConfig.MarkingMutationRate, 0.000001f);
+            Assert.AreEqual(0.005f, GameConfig.MarkingMutationRate, 0.000001f);
             Assert.AreEqual(0.0025f, GameConfig.MutationRate, 0.000001f);
             Assert.AreEqual(GameConfig.MarkingMutationRate, GeneticsSystem.MutationRateForLocus("S"));
             Assert.AreEqual(GameConfig.MutationRate, GeneticsSystem.MutationRateForLocus("B"));
@@ -3804,6 +5001,11 @@ namespace RatHabitat.Tests
             GeneticsSystem.BreedingPreviewData preview = GeneticsSystem.BuildPreview(parentA, parentB);
             Assert.AreEqual(GameConfig.MarkingMutationRate, preview.sLocusMutationChance);
             Assert.AreEqual(GameConfig.MutationRate, preview.bcdMutationChance);
+            Assert.AreEqual(0.009975f, preview.solidParentSpontaneousMarkingChance, 0.0000001f,
+                "0.5% per inherited allele gives 0.9975% per solid-parent offspring, not 0.5% or 5%.");
+            Assert.AreEqual(0.15f, GameConfig.StoreFounderMarkingChance);
+            Assert.AreEqual(0.08f, GeneticsSystem.SecondaryMarkingInheritanceChance);
+            Assert.AreEqual(0.005f, GameConfig.SpontaneousHairlessChance);
 
             UnityEngine.Random.State previousRandomState = UnityEngine.Random.state;
             try
@@ -3814,19 +5016,25 @@ namespace RatHabitat.Tests
                     "The same random seed must reproduce the same inherited mutations.");
 
                 // Each B/C/D locus has two inherited alleles at 0.25%; S has
-                // two at 5%. These deterministic bounds distinguish the rates
+                // two at 0.5%. These deterministic bounds distinguish the rates
                 // without relying on an exact count from a random distribution.
                 Assert.That(firstRun[0], Is.InRange(35, 85), "B-locus mutation count");
                 Assert.That(firstRun[1], Is.InRange(35, 85), "C-locus mutation count");
                 Assert.That(firstRun[2], Is.InRange(35, 85), "D-locus mutation count");
-                Assert.That(firstRun[3], Is.InRange(1100, 1300), "S-locus mutation count");
+                Assert.That(firstRun[3], Is.InRange(85, 155),
+                    "24,000 inherited S alleles at 0.5% should average 120 mutations.");
 
                 RatData solidMother = new RatData { id = "solid-mother", genotype = solidGenotype.Clone(), markingFamily = "Solid" };
                 RatData solidFather = new RatData { id = "solid-father", genotype = solidGenotype.Clone(), markingFamily = "Self" };
+                const int solidParentOffspringCount = 50000;
                 int markedPups = CountSeededSpontaneouslyMarkedOffspring(
-                    solidMother, solidFather, 12000, 481516);
-                Assert.That(markedPups, Is.InRange(1050, 1300),
-                    "Solid s/s parents should produce visibly marked offspring at the configured non-guaranteed rate.");
+                    solidMother, solidFather, solidParentOffspringCount, 481516);
+                TestContext.WriteLine("Solid-parent marked offspring: {0}/{1} ({2:0.####}%). " +
+                    "S mutation records: {3}/24000 inherited alleles.", markedPups,
+                    solidParentOffspringCount, markedPups * 100d / solidParentOffspringCount, firstRun[3]);
+                // Expected 498.75; +/-75 is over three binomial standard deviations.
+                Assert.That(markedPups, Is.InRange(425, 575),
+                    "Solid s/s parents should produce about 1% marked offspring, with most remaining solid.");
 
                 GenotypeData inheritedMarked = GeneticsSystem.CreateFounder(
                     "B", "B", "C", "C", "D", "D", "S", "S");
@@ -3835,6 +5043,44 @@ namespace RatHabitat.Tests
                 Assert.AreEqual("Blaze", GeneticsSystem.ResolveOffspringMarkingFamily(
                     markedMother, markedFather, inheritedMarked.Clone(), "inherited-marking-test"),
                     "Existing marking inheritance must continue to preserve the parental marking family.");
+            }
+            finally
+            {
+                UnityEngine.Random.state = previousRandomState;
+            }
+        }
+
+        [TestCase("S", "s", "s", "s", 0.5025f)]
+        [TestCase("S", "s", "S", "s", 0.75f)]
+        [TestCase("S", "S", "s", "s", 0.995025f)]
+        public void MarkedParentInheritanceKeepsMendelianRulesWithRareAlleleMutation(
+            string m1, string m2, string f1, string f2, float expectedMarkedRate)
+        {
+            GenotypeData mother = GeneticsSystem.CreateFounder("B", "B", "C", "C", "D", "D", m1, m2);
+            GenotypeData father = GeneticsSystem.CreateFounder("B", "B", "C", "C", "D", "D", f1, f2);
+            var previousRandomState = UnityEngine.Random.state;
+            try
+            {
+                UnityEngine.Random.InitState(846201);
+                const int offspringCount = 20000;
+                int marked = 0;
+                for (int index = 0; index < offspringCount; index++)
+                {
+                    GenotypeData child = GeneticsSystem.InheritGenotype(mother, father, index + 1L);
+                    LocusData marking = GeneticsSystem.GetLocus(child, "S");
+                    if (marking.firstAllele == "S" || marking.secondAllele == "S") marked++;
+                }
+                // Expected Mendelian transmission plus the unchanged symmetric
+                // allele-mutation rule, now at p=.005: .5025, .75, .995025.
+                double expected = offspringCount * expectedMarkedRate;
+                double tolerance = 4d * Math.Sqrt(offspringCount * expectedMarkedRate * (1d-expectedMarkedRate));
+                Assert.That(marked, Is.InRange(expected-tolerance, expected+tolerance),
+                    "Marked parents must transmit existing S alleles normally, not use the solid-parent mutation rate.");
+                Assert.AreEqual(GeneticsSystem.FormatPair("S", m1, m2), GeneticsSystem.FormatPair(mother, "S"));
+                Assert.AreEqual(GeneticsSystem.FormatPair("S", f1, f2), GeneticsSystem.FormatPair(father, "S"));
+                TestContext.WriteLine("{0} x {1}: {2}/{3} marked ({4:0.####}%), expected {5:0.####}%.",
+                    GeneticsSystem.FormatPair(mother, "S"), GeneticsSystem.FormatPair(father, "S"),
+                    marked, offspringCount, marked * 100d / offspringCount, expectedMarkedRate * 100d);
             }
             finally
             {
@@ -3991,6 +5237,370 @@ namespace RatHabitat.Tests
             Assert.AreEqual(1, PairingHabitatSystem.DiagnosticsForSpeed(1f).checks);
             Assert.AreEqual(1, PairingHabitatSystem.DiagnosticsForSpeed(2f).checks);
             Assert.AreEqual(1, PairingHabitatSystem.DiagnosticsForSpeed(3f).checks);
+        }
+
+        [Test]
+        public void PairingApproachWatchdogsUseRealTimeAndTheSamePairCompletesAtEverySpeed()
+        {
+            PairingHabitatSystem.ResetDiagnostics();
+            const long startGameTime = 570000000L;
+            const long elapsedRealTimeMs = 2000L;
+            float[] speeds = { 1f, 2f, 3f };
+            bool previousPaused = GrowthSystem.SimulationPaused;
+            FieldInfo runtimeSpeedField = typeof(GrowthSystem).GetField(
+                "runtimeSimulationSpeed", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.IsNotNull(runtimeSpeedField);
+            float previousRuntimeSpeed = (float)runtimeSpeedField.GetValue(null);
+            MethodInfo advanceWatchdogs = typeof(GameBootstrap).GetMethod(
+                "AdvancePairingApproachWatchdogs", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.IsNotNull(advanceWatchdogs,
+                "The focused test must exercise the watchdog helper used by the runtime update.");
+
+            try
+            {
+                foreach (float speed in speeds)
+                {
+                    UnityEngine.Random.InitState(81273);
+                    GrowthSystem.SetSimulationPaused(false);
+                    GrowthSystem.SetRuntimeSpeed(speed);
+                    ColonySaveData save = CreatePairingTestSave(startGameTime, 100f);
+                    save.clock.speed = speed;
+                    long endGameTime = startGameTime + (long)(
+                        GrowthSystem.SimulationMillisecondsPerRealSecond(speed) *
+                        elapsedRealTimeMs / 1000d);
+                    RatData female = save.rats[0];
+                    RatData male = save.rats[1];
+                    RatData chosenMale;
+                    RatData chosenFemale;
+
+                    Assert.IsTrue(PairingHabitatSystem.TryChoosePair(
+                        save, startGameTime + 1L, endGameTime, speed,
+                        out chosenMale, out chosenFemale),
+                        "The same two-real-second pairing opportunity should be found at " + speed + "x.");
+                    Assert.AreSame(male, chosenMale);
+                    Assert.AreSame(female, chosenFemale);
+                    PairingHabitatSystem.RecordApproachStarted(speed);
+
+                    // Model a physically progressing approach across the same
+                    // two real seconds at every game speed. The runtime helper
+                    // consumes unscaled seconds; accelerated calendar time is
+                    // intentionally not passed to either watchdog.
+                    float approachTimeout = 18f;
+                    float stalledSeconds = 0f;
+                    const int approachFrames = 40;
+                    const float realFrameSeconds = 0.05f;
+                    for (int frame = 0; frame < approachFrames; frame++)
+                        AdvancePairingWatchdogsForTest(
+                            advanceWatchdogs, ref approachTimeout, ref stalledSeconds,
+                            realFrameSeconds, true, true);
+                    Assert.AreEqual(16f, approachTimeout, 0.0001f,
+                        "Approach timeout must burn two real seconds at " + speed + "x.");
+                    Assert.AreEqual(0f, stalledSeconds, 0.0001f,
+                        "World-space movement must reset the real-time stall timer at " + speed + "x.");
+
+                    float stalledTimeout = 18f;
+                    float stationarySeconds = 0f;
+                    for (int frame = 0; frame < 49; frame++)
+                        AdvancePairingWatchdogsForTest(
+                            advanceWatchdogs, ref stalledTimeout, ref stationarySeconds,
+                            realFrameSeconds, true, false);
+                    Assert.AreEqual(2.45f, stationarySeconds, 0.001f,
+                        "A blocked route accumulates wall-clock stall time, not accelerated game time.");
+                    AdvancePairingWatchdogsForTest(
+                        advanceWatchdogs, ref stalledTimeout, ref stationarySeconds,
+                        realFrameSeconds, true, false);
+                    Assert.That(stationarySeconds, Is.InRange(2.49f, 2.51f),
+                        "The stall threshold is reached only after about 2.5 real seconds at " + speed + "x.");
+
+                    string reason;
+                    bool usedCommittedWindow;
+                    Assert.IsTrue(BreedingSystem.IsBreedEligibleForCommittedPairingOpportunity(
+                        save, female, endGameTime, true, out reason, out usedCommittedWindow), reason);
+                    Assert.AreEqual(speed == 3f, usedCommittedWindow,
+                        "Only 3x advances beyond this 1-game-day fertile window during the simulated approach.");
+
+                    // The interaction completes after the same amount of game
+                    // time, while its watchdog advances only by the much
+                    // shorter real interval appropriate to the selected rate.
+                    PairingHabitatSystem.RecordInteractionStarted(speed);
+                    float interactionTimeout = 2.25f + 1.5f;
+                    float interactionStall = 0f;
+                    float realSecondsForInteraction = 2.25f /
+                        GrowthSystem.SimulationBehaviorDeltaSeconds(1f);
+                    AdvancePairingWatchdogsForTest(
+                        advanceWatchdogs, ref interactionTimeout, ref interactionStall,
+                        realSecondsForInteraction, false, false);
+                    Assert.Greater(interactionTimeout, 0f,
+                        "The game-time interaction must finish before its real-time watchdog at " + speed + "x.");
+                    PairingHabitatSystem.RecordInteractionCompleted(speed);
+
+                    // Resolve this exact male/female pair with identical seed
+                    // and chance. The 3x case reaches this roll even though
+                    // its original fertile window ended during the approach.
+                    UnityEngine.Random.InitState(81273);
+                    long resolutionGameTime = endGameTime + (long)Math.Round(
+                        GrowthSystem.SimulationMillisecondsPerRealSecond(speed) * realSecondsForInteraction);
+                    bool conceived;
+                    PregnancyData pregnancy;
+                    Assert.IsTrue(PairingHabitatSystem.ResolvePair(
+                        save, female, male, resolutionGameTime, 1f, true, speed,
+                        out conceived, out reason, out pregnancy), reason);
+                    Assert.IsTrue(conceived);
+                    Assert.IsNotNull(pregnancy);
+                }
+
+                foreach (float speed in speeds)
+                {
+                    PairingSpeedDiagnosticsSnapshot stats = PairingHabitatSystem.DiagnosticsForSpeed(speed);
+                    Assert.AreEqual(1, stats.checks, "One coalesced check at " + speed + "x.");
+                    Assert.AreEqual(1, stats.eligiblePairsFound, "One eligible pair at " + speed + "x.");
+                    Assert.AreEqual(1, stats.pairingAttempts, "One normal attempt at " + speed + "x.");
+                    Assert.AreEqual(1, stats.pairSelected, "The selected pair is attributed at " + speed + "x.");
+                    Assert.AreEqual(1, stats.approachStarted, "Approach reaches its runtime stage at " + speed + "x.");
+                    Assert.AreEqual(0, stats.approachCancelled, "No watchdog/route cancellation at " + speed + "x.");
+                    Assert.AreEqual(0, stats.routeFailures);
+                    Assert.AreEqual(1, stats.interactionStarted);
+                    Assert.AreEqual(1, stats.interactionCompleted);
+                    Assert.AreEqual(0, stats.interactionCancelled);
+                    Assert.AreEqual(1, stats.conceptionRolls, "Same conception stage reached at " + speed + "x.");
+                    Assert.AreEqual(1, stats.successfulConceptions, "The deterministic test roll succeeds at " + speed + "x.");
+                    Assert.AreEqual(0, stats.failedConceptionRolls);
+                    Assert.AreEqual(speed == 3f ? 1 : 0, stats.recoveredFertileWindows);
+                }
+            }
+            finally
+            {
+                GrowthSystem.SetRuntimeSpeed(previousRuntimeSpeed);
+                GrowthSystem.SetSimulationPaused(previousPaused);
+            }
+        }
+
+        [Test]
+        public void TenSimultaneousDueBirthsSerializeDeliveryApproachAndKeepFamiliesInNest()
+        {
+            const long now = 580000000L;
+            ColonySaveData save = CreatePairingTestSave(now, 100f);
+            RatData sharedFather = save.rats[1];
+            var genotype = GeneticsSystem.CreateFounder("B", "b", "C", "C", "D", "D", "s", "s");
+            var mothers = new List<RatData>();
+            var pregnancies = new List<PregnancyData>();
+
+            for (int index = 0; index < 10; index++)
+            {
+                RatData mother;
+                if (index == 0)
+                {
+                    mother = save.rats[0];
+                }
+                else
+                {
+                    mother = ColonyFactory.CreateRat(
+                        "queue-mother-" + index, "Queue Mother " + index, RatSex.Female,
+                        now - (100L * GameConfig.GameDayMs), 0, genotype.Clone(),
+                        new TraitData(75f, 80f, 90f), RatStage.Adult);
+                    mother.enclosure = RatEnclosure.Pairing;
+                    mother.pairingHabitatAssigned = true;
+                    mother.ageDays = 100f;
+                    mother.sexualMaturityDays = 70f;
+                    mother.breedingEndAgeDays = 700f;
+                    save.rats.Add(mother);
+                    save.ratIds.Add(mother.id);
+                }
+
+                PregnancyData pregnancy = new PregnancyData
+                {
+                    id = "due-pregnancy-" + index,
+                    motherId = mother.id,
+                    fatherId = sharedFather.id,
+                    startedAt = now - GameConfig.PregnancyMs,
+                    dueAt = now,
+                    gestationDurationMs = GameConfig.PregnancyMs,
+                    expectedLitterSize = 3,
+                    status = "pending",
+                };
+                mother.pregnancyId = pregnancy.id;
+                mother.reproductiveState = ReproductiveState.Pregnant;
+                save.pregnancies.Add(pregnancy);
+                mothers.Add(mother);
+                pregnancies.Add(pregnancy);
+            }
+            BreedingSystem.InvalidateReproductiveStateIndexes(save);
+
+            var reservations = new BirthQueueReservations();
+            int approaches = 0;
+            int waiting = 0;
+            for (int index = 0; index < pregnancies.Count; index++)
+            {
+                PregnancyData pregnancy = pregnancies[index];
+                if (reservations.TryReserve(RatEnclosure.Pairing, pregnancy.motherId))
+                {
+                    pregnancy.birthApproachStarted = true;
+                    approaches++;
+                }
+                else
+                {
+                    pregnancy.birthWaitingForNest = true;
+                    waiting++;
+                }
+            }
+
+            Assert.AreEqual(1, approaches, "Only one mother may use the shared delivery approach at a time.");
+            Assert.AreEqual(9, waiting, "All other due mothers remain safely queued.");
+            Assert.AreEqual(1, reservations.Count);
+            Assert.AreEqual("Going to give birth", RatActivitySystem.CurrentLabel(save, mothers[0], now));
+            for (int index = 1; index < mothers.Count; index++)
+                Assert.AreEqual("Waiting to give birth", RatActivitySystem.CurrentLabel(save, mothers[index], now));
+
+            // Model a timed-out route. The pregnancy is still pending, the
+            // stale approach flag is cleared, and the mother remains queued
+            // while its real-time retry cooldown elapses.
+            PregnancyData retryPregnancy = pregnancies[0];
+            retryPregnancy.birthApproachStarted = false;
+            retryPregnancy.birthApproachStartedAt = 0L;
+            retryPregnancy.birthWaitingForNest = true;
+            Assert.IsTrue(reservations.Release(RatEnclosure.Pairing, retryPregnancy.motherId));
+            Assert.AreEqual("pending", retryPregnancy.status);
+            Assert.IsFalse(retryPregnancy.birthApproachStarted,
+                "A route timeout must never leave the persisted approach flag stuck on.");
+
+            // Completed mothers remain in the Pairing Tank with their litters
+            // while the delivery approach is immediately reused by the next
+            // queued mother. The reservation serializes delivery only; it does
+            // not reserve the shared nest for one nursing family.
+            int successfulBeforeRetry = 0;
+            while (successfulBeforeRetry < 9)
+            {
+                Assert.IsTrue(reservations.TryGetOccupant(RatEnclosure.Pairing, out string activeMother));
+                PregnancyData activePregnancy = pregnancies.Find(item => item.motherId == activeMother);
+                Assert.IsNotNull(activePregnancy);
+                Assert.IsTrue(activePregnancy.birthApproachStarted);
+                Assert.IsFalse(activePregnancy.birthWaitingForNest);
+
+                activePregnancy.status = "finished";
+                RatData nursingMother = mothers.Find(item => item.id == activeMother);
+                nursingMother.nursing = true;
+                nursingMother.nursingLitterId = "litter-for-" + activeMother;
+                activePregnancy.birthApproachStarted = false;
+                activePregnancy.birthApproachStartedAt = 0L;
+                Assert.IsTrue(reservations.Release(RatEnclosure.Pairing, activeMother));
+                successfulBeforeRetry++;
+
+                PregnancyData next = pregnancies.Find(item => item != retryPregnancy &&
+                    item.status == "pending" && item.birthWaitingForNest);
+                Assert.IsNotNull(next, "A queued due pregnancy should automatically become the next owner.");
+                Assert.IsTrue(reservations.TryReserve(RatEnclosure.Pairing, next.motherId));
+                next.birthWaitingForNest = false;
+                next.birthApproachStarted = true;
+
+                int activeFlags = 0;
+                foreach (PregnancyData pending in pregnancies)
+                    if (pending.status == "pending" && pending.birthApproachStarted) activeFlags++;
+                Assert.AreEqual(1, activeFlags, "Only one mother may approach the shared delivery spot.");
+            }
+
+            Assert.IsFalse(reservations.TryGetOccupant(RatEnclosure.Pairing, out _));
+            Assert.AreEqual("pending", retryPregnancy.status,
+                "The retrying pregnancy must not be discarded while other queued births complete.");
+            Assert.IsTrue(retryPregnancy.birthWaitingForNest);
+            Assert.IsTrue(reservations.TryReserve(RatEnclosure.Pairing, retryPregnancy.motherId),
+                "Once the retry cooldown expires, the retained pregnancy can claim the free nest.");
+            retryPregnancy.birthWaitingForNest = false;
+            retryPregnancy.birthApproachStarted = true;
+            retryPregnancy.status = "finished";
+            RatData retryingMother = mothers.Find(item => item.id == retryPregnancy.motherId);
+            retryingMother.nursing = true;
+            retryingMother.nursingLitterId = "litter-for-" + retryPregnancy.motherId;
+            retryPregnancy.birthApproachStarted = false;
+            Assert.IsTrue(reservations.Release(RatEnclosure.Pairing, retryPregnancy.motherId));
+
+            Assert.AreEqual(0, reservations.Count);
+            Assert.AreEqual(10, mothers.FindAll(item => item.nursing &&
+                !string.IsNullOrEmpty(item.nursingLitterId) &&
+                item.enclosure == RatEnclosure.Pairing).Count,
+                "Previously delivered mothers stay in the same tank with their pinkies while later births proceed.");
+            foreach (PregnancyData pregnancy in pregnancies)
+            {
+                Assert.AreEqual("finished", pregnancy.status);
+                Assert.IsFalse(pregnancy.birthApproachStarted,
+                    "Completed pregnancies must not retain a stale approach flag.");
+                Assert.IsFalse(pregnancy.birthWaitingForNest);
+            }
+        }
+
+        private static void AdvancePairingWatchdogsForTest(
+            MethodInfo method, ref float phaseTimeout, ref float stalledSeconds,
+            float unscaledDeltaSeconds, bool walking, bool eitherRatMoved)
+        {
+            object[] arguments =
+            {
+                phaseTimeout,
+                stalledSeconds,
+                unscaledDeltaSeconds,
+                walking,
+                eitherRatMoved,
+            };
+            method.Invoke(null, arguments);
+            phaseTimeout = (float)arguments[0];
+            stalledSeconds = (float)arguments[1];
+        }
+
+        [Test]
+        public void CommittedFertileWindowDoesNotBypassCurrentCooldownRecoveryOrPregnancy()
+        {
+            const long gameTime = 575000000L;
+            ColonySaveData save = CreatePairingTestSave(gameTime, 100f);
+            save.clock.speed = 3f;
+            RatData female = save.rats[0];
+            RatData male = save.rats[1];
+            long afterFertileWindow = gameTime + 2L * GameConfig.GameDayMs;
+            string reason;
+            bool usedCommittedWindow;
+
+            Assert.IsTrue(BreedingSystem.IsBreedEligibleForCommittedPairingOpportunity(
+                save, female, afterFertileWindow, true, out reason, out usedCommittedWindow));
+            Assert.IsTrue(usedCommittedWindow);
+
+            female.breedingCooldownUntil = afterFertileWindow + 1L;
+            Assert.IsFalse(BreedingSystem.IsBreedEligibleForCommittedPairingOpportunity(
+                save, female, afterFertileWindow, true, out reason, out usedCommittedWindow),
+                "The committed window must not bypass an active breeding cooldown.");
+
+            female.breedingCooldownUntil = 0L;
+            female.nursing = true;
+            female.reproductiveState = ReproductiveState.Nursing;
+            female.recoveryUntil = afterFertileWindow + 1L;
+            Assert.IsFalse(BreedingSystem.IsBreedEligibleForCommittedPairingOpportunity(
+                save, female, afterFertileWindow, true, out reason, out usedCommittedWindow),
+                "The committed window must not bypass post-birth recovery while nursing.");
+
+            female.nursing = false;
+            female.reproductiveState = ReproductiveState.Fertile;
+            female.recoveryUntil = 0L;
+            bool conceived;
+            Assert.IsTrue(PairingHabitatSystem.ResolvePair(
+                save, female, male, afterFertileWindow, 1f, true,
+                out conceived, out reason), reason);
+            Assert.IsTrue(conceived);
+            Assert.IsFalse(BreedingSystem.IsBreedEligibleForCommittedPairingOpportunity(
+                save, female, afterFertileWindow, true, out reason, out usedCommittedWindow),
+                "The committed window must not bypass a current pregnancy.");
+        }
+
+        [Test]
+        public void PairingSelectionUsesTimestampAuthoritativeStageAfterFastForward()
+        {
+            const long gameTime = 580000000L;
+            ColonySaveData save = CreatePairingTestSave(gameTime, 100f);
+            save.clock.speed = 3f;
+            // Stage maintenance can lag behind a large fast-forward batch;
+            // reproductive eligibility already derives stage from timestamp.
+            save.rats[0].stage = RatStage.YoungRat;
+
+            RatData male;
+            RatData female;
+            Assert.IsTrue(PairingHabitatSystem.TryChoosePair(
+                save, gameTime, gameTime, 3f, out male, out female));
+            Assert.AreSame(save.rats[0], female);
         }
 
         [Test]
@@ -4332,8 +5942,285 @@ namespace RatHabitat.Tests
             Assert.AreEqual(3, save.rats.Count, "Habitat transfer must not duplicate or remove rat records.");
         }
 
+        [TestCase(RatEnclosure.MaleColony)]
+        [TestCase(RatEnclosure.FemaleColony)]
+        [TestCase(RatEnclosure.Pairing)]
+        public void FavoriteCannotEnterSaleTankButManualSaleEligibilityAndValueStayUnchanged(RatEnclosure origin)
+        {
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            ColonySaveData save = CreateEmptySaleTestSave(now);
+            RatSex sex = origin == RatEnclosure.MaleColony ? RatSex.Male : RatSex.Female;
+            RatData favorite = CreateSaleTestRat(save, "sale-favorite-individual", sex, 100f, RatStage.Adult);
+            favorite.enclosure = origin;
+            favorite.pairingHabitatAssigned = origin == RatEnclosure.Pairing;
+            int value = StoreSystem.CalculateSaleValue(save, favorite, now);
+            Assert.IsTrue(RatFavoriteSystem.SetFavorite(save, favorite.id, true));
+
+            Assert.IsTrue(StoreSystem.CanSellRat(save, favorite, now),
+                "This protection applies to the unattended Sale Tank, not deliberate manual sales.");
+            Assert.AreEqual(value, StoreSystem.CalculateSaleValue(save, favorite, now));
+            Assert.IsFalse(EnclosureSystem.CanEnterForSaleTank(save, favorite, now));
+            Assert.IsFalse(EnclosureSystem.TryAssignToForSale(save, favorite, now, 20, out string reason));
+            Assert.AreEqual(EnclosureSystem.FavoriteSaleTankRestriction, reason);
+            Assert.AreEqual(origin, favorite.enclosure);
+            Assert.AreEqual(origin == RatEnclosure.Pairing, favorite.pairingHabitatAssigned);
+            Assert.IsFalse(favorite.hasPreviousSaleTank);
+            Assert.IsTrue(favorite.isFavorite);
+        }
+
         [Test]
-        public void SaleTankBulkMoveIsAtomicWhenCapacityIsInsufficient()
+        public void BulkSaleTankMoveSkipsFavoritesWithoutConsumingCapacityAndReportsTheirCount()
+        {
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            ColonySaveData save = CreateEmptySaleTestSave(now);
+            RatData favoriteA = CreateSaleTestRat(save, "sale-bulk-favorite-a", RatSex.Female, 100f, RatStage.Adult);
+            RatData eligibleA = CreateSaleTestRat(save, "sale-bulk-nonfavorite-a", RatSex.Male, 100f, RatStage.Adult);
+            RatData favoriteB = CreateSaleTestRat(save, "sale-bulk-favorite-b", RatSex.Male, 100f, RatStage.Adult);
+            RatData eligibleB = CreateSaleTestRat(save, "sale-bulk-nonfavorite-b", RatSex.Female, 100f, RatStage.Adult);
+            favoriteA.isFavorite = favoriteB.isFavorite = true;
+
+            Assert.IsTrue(EnclosureSystem.TryAssignAllSellableToForSale(save, now, 1,
+                out int moved, out string reason, out List<RatData> movedRats));
+            Assert.AreEqual(1, moved);
+            Assert.AreEqual(1, movedRats.Count);
+            Assert.IsFalse(movedRats[0].isFavorite);
+            Assert.AreEqual(1, EnclosureSystem.CountForSaleRats(save));
+            Assert.AreEqual(RatEnclosure.FemaleColony, favoriteA.enclosure);
+            Assert.AreEqual(RatEnclosure.MaleColony, favoriteB.enclosure);
+            Assert.IsFalse(favoriteA.hasPreviousSaleTank);
+            Assert.IsFalse(favoriteB.hasPreviousSaleTank);
+            Assert.IsTrue(movedRats[0].hasPreviousSaleTank);
+            StringAssert.Contains("Skipped 2 favorite rats", reason);
+            StringAssert.Contains("1 eligible rat could not be moved because the tank is full", reason);
+            Assert.AreEqual(4, save.rats.Count);
+            Assert.IsTrue(eligibleA.enclosure == RatEnclosure.ForSale || eligibleB.enclosure == RatEnclosure.ForSale);
+        }
+
+        [Test]
+        public void AutomaticAssignmentCannotSendFavoriteBreedingParticipantsToSaleTank()
+        {
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            ColonySaveData save = CreateEmptySaleTestSave(now);
+            RatData female = CreateSaleTestRat(save, "sale-auto-favorite-female", RatSex.Female, 100f, RatStage.Adult);
+            RatData male = CreateSaleTestRat(save, "sale-auto-favorite-male", RatSex.Male, 100f, RatStage.Adult);
+            female.isFavorite = male.isFavorite = true;
+            EnclosureSystem.SetBreedingPair(female.id, male.id);
+            try
+            {
+                EnclosureSystem.RecalculateAssignments(save);
+                Assert.AreEqual(RatEnclosure.FemaleColony, female.enclosure);
+                Assert.AreEqual(RatEnclosure.MaleColony, male.enclosure);
+                Assert.AreEqual(0, EnclosureSystem.CountForSaleRats(save));
+                Assert.IsFalse(female.hasPreviousSaleTank);
+                Assert.IsFalse(male.hasPreviousSaleTank);
+            }
+            finally { EnclosureSystem.ClearBreedingPair(); }
+        }
+
+        [Test]
+        public void FavoritingSaleTankRatRequiresReturnFirstAndSurvivesSaveLoad()
+        {
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            ColonySaveData save = CreateEmptySaleTestSave(now);
+            RatData rat = CreateSaleTestRat(save, "sale-star-guard", RatSex.Female, 100f, RatStage.Adult);
+            rat.enclosure = RatEnclosure.Pairing;
+            rat.pairingHabitatAssigned = true;
+            Assert.IsTrue(EnclosureSystem.TryAssignToForSale(save, rat, now, 20, out string reason), reason);
+
+            Assert.IsFalse(RatFavoriteSystem.SetFavorite(save, rat.id, true, out reason));
+            StringAssert.Contains("Remove this rat from the For Sale Tank", reason);
+            Assert.IsFalse(rat.isFavorite);
+            Assert.AreEqual(RatEnclosure.ForSale, rat.enclosure);
+            Assert.IsTrue(rat.hasPreviousSaleTank);
+            Assert.AreEqual(RatEnclosure.Pairing, rat.previousSaleTank);
+            Assert.IsTrue(EnclosureSystem.TryReturnFromForSale(save, rat, 10,
+                out RatEnclosure destination, out reason), reason);
+            Assert.AreEqual(RatEnclosure.Pairing, destination);
+            Assert.IsTrue(RatFavoriteSystem.SetFavorite(save, rat.id, true, out reason), reason);
+
+            ColonySaveData restored = SaveSystem.FromJson(SaveSystem.ToJson(save));
+            RatData loaded = BreedingSystem.FindRat(restored, rat.id);
+            Assert.IsNotNull(loaded);
+            Assert.IsTrue(loaded.isFavorite);
+            Assert.AreEqual(RatEnclosure.Pairing, loaded.enclosure);
+            Assert.IsFalse(EnclosureSystem.TryAssignToForSale(restored, loaded, now, 20, out reason));
+            Assert.IsFalse(loaded.hasPreviousSaleTank);
+        }
+
+        [Test]
+        public void LegacyFavoriteInSaleTankCannotBeAutomaticallySoldOrPaidOut()
+        {
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            ColonySaveData save = CreateEmptySaleTestSave(now);
+            RatData favorite = CreateSaleTestRat(save, "sale-legacy-favorite", RatSex.Female, 100f, RatStage.Adult);
+            RatData ordinary = CreateSaleTestRat(save, "sale-ordinary-auto", RatSex.Male, 100f, RatStage.Adult);
+            favorite.enclosure = ordinary.enclosure = RatEnclosure.ForSale;
+            favorite.isFavorite = true; // legacy/stale state that bypasses the new admission guard
+            favorite.hasPreviousSaleTank = true;
+            favorite.previousSaleTank = RatEnclosure.FemaleColony;
+            favorite.motherId = "favorite-historical-mother";
+            int walletBefore = save.colonyCredits;
+            int ordinaryValue = StoreSystem.CalculateSaleValue(save, ordinary, now);
+
+            StoreRestockResult result = StoreSystem.RestockNowWithResult(save, now);
+            Assert.AreEqual(1, result.soldRatCount);
+            Assert.AreEqual(1, result.skippedRatCount);
+            Assert.AreEqual(ordinaryValue, result.creditedDollars);
+            Assert.AreEqual(walletBefore + ordinaryValue, save.colonyCredits);
+            Assert.AreEqual(RatRemovalDisposition.None, favorite.removalDisposition);
+            Assert.IsTrue(save.rats.Contains(favorite));
+            Assert.IsFalse(save.retiredRats.Contains(favorite));
+            Assert.IsTrue(favorite.isFavorite);
+            Assert.IsTrue(favorite.hasPreviousSaleTank);
+            Assert.AreEqual("favorite-historical-mother", favorite.motherId);
+            StringAssert.Contains("favorite (protected from automatic sale)", result.autoSaleMessage);
+            Assert.AreEqual(0, StoreSystem.RestockNowWithResult(save, now).soldRatCount);
+            Assert.AreEqual(walletBefore + ordinaryValue, save.colonyCredits);
+        }
+
+        [Test]
+        public void LegacyFavoriteSaleAssignmentReconcilesToNormalTankWithoutLosingRat()
+        {
+            EnclosureSystem.ClearBreedingPair();
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            ColonySaveData save = CreateEmptySaleTestSave(now);
+            RatData favorite = CreateSaleTestRat(save, "sale-legacy-favorite-reconcile", RatSex.Male, 100f, RatStage.Adult);
+            favorite.isFavorite = true;
+            favorite.enclosure = RatEnclosure.ForSale;
+            Assert.IsTrue(EnclosureSystem.RecalculateAssignments(save));
+            Assert.AreEqual(RatEnclosure.MaleColony, favorite.enclosure);
+            Assert.IsTrue(favorite.isFavorite);
+            Assert.AreSame(favorite, BreedingSystem.FindRat(save, favorite.id));
+            Assert.AreEqual(1, save.rats.Count);
+            Assert.AreEqual(0, save.retiredRats.Count);
+            Assert.AreEqual(0, EnclosureSystem.CountForSaleRats(save));
+        }
+
+        [Test]
+        public void PregnantRatCannotBeMovedToSaleTankAndShowsAuthoritativeReason()
+        {
+            EnclosureSystem.ClearBreedingPair();
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            ColonySaveData save = CreateEmptySaleTestSave(now);
+            RatData mother = CreateSaleTestRat(save, "sale-pregnant-mother", RatSex.Female,
+                100f, RatStage.Adult);
+            AddActiveSaleTestPregnancy(save, mother, null, now);
+
+            Assert.IsFalse(StoreSystem.CanSellRat(save, mother, now),
+                "The authoritative sale eligibility check must reject an active pregnancy.");
+            Assert.AreEqual("Pregnant rats cannot be sold.",
+                StoreSystem.SaleRestrictionReason(save, mother, now));
+            Assert.IsFalse(EnclosureSystem.TryAssignToForSale(save, mother, now, 20, out string reason));
+            Assert.AreEqual("Pregnant rats cannot be sold.", reason);
+            Assert.AreEqual(RatEnclosure.FemaleColony, mother.enclosure);
+            Assert.IsFalse(mother.hasPreviousSaleTank,
+                "A rejected transfer must not create a return-tank record.");
+        }
+
+        [Test]
+        public void BulkSaleTankMoveSkipsPregnantRatsAndReportsTheirCount()
+        {
+            EnclosureSystem.ClearBreedingPair();
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            ColonySaveData save = CreateEmptySaleTestSave(now);
+            RatData eligible = CreateSaleTestRat(save, "sale-bulk-eligible", RatSex.Male,
+                100f, RatStage.Adult);
+            RatData mother = CreateSaleTestRat(save, "sale-bulk-pregnant", RatSex.Female,
+                100f, RatStage.Adult);
+            AddActiveSaleTestPregnancy(save, mother, null, now);
+
+            Assert.IsTrue(EnclosureSystem.TryAssignAllSellableToForSale(
+                save, now, 20, out int moved, out string reason));
+
+            Assert.AreEqual(1, moved);
+            Assert.AreEqual(RatEnclosure.ForSale, eligible.enclosure);
+            Assert.AreEqual(RatEnclosure.FemaleColony, mother.enclosure);
+            Assert.IsFalse(mother.hasPreviousSaleTank);
+            StringAssert.Contains("Skipped 1 pregnant rat; pregnant rats cannot be sold.", reason);
+        }
+
+        [Test]
+        public void AutomaticAssignmentDoesNotMovePregnantBreedingParticipantsToSaleTank()
+        {
+            EnclosureSystem.ClearBreedingPair();
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            ColonySaveData save = CreateEmptySaleTestSave(now);
+            RatData mother = CreateSaleTestRat(save, "sale-auto-pregnant", RatSex.Female,
+                100f, RatStage.Adult);
+            RatData father = CreateSaleTestRat(save, "sale-auto-pregnant-father", RatSex.Male,
+                100f, RatStage.Adult);
+            AddActiveSaleTestPregnancy(save, mother, father, now);
+            EnclosureSystem.SetBreedingPair(mother.id, father.id);
+
+            try
+            {
+                EnclosureSystem.RecalculateAssignments(save);
+                Assert.AreEqual(RatEnclosure.FemaleColony, mother.enclosure,
+                    "Automatic breeding-participant routing must apply the shared pregnancy sale block.");
+                Assert.AreEqual(RatEnclosure.ForSale, father.enclosure,
+                    "The unrelated, eligible male keeps the existing automatic assignment behavior.");
+            }
+            finally
+            {
+                EnclosureSystem.ClearBreedingPair();
+            }
+        }
+
+        [Test]
+        public void RatInSaleTankCannotBeSelectedOrResolvedAsAParent()
+        {
+            EnclosureSystem.ClearBreedingPair();
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            ColonySaveData save = CreatePairingTestSave(now, 100f);
+            RatData female = save.rats[0];
+            RatData male = save.rats[1];
+            female.enclosure = RatEnclosure.ForSale;
+            female.pairingHabitatAssigned = false;
+            male.enclosure = RatEnclosure.Pairing;
+            int pregnancyCountBefore = save.pregnancies.Count;
+
+            Assert.IsFalse(PairingHabitatSystem.TryChoosePair(
+                save, now, now, 1f, out RatData selectedMale, out RatData selectedFemale));
+            Assert.IsNull(selectedFemale,
+                "The pairing selector only considers rats assigned to the Pairing Tank.");
+            Assert.IsFalse(PairingHabitatSystem.ResolvePair(save, female, male, now,
+                1f, out bool conceived, out string reason));
+            Assert.IsFalse(conceived);
+            StringAssert.Contains("Both rats must be in the Pairing Tank", reason);
+            Assert.AreEqual(pregnancyCountBefore, save.pregnancies.Count,
+                "A Sale Tank resident cannot become pregnant through the pairing runtime.");
+            Assert.IsTrue(StoreSystem.CanSellRat(save, female, now),
+                "Sale eligibility does not grant breeding eligibility; sale-tank assignment remains the breeding gate.");
+        }
+
+        [Test]
+        public void PregnantRatAlreadyInSaleTankIsNotAutomaticallySold()
+        {
+            EnclosureSystem.ClearBreedingPair();
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            ColonySaveData save = CreateEmptySaleTestSave(now);
+            RatData mother = CreateSaleTestRat(save, "sale-already-pregnant", RatSex.Female,
+                100f, RatStage.Adult);
+            AddActiveSaleTestPregnancy(save, mother, null, now);
+            mother.enclosure = RatEnclosure.ForSale;
+            mother.previousSaleTank = RatEnclosure.FemaleColony;
+            mother.hasPreviousSaleTank = true;
+            int walletBefore = save.colonyCredits;
+
+            StoreRestockResult result = StoreSystem.RestockNowWithResult(save, now);
+
+            Assert.AreEqual(0, result.soldRatCount);
+            Assert.AreEqual(1, result.skippedRatCount);
+            Assert.AreEqual(walletBefore, save.colonyCredits);
+            Assert.IsTrue(save.rats.Contains(mother));
+            Assert.AreEqual(RatRemovalDisposition.None, mother.removalDisposition);
+            Assert.IsTrue(mother.hasPreviousSaleTank,
+                "A blocked automatic sale must not erase the existing return destination.");
+            StringAssert.Contains("(pregnant)", result.autoSaleMessage);
+        }
+
+        [Test]
+        public void SaleTankBulkMoveUsesRemainingCapacityAndReportsSkippedCount()
         {
             long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
             var save = CreateEmptySaleTestSave(now);
@@ -4342,11 +6229,56 @@ namespace RatHabitat.Tests
             int moved;
             string reason;
 
-            Assert.IsFalse(EnclosureSystem.TryAssignAllSellableToForSale(save, now, 1, out moved, out reason));
-            Assert.AreEqual(0, moved);
-            Assert.AreEqual(RatEnclosure.MaleColony, first.enclosure);
-            Assert.AreEqual(RatEnclosure.FemaleColony, second.enclosure);
-            StringAssert.Contains("No rats were moved", reason);
+            Assert.IsTrue(EnclosureSystem.TryAssignAllSellableToForSale(save, now, 1, out moved, out reason));
+            Assert.AreEqual(1, moved);
+            Assert.AreEqual(1, EnclosureSystem.CountForSaleRats(save));
+            Assert.AreEqual(1, (first.enclosure == RatEnclosure.ForSale ? 1 : 0) +
+                (second.enclosure == RatEnclosure.ForSale ? 1 : 0));
+            StringAssert.Contains("Moved 1 rat to the For Sale Tank.", reason);
+            StringAssert.Contains("1 eligible rat could not be moved because the tank is full.", reason);
+        }
+
+        [Test]
+        public void SaleTankBulkMoveOf300RatsFills20SlotsOnceAndReportsTheRemainder()
+        {
+            long now = GameConfig.StartGameTimeMs + 100L * GameConfig.GameDayMs;
+            var save = CreateEmptySaleTestSave(now);
+            for (int index = 0; index < 300; index++)
+            {
+                RatSex sex = (index & 1) == 0 ? RatSex.Male : RatSex.Female;
+                CreateSaleTestRat(save, "sale-bulk-large-" + index, sex, 100f, RatStage.Adult);
+            }
+
+            int moved;
+            string reason;
+            List<RatData> movedRats;
+            Assert.IsTrue(EnclosureSystem.TryAssignAllSellableToForSale(save, now, 20,
+                out moved, out reason, out movedRats));
+
+            Assert.AreEqual(20, moved);
+            Assert.AreEqual(20, movedRats.Count);
+            var movedIds = new HashSet<string>(StringComparer.Ordinal);
+            int outsideSaleCount = 0;
+            foreach (RatData rat in save.rats)
+                if (rat.enclosure != RatEnclosure.ForSale) outsideSaleCount++;
+            foreach (RatData rat in movedRats)
+            {
+                Assert.IsTrue(movedIds.Add(rat.id), "The batch must never process one rat more than once.");
+                Assert.IsTrue(rat.hasPreviousSaleTank, "Every moved rat retains its return destination.");
+            }
+            Assert.AreEqual(20, movedIds.Count);
+            Assert.AreEqual(20, EnclosureSystem.CountForSaleRats(save));
+            Assert.AreEqual(300, save.rats.Count, "Tank moves must not duplicate or delete colony records.");
+            Assert.AreEqual(280, outsideSaleCount);
+            Assert.AreEqual("Moved 20 rats to the For Sale Tank. 280 eligible rats could not be moved because the tank is full.",
+                reason);
+
+            List<RatData> secondBatch;
+            Assert.IsTrue(EnclosureSystem.TryAssignAllSellableToForSale(save, now, 20,
+                out moved, out reason, out secondBatch));
+            Assert.AreEqual(0, moved, "A second click at capacity cannot move any rat a second time.");
+            Assert.AreEqual(0, secondBatch.Count);
+            Assert.AreEqual(20, EnclosureSystem.CountForSaleRats(save));
         }
 
         [Test]
@@ -4728,6 +6660,27 @@ namespace RatHabitat.Tests
             return rat;
         }
 
+        private static PregnancyData AddActiveSaleTestPregnancy(
+            ColonySaveData save, RatData mother, RatData father, long gameTime)
+        {
+            var pregnancy = new PregnancyData
+            {
+                id = "pregnancy-" + mother.id,
+                motherId = mother.id,
+                fatherId = father == null ? "historical-father" : father.id,
+                startedAt = gameTime,
+                dueAt = gameTime + GameConfig.PregnancyMs,
+                gestationDurationMs = GameConfig.PregnancyMs,
+                status = "pending",
+                expectedLitterSize = 3,
+            };
+            save.pregnancies.Add(pregnancy);
+            mother.pregnancyId = pregnancy.id;
+            mother.reproductiveState = ReproductiveState.Pregnant;
+            BreedingSystem.InvalidateReproductiveStateIndexes(save);
+            return pregnancy;
+        }
+
         private static ColonySaveData CreatePairingTestSave(long gameTime, float fertility)
         {
             var save = ColonyFactory.CreateNew(gameTime);
@@ -4821,6 +6774,7 @@ namespace RatHabitat.Tests
             EnclosureSystem.RecalculateAssignments(save);
             Assert.AreEqual(RatEnclosure.FemaleColony, mother.enclosure);
             Assert.IsTrue(mother.nursing);
+            Assert.AreEqual(litter.id, mother.nursingLitterId);
             foreach (var pupId in litter.pupIds)
             {
                 Assert.AreEqual(RatEnclosure.FemaleColony, BreedingSystem.FindRat(save, pupId).enclosure);
@@ -4833,12 +6787,43 @@ namespace RatHabitat.Tests
             }
             EnclosureSystem.RecalculateAssignments(save);
             Assert.IsFalse(mother.nursing);
+            Assert.IsTrue(string.IsNullOrEmpty(mother.nursingLitterId));
             Assert.AreEqual(RatEnclosure.FemaleColony, mother.enclosure);
             foreach (var pupId in litter.pupIds)
             {
                 RatData pup = BreedingSystem.FindRat(save, pupId);
                 Assert.AreEqual(RatEnclosure.FemaleColony, pup.enclosure);
             }
+        }
+
+        [Test]
+        public void MultipleNursingMothersCanShareTheNestBesideTheirOwnPinkieClusters()
+        {
+            RatEnclosure tank = RatEnclosure.Pairing;
+            Vector3 nest = EnclosureSystem.GetNestPosition(tank);
+            string[] litterIds = { "family-litter-alpha", "family-litter-beta" };
+            float[] angles = { 0f, Mathf.PI };
+
+            for (int index = 0; index < litterIds.Length; index++)
+            {
+                Vector3 familyCenter = EnclosureSystem.GetNestLitterCenter(tank, litterIds[index]);
+                Vector3 motherTarget = EnclosureSystem.GetNestFamilyCaregiverPosition(
+                    tank, litterIds[index], angles[index], 0.42f);
+                Vector3 pinkiePosition = EnclosureSystem.GetPinkiePosition(
+                    tank, "pinkie-" + index, litterIds[index], 0, nest);
+
+                Assert.IsTrue(EnclosureSystem.IsInsideNestCaregiverZone(tank, motherTarget),
+                    "Each nursing mother must stay inside the shared nest caregiver area.");
+                Assert.Less(Vector3.Distance(motherTarget, pinkiePosition), 1.05f,
+                    "Each mother target remains near her own litter's pinkie cluster.");
+                Assert.Less(Vector3.Distance(familyCenter, nest), 0.25f,
+                    "All litter clusters remain together in the same shared nest.");
+            }
+
+            Assert.AreNotEqual(
+                EnclosureSystem.GetNestFamilyCaregiverPosition(tank, litterIds[0], angles[0], 0.42f),
+                EnclosureSystem.GetNestFamilyCaregiverPosition(tank, litterIds[1], angles[1], 0.42f),
+                "Different mothers receive individual presentation targets; neither owns the nest globally.");
         }
 
         [Test]
@@ -5149,20 +7134,19 @@ namespace RatHabitat.Tests
                     Material same = sameVisual.GetComponentInChildren<SkinnedMeshRenderer>(true).sharedMaterials[0];
                     Material other = otherVisual.GetComponentInChildren<SkinnedMeshRenderer>(true).sharedMaterials[0];
                     Material solid = solidVisual.GetComponentInChildren<SkinnedMeshRenderer>(true).sharedMaterials[0];
-                    Assert.IsTrue(first.HasProperty("_FaceMarkingVariation"));
-                    Assert.IsTrue(first.HasProperty("_LegMarkingVariation"));
+                    Assert.IsTrue(first.HasProperty("_HotspotNoiseOffset"));
                     Assert.IsTrue(first.HasProperty("_SpeckleSettings"));
                     Assert.IsTrue(first.HasProperty("_SpeckleSeed"));
-                    Assert.AreEqual(first.GetVector("_FaceMarkingVariation"),
-                        same.GetVector("_FaceMarkingVariation"),
-                        "The same stable ID/genotype must reconstruct the same face marking after reload.");
-                    Assert.AreEqual(first.GetVector("_LegMarkingVariation"),
-                        same.GetVector("_LegMarkingVariation"));
-                    Assert.AreNotEqual(first.GetVector("_FaceMarkingVariation"),
-                        other.GetVector("_FaceMarkingVariation"),
-                        "Distinct rat IDs should receive different face placements/scales.");
-                    Assert.AreSame(first.GetTexture("_SpotPattern"), same.GetTexture("_SpotPattern"),
-                        "A stable rat identity must reuse its cached deterministic pattern.");
+                    CollectionAssert.AreEqual(first.GetVectorArray("_HotspotCenters"),
+                        same.GetVectorArray("_HotspotCenters"),
+                        "The same ID/genotype must reconstruct identical anatomical probabilities.");
+                    CollectionAssert.AreEqual(first.GetVectorArray("_HotspotRadii"),
+                        same.GetVectorArray("_HotspotRadii"));
+                    Assert.AreNotEqual(first.GetVector("_HotspotNoiseOffset"),
+                        other.GetVector("_HotspotNoiseOffset"),
+                        "Distinct IDs must receive different organic fields.");
+                    Assert.AreSame(first.GetTexture("_HotspotNoise"), same.GetTexture("_HotspotNoise"),
+                        "Noise must be shared, not regenerated per visual.");
                     Assert.AreEqual(first.GetVector("_SpeckleSettings"),
                         same.GetVector("_SpeckleSettings"),
                         "Speckle activation, density, spacing, and size must be stable after reload.");
@@ -5174,10 +7158,8 @@ namespace RatHabitat.Tests
                     Assert.AreEqual(0f, solid.GetFloat("_SpotStrength"), 0.001f);
                     Assert.AreEqual(0f, solid.GetVector("_SpeckleSettings").x, 0.001f,
                         "Self/solid rats must not receive visual speckles.");
-                    Assert.AreEqual(0f, solid.GetFloat("_FaceMarkingStrength"), 0.001f);
-                    Assert.AreEqual(0f, solid.GetFloat("_LegMarkingStrength"), 0.001f);
-                    Assert.AreEqual(0f, solid.GetFloat("_BellyMarkingStrength"), 0.001f,
-                        "Self/solid rats must remain unmarked in every placement channel.");
+                    foreach (var hotspot in solid.GetVectorArray("_HotspotCenters"))
+                        Assert.AreEqual(0f,hotspot.w,"Self/solid must remain unmarked everywhere.");
                 }
                 finally
                 {
@@ -5192,6 +7174,354 @@ namespace RatHabitat.Tests
                 Object.DestroyImmediate(visualParent.gameObject);
                 Object.DestroyImmediate(factoryHost);
             }
+        }
+
+        [Test]
+        public void HairlessSpontaneousRateIsHalfPercentAndIndependentOfCoatMutations()
+        {
+            var normal = new LocusData("Hr","Hr","Hr");
+            int visible = 0;
+            for (int i=0;i<10000;i++)
+            {
+                var history = new List<MutationRecordData>();
+                var result = GeneticsSystem.InheritHairless(normal,normal,.1f,.9f,
+                    (i+.5f)/10000f,123L,history);
+                if (result.firstAllele == "hr" && result.secondAllele == "hr")
+                {
+                    visible++;
+                    Assert.AreEqual(1,history.Count);
+                    Assert.AreEqual("Hr",history[0].locus);
+                    Assert.AreEqual("spontaneous",history[0].parentRole);
+                    Assert.AreEqual(123L,history[0].recordedAt);
+                }
+                else Assert.IsEmpty(history);
+            }
+            Assert.AreEqual(50,visible,"0.5% is visible pups, not a per-allele chance.");
+            Assert.AreEqual(.005f,GeneticsSystem.MutationRateForLocus("S"));
+            Assert.AreEqual(.0025f,GeneticsSystem.MutationRateForLocus("B"));
+            var randomState = UnityEngine.Random.state;
+            try
+            {
+                UnityEngine.Random.InitState(11982);
+                int inheritedVisible = 0;
+                var founder = GeneticsSystem.CreateFounder("B","B","C","C","D","D","s","s");
+                for (int i=0;i<10000;i++)
+                    if (GeneticsSystem.IsHairless(GeneticsSystem.InheritGenotype(founder,founder,1L)))
+                        inheritedVisible++;
+                Assert.That(inheritedVisible,Is.InRange(25,80),"Seeded production inheritance path.");
+            }
+            finally { UnityEngine.Random.state = randomState; }
+        }
+
+        [TestCase("Hr","Hr","Hr","hr",0)]
+        [TestCase("Hr","hr","Hr","hr",1)]
+        [TestCase("Hr","hr","hr","hr",2)]
+        [TestCase("hr","hr","hr","hr",4)]
+        [TestCase("Hr","Hr","hr","hr",0)]
+        public void HairlessCarrierAndExpressingInheritanceIsMendelian(
+            string m1,string m2,string f1,string f2,int expectedOfFour)
+        {
+            int visible=0;
+            for (int m=0;m<2;m++) for (int f=0;f<2;f++)
+            {
+                var history = new List<MutationRecordData>();
+                var gene = GeneticsSystem.InheritHairless(new LocusData("Hr",m1,m2),
+                    new LocusData("Hr",f1,f2),m*.5f+.1f,f*.5f+.1f,0f,1L,history);
+                if (gene.firstAllele=="hr" && gene.secondAllele=="hr") visible++;
+                Assert.IsEmpty(history,"Inherited expression is not a spontaneous mutation.");
+            }
+            Assert.AreEqual(expectedOfFour,visible);
+        }
+
+        [Test]
+        public void HairlessSaveMigrationPreservesRatsColorsAndGenetics()
+        {
+            var save = CreateEmptySaleTestSave(GameConfig.StartGameTimeMs);
+            RatData rat = CreateSaleTestRat(save,"hairless-save",RatSex.Female,100f,RatStage.Adult);
+            rat.genotype.hairless = new LocusData("Hr","hr","hr");
+            rat.markingFamily="Blaze"; rat.markingColorHex="#a8673f";
+            rat.secondaryMarkingFamily="Berkshire"; rat.secondaryMarkingColorHex="#eee4ce";
+            var restored = SaveSystem.FromJson(SaveSystem.ToJson(save));
+            RatData loaded = restored.rats.Find(item=>item.id==rat.id);
+            Assert.IsNotNull(loaded);
+            Assert.IsTrue(loaded.phenotype.hairless);
+            StringAssert.Contains("Hairless",loaded.phenotype.coatColorLabel);
+            Assert.AreEqual(rat.markingColorHex,loaded.markingColorHex);
+            Assert.AreEqual(rat.secondaryMarkingColorHex,loaded.secondaryMarkingColorHex);
+            Assert.IsTrue(GeneticsSystem.IsHairless(loaded.genotype.Clone()));
+            // Real pre-feature JSON has no optional field. Remove it explicitly
+            // rather than relying on a constructor default masking migration.
+            string legacy = JsonUtility.ToJson(save,false).Replace(
+                "\"hairless\":{\"locus\":\"Hr\",\"firstAllele\":\"hr\",\"secondAllele\":\"hr\"},","");
+            Assert.IsFalse(legacy.Contains("\"locus\":\"Hr\""));
+            var migrated = SaveSystem.FromJson(legacy);
+            Assert.AreEqual(restored.rats.Count,migrated.rats.Count);
+            RatData old = migrated.rats.Find(item=>item.id==rat.id);
+            Assert.IsFalse(GeneticsSystem.IsHairless(old.genotype));
+            Assert.AreEqual("Hr/Hr",GeneticsSystem.FormatPair(old.genotype,"Hr"));
+            Assert.AreEqual(loaded.coatColorVariant,old.coatColorVariant);
+            Assert.AreEqual(loaded.markingFamily,old.markingFamily);
+        }
+
+        [Test]
+        public void HotspotSeedsAreCachedAsymmetricAndStableAcrossRenameAndReload()
+        {
+            var genotype = GeneticsSystem.CreateFounder("B","B","C","C","D","D","S","S");
+            var first = CreateMarkingVariationTestRat("hotspot-a","Berkshire",genotype);
+            var pattern = RatVisualFactory.GetHotspotPattern(first);
+            first.name="Completely different name";
+            var reloaded = JsonUtility.FromJson<RatData>(JsonUtility.ToJson(first));
+            Assert.AreSame(pattern,RatVisualFactory.GetHotspotPattern(reloaded));
+            Assert.AreNotEqual(pattern.centers[6].w,pattern.centers[7].w,"Independent cheeks.");
+            Assert.AreNotEqual(pattern.radii[8],pattern.radii[9],"Independent leg coverage.");
+            var signatures = new HashSet<Vector4>();
+            for (int i=0;i<300;i++)
+            {
+                var rat = CreateMarkingVariationTestRat("hotspot-stress-"+i,"Berkshire",genotype.Clone());
+                var sample = RatVisualFactory.GetHotspotPattern(rat);
+                signatures.Add(sample.centers[3]);
+                Assert.AreSame(sample,RatVisualFactory.GetHotspotPattern(rat));
+                RatVisualFactory.ReleaseTransientPreviewPatternsForRat(rat);
+            }
+            Assert.AreEqual(300,signatures.Count);
+            first.markingFamily="Self";
+            foreach (var center in RatVisualFactory.GetHotspotPattern(first).centers)
+                Assert.AreEqual(0f,center.w);
+        }
+
+        [Test]
+        public void HotspotCoatShaderCompilesAndRendersDistinctPhenotypeColors()
+        {
+            // Material property assertions alone missed the all-white regression:
+            // require the actual surface shader passes and GPU output to work.
+            var pixels = RatHabitat.Editor.RatCoatShaderValidation.ValidateColors();
+            Assert.Less(pixels[0].grayscale, pixels[3].grayscale * .6f,
+                "A solid dark rat must not render white like an albino.");
+            Assert.Greater(pixels[1].b, pixels[1].r * 1.6f,
+                "Blue phenotype pigment must reach the rendered surface.");
+            Assert.Greater(pixels[2].r, pixels[2].b * 1.4f,
+                "Warm phenotype pigment must reach the rendered surface.");
+        }
+
+        [Test]
+        public void HotspotRestCoordinatesAndHairlessUseSharedAgeAppropriateMesh()
+        {
+            var host = new GameObject("Hotspot visual regression");
+            var factory=host.AddComponent<RatVisualFactory>();
+            factory.handPaintedRatPrefab=AssetDatabase.LoadAssetAtPath<GameObject>(
+                "Assets/Prefabs/HandPaintedRat/HandPaintedRat.prefab");
+            try
+            {
+                var genotype=GeneticsSystem.CreateFounder("B","B","C","C","D","D","S","S");
+                var furred=CreateMarkingVariationTestRat("rest-furred","Blaze",genotype);
+                var bald=CreateMarkingVariationTestRat("rest-bald","Blaze",genotype.Clone());
+                bald.genotype.hairless=new LocusData("Hr","hr","hr");
+                bald.phenotype=GeneticsSystem.DerivePhenotype(RatStage.Adult,bald.genotype,
+                    bald.coatColorVariant,bald.coatTone);
+                var normalVisual=factory.CreateStageVisual(host.transform,furred);
+                var baldVisual=factory.CreateStageVisual(host.transform,bald);
+                var normalRenderer=normalVisual.GetComponentInChildren<SkinnedMeshRenderer>();
+                var baldRenderer=baldVisual.GetComponentInChildren<SkinnedMeshRenderer>();
+                Assert.AreSame(normalRenderer.sharedMesh,baldRenderer.sharedMesh,
+                    "Hairless adults must use the adult model, not an enlarged pinkie.");
+                Assert.AreEqual(normalVisual.GetComponentsInChildren<Renderer>().Length,
+                    baldVisual.GetComponentsInChildren<Renderer>().Length);
+                var coords=new List<Vector4>(); normalRenderer.sharedMesh.GetUVs(2,coords);
+                Assert.AreEqual(normalRenderer.sharedMesh.vertexCount,coords.Count);
+                float minX=float.MaxValue,maxX=float.MinValue;
+                foreach (var coord in coords) { minX=Mathf.Min(minX,coord.x); maxX=Mathf.Max(maxX,coord.x); }
+                Assert.Greater(maxX-minX,.95f,
+                    "Rest coordinates retain distinct left/right positions despite shared UV0.");
+                var material=baldRenderer.sharedMaterials[0];
+                Assert.AreEqual(1f,material.GetFloat("_HairlessMode"));
+                Assert.Less(material.GetColor("_SkinColor").grayscale,.8f);
+                Assert.IsFalse(ShaderUtil.ShaderHasError(material.shader));
+                factory.ApplyPhenotype(baldVisual,bald);
+                CollectionAssert.AreEqual(RatVisualFactory.GetHotspotPattern(bald).centers,
+                    material.GetVectorArray("_HotspotCenters"));
+                Assert.AreSame(material.GetTexture("_HotspotNoise"),
+                    normalRenderer.sharedMaterials[0].GetTexture("_HotspotNoise"));
+                bald.stage=RatStage.YoungRat;
+                bald.phenotype=GeneticsSystem.DerivePhenotype(bald.stage,bald.genotype);
+                var young=factory.CreateStageVisual(host.transform,bald);
+                Assert.AreSame(normalRenderer.sharedMesh,young.GetComponentInChildren<SkinnedMeshRenderer>().sharedMesh);
+            }
+            finally { Object.DestroyImmediate(host); }
+        }
+
+        [Test]
+        public void SecondaryMarkingInheritanceIsRareDeterministicAndUsesBothParents()
+        {
+            GenotypeData markedGenotype = GeneticsSystem.CreateFounder(
+                "B", "B", "C", "C", "D", "D", "S", "S");
+            RatData mother = CreateMarkedColorInheritanceParent(
+                "two-color-mother", "Blaze", "#181818");
+            RatData father = CreateMarkedColorInheritanceParent(
+                "two-color-father", "Merle", "#eeeeee");
+            string motherColor = RatVisualFactory.ResolveMarkingColorHex(mother);
+            string fatherColor = RatVisualFactory.ResolveMarkingColorHex(father);
+            Assert.AreNotEqual(motherColor, fatherColor,
+                "The test parents must contribute visibly distinct marking colors.");
+
+            bool foundMulticolorPup = false;
+            for (int index = 0; index < 1000; index++)
+            {
+                string pupId = "two-color-pup-" + index;
+                string primaryColor;
+                string secondaryFamily;
+                string secondaryColor;
+                bool inherited = GeneticsSystem.TryInheritSecondaryMarking(
+                    mother, father, markedGenotype, "Blaze", "two-color-litter",
+                    pupId, out primaryColor, out secondaryFamily, out secondaryColor);
+                if (!inherited)
+                {
+                    Assert.IsNull(primaryColor);
+                    Assert.IsNull(secondaryFamily);
+                    Assert.IsNull(secondaryColor);
+                    continue;
+                }
+
+                Assert.AreEqual(motherColor, primaryColor,
+                    "With the maternal family selected as primary, the primary hue comes from the mother.");
+                Assert.AreEqual("Merle", secondaryFamily,
+                    "The secondary marking family must come from the other parent.");
+                Assert.AreEqual(fatherColor, secondaryColor,
+                    "The secondary hue must be inherited from the father, not independently randomized.");
+                Assert.AreNotEqual(primaryColor, secondaryColor);
+
+                string repeatedPrimary;
+                string repeatedFamily;
+                string repeatedSecondary;
+                Assert.IsTrue(GeneticsSystem.TryInheritSecondaryMarking(
+                    mother, father, markedGenotype, "Blaze", "two-color-litter", pupId,
+                    out repeatedPrimary, out repeatedFamily, out repeatedSecondary));
+                Assert.AreEqual(primaryColor, repeatedPrimary);
+                Assert.AreEqual(secondaryFamily, repeatedFamily);
+                Assert.AreEqual(secondaryColor, repeatedSecondary,
+                    "The same parent/litter/pup/genotype key must never reroll.");
+                foundMulticolorPup = true;
+                break;
+            }
+
+            Assert.IsTrue(foundMulticolorPup);
+
+            int cohortMulticolorCount = 0;
+            const int cohortSize = 1000;
+            for (int index = 0; index < cohortSize; index++)
+            {
+                string primaryColor;
+                string secondaryFamily;
+                string secondaryColor;
+                if (GeneticsSystem.TryInheritSecondaryMarking(
+                    mother, father, markedGenotype, "Blaze", "two-color-rate-litter",
+                    "rate-pup-" + index, out primaryColor, out secondaryFamily, out secondaryColor))
+                    cohortMulticolorCount++;
+            }
+            Assert.That(cohortMulticolorCount, Is.InRange(55, 105),
+                "Most offspring should retain the normal single-color appearance; the rare second layer targets 8%.");
+
+            string ignoredPrimary;
+            string ignoredFamily;
+            string ignoredColor;
+            Assert.IsFalse(GeneticsSystem.TryInheritSecondaryMarking(
+                mother, father, markedGenotype, "Self", "solid-child-litter", "solid-child",
+                out ignoredPrimary, out ignoredFamily, out ignoredColor),
+                "A solid/self offspring has no primary markings to split into a second color.");
+        }
+
+        [Test]
+        public void SecondaryMarkingSaveLoadAndVisualRefreshPreserveBothColors()
+        {
+            ColonySaveData save = ColonyFactory.CreateNew(1000000L);
+            RatData rat = ColonyFactory.CreateRat(
+                "saved-two-color-rat", "Two Color", RatSex.Female,
+                save.clock.gameTimeMs - 100L * GameConfig.GameDayMs, 1,
+                GeneticsSystem.CreateFounder("B", "B", "C", "C", "D", "D", "S", "S"),
+                new TraitData(50f, 50f, 50f), RatStage.Adult);
+            rat.ageDays = 100f;
+            rat.markingFamily = "Blaze";
+            rat.markingColorHex = "#e8d5ad";
+            rat.secondaryMarkingFamily = "Merle";
+            rat.secondaryMarkingColorHex = "#263746";
+            GeneticsSystem.ApplyMarkingFamily(rat.phenotype, rat.markingFamily);
+            save.rats.Add(rat);
+            save.ratIds.Add(rat.id);
+
+            ColonySaveData loaded = SaveSystem.FromJson(SaveSystem.ToJson(save));
+            RatData loadedRat = BreedingSystem.FindRat(loaded, rat.id);
+            Assert.IsNotNull(loadedRat);
+            Assert.AreEqual(rat.markingColorHex, loadedRat.markingColorHex);
+            Assert.AreEqual(rat.secondaryMarkingFamily, loadedRat.secondaryMarkingFamily);
+            Assert.AreEqual(rat.secondaryMarkingColorHex, loadedRat.secondaryMarkingColorHex);
+
+            RatData legacyRat = JsonUtility.FromJson<RatData>(
+                "{\"id\":\"legacy-marked-rat\",\"markingFamily\":\"Blaze\"}");
+            Assert.IsNotNull(legacyRat);
+            Assert.IsTrue(string.IsNullOrEmpty(legacyRat.markingColorHex));
+            Assert.IsTrue(string.IsNullOrEmpty(legacyRat.secondaryMarkingFamily));
+            Assert.IsTrue(string.IsNullOrEmpty(legacyRat.secondaryMarkingColorHex),
+                "Old saves safely keep the existing derived single-color marking behavior.");
+            Assert.IsNotEmpty(RatVisualFactory.ResolveMarkingColorHex(legacyRat),
+                "A legacy rat without color overrides continues using its stable derived marking color.");
+
+            var factoryHost = new GameObject("Secondary Marking Visual Test Factory");
+            var visualParent = new GameObject("Secondary Marking Visual Test Parent").transform;
+            var factory = factoryHost.AddComponent<RatVisualFactory>();
+            factory.handPaintedRatPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(
+                "Assets/Prefabs/HandPaintedRat/HandPaintedRat.prefab");
+            Assert.IsNotNull(factory.handPaintedRatPrefab);
+            GameObject visual = null;
+            try
+            {
+                visual = factory.CreateStageVisual(visualParent, loadedRat);
+                Assert.IsNotNull(visual);
+                Material material = visual.GetComponentInChildren<SkinnedMeshRenderer>(true).sharedMaterials[0];
+                Assert.AreEqual(1f, material.GetFloat("_SecondarySpotStrength"), 0.001f);
+                AssertColorHex(loadedRat.markingColorHex, material.GetColor("_SpotColor"));
+                AssertColorHex(loadedRat.secondaryMarkingColorHex,
+                    material.GetColor("_SecondarySpotColor"));
+                factory.ApplyPhenotype(visual, loadedRat);
+                material = visual.GetComponentInChildren<SkinnedMeshRenderer>(true).sharedMaterials[0];
+                Assert.AreEqual(1f, material.GetFloat("_SecondarySpotStrength"), 0.001f,
+                    "A normal material refresh must retain the saved second marking layer.");
+                AssertColorHex(loadedRat.markingColorHex, material.GetColor("_SpotColor"));
+                AssertColorHex(loadedRat.secondaryMarkingColorHex,
+                    material.GetColor("_SecondarySpotColor"));
+            }
+            finally
+            {
+                if (visual != null) Object.DestroyImmediate(visual);
+                Object.DestroyImmediate(visualParent.gameObject);
+                Object.DestroyImmediate(factoryHost);
+            }
+        }
+
+        private static RatData CreateMarkedColorInheritanceParent(string id, string family, string coatHex)
+        {
+            var rat = new RatData
+            {
+                id = id,
+                name = id,
+                genotype = GeneticsSystem.CreateFounder("B", "B", "C", "C", "D", "D", "S", "S"),
+                markingFamily = family,
+                phenotype = new PhenotypeData
+                {
+                    furRevealed = true,
+                    spotted = true,
+                    coatColorHex = coatHex,
+                    coatColorId = "brown",
+                },
+            };
+            return rat;
+        }
+
+        private static void AssertColorHex(string expectedHex, Color actual)
+        {
+            Color expected;
+            Assert.IsTrue(ColorUtility.TryParseHtmlString(expectedHex, out expected));
+            Assert.That(actual.r, Is.EqualTo(expected.r).Within(0.004f));
+            Assert.That(actual.g, Is.EqualTo(expected.g).Within(0.004f));
+            Assert.That(actual.b, Is.EqualTo(expected.b).Within(0.004f));
         }
 
         private static RatData CreateMarkingVariationTestRat(

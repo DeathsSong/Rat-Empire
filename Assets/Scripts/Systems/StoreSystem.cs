@@ -64,13 +64,28 @@ namespace RatHabitat
         /// </summary>
         public static List<RatData> GetSellableRats(ColonySaveData save, long gameTime, StoreSellFilter filter)
         {
+            int skippedPregnant;
+            return GetSellableRats(save, gameTime, filter, out skippedPregnant);
+        }
+
+        public static List<RatData> GetSellableRats(ColonySaveData save, long gameTime,
+            StoreSellFilter filter, out int skippedPregnant)
+        {
             var result = new List<RatData>();
+            skippedPregnant = 0;
             if (save == null || save.rats == null) return result;
 
             for (int index = 0; index < save.rats.Count; index++)
             {
                 RatData rat = save.rats[index];
-                if (rat == null || !CanSellRat(save, rat, gameTime)) continue;
+                if (rat == null) continue;
+                if (IsPregnantForSale(save, rat))
+                {
+                    if (rat.enclosure != RatEnclosure.ForSale)
+                        skippedPregnant++;
+                    continue;
+                }
+                if (!CanSellRat(save, rat, gameTime)) continue;
 
                 bool matches = filter == StoreSellFilter.All ||
                     (filter == StoreSellFilter.Males && rat.sex == RatSex.Male) ||
@@ -185,12 +200,38 @@ namespace RatHabitat
         {
             if (save == null) return default(StoreRestockResult);
             save.EnsureLists();
-            StoreRestockResult result = AutomaticallySellForSaleRats(save, gameTime);
+            StoreRestockResult result;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            UnityEngine.Profiling.Profiler.BeginSample("Rat Empire/Store/Automatic Sale");
+#endif
+            try
+            {
+                result = AutomaticallySellForSaleRats(save, gameTime);
+            }
+            finally
+            {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                UnityEngine.Profiling.Profiler.EndSample();
+#endif
+            }
+
             long nextCycle = (long)Math.Max(0, save.storeRestockCycle) + Math.Max(1L, elapsedRestockCycles);
             save.storeRestockCycle = (int)Math.Min(int.MaxValue, nextCycle);
             int seed = StableHash((save.createdAt == 0 ? GameConfig.NowMs() : save.createdAt) +
                 "|restock|" + save.storeRestockCycle);
-            CreateInventory(save, seed, save.storeRestockCycle);
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            UnityEngine.Profiling.Profiler.BeginSample("Rat Empire/Store/Inventory Generation");
+#endif
+            try
+            {
+                CreateInventory(save, seed, save.storeRestockCycle);
+            }
+            finally
+            {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                UnityEngine.Profiling.Profiler.EndSample();
+#endif
+            }
             save.storeInventoryInitialized = true;
             long interval = Math.Max(1L, GameConfig.StoreRestockIntervalGameMs);
             long cycles = Math.Max(1L, elapsedRestockCycles);
@@ -198,8 +239,20 @@ namespace RatHabitat
             save.storeNextRestockGameTime = cycles > maxCycles
                 ? long.MaxValue
                 : firstDueAt + cycles * interval;
-            RatNameSystem.EnsureUniqueNames(save, gameTime);
-            RecordListingNameUsage(save, gameTime);
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            UnityEngine.Profiling.Profiler.BeginSample("Rat Empire/Store/Name Reconciliation");
+#endif
+            try
+            {
+                RatNameSystem.EnsureUniqueNames(save, gameTime);
+                RecordListingNameUsage(save, gameTime);
+            }
+            finally
+            {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                UnityEngine.Profiling.Profiler.EndSample();
+#endif
+            }
             result.autoSaleMessage = BuildAutomaticSaleMessage(result.skippedRatDetails, result);
             if (!string.IsNullOrEmpty(result.autoSaleMessage))
                 RecordAutomaticSaleEvent(save, gameTime, result.autoSaleMessage);
@@ -208,25 +261,40 @@ namespace RatHabitat
 
         private static StoreRestockResult AutomaticallySellForSaleRats(ColonySaveData save, long gameTime)
         {
-            var result = new StoreRestockResult { skippedRatDetails = new List<string>() };
+            var result = new StoreRestockResult();
             if (save == null || save.rats == null) return result;
 
-            var retiredIds = new HashSet<string>(StringComparer.Ordinal);
-            if (save.retiredRats != null)
-                foreach (RatData retired in save.retiredRats)
-                    if (retired != null && !string.IsNullOrEmpty(retired.id)) retiredIds.Add(retired.id);
+            HashSet<string> retiredIds = null;
 
             for (int index = save.rats.Count - 1; index >= 0; index--)
             {
                 RatData rat = save.rats[index];
                 if (rat == null || rat.enclosure != RatEnclosure.ForSale) continue;
 
+                // Most restocks have no sale-tank residents. Avoid allocating
+                // and scanning the complete retirement history for that
+                // common case; initialize the duplicate-payout guard lazily.
+                if (retiredIds == null)
+                {
+                    retiredIds = new HashSet<string>(
+                        save.retiredRats == null ? 0 : save.retiredRats.Count,
+                        StringComparer.Ordinal);
+                    if (save.retiredRats != null)
+                    {
+                        foreach (RatData retired in save.retiredRats)
+                            if (retired != null && !string.IsNullOrEmpty(retired.id)) retiredIds.Add(retired.id);
+                    }
+                }
+
                 string reason = AutomaticSaleRestriction(save, rat, gameTime, retiredIds);
                 if (!string.IsNullOrEmpty(reason))
                 {
                     result.skippedRatCount++;
-                    if (result.skippedRatDetails.Count < 10)
+                    if (result.skippedRatCount <= 10)
+                    {
+                        if (result.skippedRatDetails == null) result.skippedRatDetails = new List<string>(10);
                         result.skippedRatDetails.Add(ColonyFactory.DisplayName(rat) + " (" + reason + ")");
+                    }
                     continue;
                 }
 
@@ -234,8 +302,11 @@ namespace RatHabitat
                 if (saleValue <= 0)
                 {
                     result.skippedRatCount++;
-                    if (result.skippedRatDetails.Count < 10)
+                    if (result.skippedRatCount <= 10)
+                    {
+                        if (result.skippedRatDetails == null) result.skippedRatDetails = new List<string>(10);
                         result.skippedRatDetails.Add(ColonyFactory.DisplayName(rat) + " (not eligible for sale)");
+                    }
                     continue;
                 }
 
@@ -269,13 +340,18 @@ namespace RatHabitat
             if (rat.removalDisposition != RatRemovalDisposition.None ||
                 (!string.IsNullOrEmpty(rat.id) && retiredIds != null && retiredIds.Contains(rat.id)))
                 return "already retired";
+            // Defense for old saves or stale records that already contain a
+            // favorite in the tank: never pay out or retire the favorite.
+            if (rat.isFavorite) return "favorite (protected from automatic sale)";
+            // Keep the established automatic-sale event wording while the
+            // shared CanSellRat guard also blocks pregnancies in every other
+            // sale path.
+            if (IsPregnantForSale(save, rat)) return "pregnant";
             if (!CanSellRat(save, rat, gameTime))
             {
                 string saleReason = SaleRestrictionReason(save, rat, gameTime);
                 return string.IsNullOrEmpty(saleReason) ? "not eligible for sale" : saleReason;
             }
-            if (EnclosureSystem.IsPregnant(save, rat) || rat.reproductiveState == ReproductiveState.Pregnant)
-                return "pregnant";
             if (rat.nursing || EnclosureSystem.HasDependentPinkies(save, rat.id))
                 return "nursing with dependent pinkies";
             if (rat.pairingHabitatAssigned)
@@ -447,10 +523,23 @@ namespace RatHabitat
 
         public static bool CanSellRat(ColonySaveData save, RatData rat, long gameTime)
         {
+            if (rat == null || GrowthSystem.IsElderly(rat) || IsPregnantForSale(save, rat)) return false;
+            return CanSellRatIgnoringPregnancy(save, rat, gameTime);
+        }
+
+        private static bool CanSellRatIgnoringPregnancy(ColonySaveData save, RatData rat, long gameTime)
+        {
             if (rat == null || GrowthSystem.IsElderly(rat)) return false;
             if (!IsPup(rat)) return true;
             if (rat.ageDays < GameConfig.PupSaleMinimumAgeDays) return false;
             return IsFullyWeaned(save, rat, gameTime);
+        }
+
+        public static bool IsPregnantForSale(ColonySaveData save, RatData rat)
+        {
+            return rat != null && rat.sex == RatSex.Female &&
+                (EnclosureSystem.IsPregnant(save, rat) ||
+                 rat.reproductiveState == ReproductiveState.Pregnant);
         }
 
         /// <summary>
@@ -461,6 +550,7 @@ namespace RatHabitat
         public static string SaleRestrictionReason(ColonySaveData save, RatData rat, long gameTime)
         {
             if (rat == null) return "That rat is no longer available for sale.";
+            if (IsPregnantForSale(save, rat)) return "Pregnant rats cannot be sold.";
             if (GrowthSystem.IsElderly(rat)) return "Elderly rats cannot be sold.";
             if (!IsPup(rat)) return string.Empty;
 
@@ -632,6 +722,8 @@ namespace RatHabitat
 
             long namingGameTime = save.clock == null ? GameConfig.StartGameTimeMs : save.clock.gameTimeMs;
             var usedMarkedFamilies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            RatNameSystem.NameAllocationSession nameAllocation =
+                RatNameSystem.BeginNameAllocationSession(save);
             for (int index = 0; index < listingCount; index++)
             {
                 RatSex sex = index % 2 == 0 ? RatSex.Male : RatSex.Female;
@@ -644,7 +736,9 @@ namespace RatHabitat
                     : index == 1
                         ? "store_adult_female_" + cycle
                         : "store_adult_" + sexName + "_" + cycle + "_" + index;
-                string name = RatNameSystem.GenerateAvailableName(save, id, sex, namingGameTime, seed);
+                string name = nameAllocation == null
+                    ? RatNameSystem.GenerateAvailableName(save, id, sex, namingGameTime, seed)
+                    : nameAllocation.GenerateAvailableName(id, sex, namingGameTime, seed);
                 save.storeRatListings.Add(CreateListing(
                     id, sex, name, family, random, sharedBaseline, qualityCap));
             }

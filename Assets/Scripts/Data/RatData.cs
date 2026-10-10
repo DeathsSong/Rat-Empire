@@ -144,12 +144,16 @@ namespace RatHabitat
     [Serializable]
     public class GenotypeData
     {
+        // Separate optional locus preserves the existing four coat-locus
+        // keys/seeds and their saved appearances. Missing legacy data = Hr/Hr.
+        public LocusData hairless;
         public List<LocusData> loci = new List<LocusData>();
         public List<MutationRecordData> mutations = new List<MutationRecordData>();
 
         public GenotypeData Clone()
         {
             var copy = new GenotypeData();
+            copy.hairless = hairless == null ? null : hairless.Clone();
             if (loci != null)
             {
                 foreach (var locus in loci)
@@ -177,6 +181,7 @@ namespace RatHabitat
     [Serializable]
     public class PhenotypeData
     {
+        public bool hairless;
         public bool furRevealed;
         public string coatColorId;
         public string coatColorLabel;
@@ -219,6 +224,13 @@ namespace RatHabitat
         // genotype still remains authoritative for inheritance and albino
         // masking; this field keeps the visual phenotype stable across reloads.
         public string markingFamily;
+        // Optional inherited display-color overrides. Empty values preserve
+        // the legacy ID/genotype-derived single-color appearance. Offspring
+        // that inherit a rare two-parent marking store both colors/families so
+        // save/load and visual refreshes never reroll the result.
+        public string markingColorHex;
+        public string secondaryMarkingFamily;
+        public string secondaryMarkingColorHex;
         // Presentation-only coat variation derived from the stable rat ID and
         // genotype. The B/C/D loci remain authoritative; these persisted
         // values keep the expanded natural palette stable across reloads.
@@ -238,6 +250,9 @@ namespace RatHabitat
         // enclosure reconciliation cannot infer a different destination.
         public bool pairingHabitatAssigned;
         public bool nursing;
+        // Active litter whose pinkies this mother is nursing. Older saves omit
+        // this and safely fall back to the shared nest center.
+        public string nursingLitterId;
         // Persisted nursing interaction state. nursingUntil is the biological
         // weaning deadline; these fields describe the short visible care
         // interaction and must not be confused with it.
@@ -320,6 +335,10 @@ namespace RatHabitat
         // the birth or turning the due timestamp into a teleport instruction.
         public bool birthApproachStarted;
         public long birthApproachStartedAt;
+        // Additional due mothers are persisted in the tank's nest queue. They
+        // remain pregnant and stationary until the active caregiver position
+        // is released; absent in older saves and therefore safely false.
+        public bool birthWaitingForNest;
         // Birth resolution is a persisted, retryable transaction. A litter
         // may be prepared while the pregnancy is still pending; only after
         // that prepared result is saved can the pregnancy be finalized.
@@ -438,12 +457,27 @@ namespace RatHabitat
 
         public static bool SetFavorite(ColonySaveData save, string ratId, bool isFavorite)
         {
+            string reason;
+            return SetFavorite(save, ratId, isFavorite, out reason);
+        }
+
+        public static bool SetFavorite(ColonySaveData save, string ratId, bool isFavorite, out string reason)
+        {
+            reason = "That rat is no longer available.";
             if (save == null || save.rats == null || string.IsNullOrEmpty(ratId)) return false;
             for (int index = 0; index < save.rats.Count; index++)
             {
                 RatData rat = save.rats[index];
                 if (rat == null || !string.Equals(rat.id, ratId, StringComparison.Ordinal)) continue;
+                if (isFavorite && rat.enclosure == RatEnclosure.ForSale)
+                {
+                    // A star tap never moves a rat or bypasses the previous
+                    // tank's return-capacity check. Use the return action first.
+                    reason = "Remove this rat from the For Sale Tank before marking it as a favorite.";
+                    return false;
+                }
                 rat.isFavorite = isFavorite;
+                reason = string.Empty;
                 return true;
             }
             return false;
