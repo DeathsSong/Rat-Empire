@@ -1861,15 +1861,21 @@ namespace RatHabitat
             {
                 foreach (var rat in game.Save.rats)
                 {
-                    if (rat == null) continue;
-                    if (rat.sex == RatSex.Female) femaleName = ColonyFactory.DisplayName(rat);
-                    else if (rat.sex == RatSex.Male) maleName = ColonyFactory.DisplayName(rat);
+                    if (!ColonyFactory.IsBeginnerFounder(rat)) continue;
+                    // Welcome copy uses saved founder names without the display-only
+                    // sex symbols; leave shared name formatting and saved names alone.
+                    string name = (rat.name ?? string.Empty).Replace("♀", string.Empty)
+                        .Replace("♂", string.Empty).Trim();
+                    if (string.IsNullOrEmpty(name)) continue;
+                    if (rat.sex == RatSex.Female) femaleName = name;
+                    else if (rat.sex == RatSex.Male) maleName = name;
                 }
             }
-            AddText(welcomeCard, "Welcome to Rat Empire!", 22, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
-            AddText(welcomeCard, "You're starting with " + femaleName + " and " + maleName + " in a small tank. Take some time to get to know them, watch their health and fertility, and move them into the Pairing Tank when you're ready to begin breeding.", 15, Color.white, TextAnchor.UpperLeft);
-            AddText(welcomeCard, "You can earn money by managing your colony, improve it with upgrades, and watch your rat family grow over time. Have fun building your little empire!", 14, new Color(0.78f, 0.86f, 0.82f), TextAnchor.UpperLeft);
-            AddButtonTo(welcomeCard, "Start Playing", true, CloseWelcome, new Color(0.16f, 0.38f, 0.33f), 46f);
+            AddText(welcomeCard, "Say hello to your first little pair!", 22, new Color(0.98f, 0.78f, 0.32f), TextAnchor.UpperLeft).fontStyle = FontStyle.Bold;
+            AddText(welcomeCard, femaleName + " and " + maleName + " are the founding rats of your colony. They’re already getting comfortable in the Pairing Habitat, where they can get to know each other and, when the time is right, start a family.\n\n" +
+                "Select either rat to see what makes them special—then keep an eye on their traits, health, and fertility. Their future pups will inherit little pieces of both parents, so every new rat has a story of its own.",
+                15, Color.white, TextAnchor.UpperLeft);
+            AddButtonTo(welcomeCard, "Say Hello", true, CloseWelcome, new Color(0.16f, 0.38f, 0.33f), 46f);
         }
 
         private void BuildSettingsPopup()
